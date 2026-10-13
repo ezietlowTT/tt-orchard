@@ -340,13 +340,36 @@ def test_equal_candidates_end_in_repo_name_order_whatever_the_input_order():
     assert order_of(forward) == order_of(backward) == ["g/aa", "g/mm", "g/zz"]
 
 
-def test_a_sibling_fine_tune_is_inferred_with_the_sibling_reason():
-    url = ("https://huggingface.co/api/models?filter=base_model:finetune:g/base&sort=downloads&direction=-1&limit="
+SIB_URL = ("https://huggingface.co/api/models?filter=base_model:finetune:g/base&sort=downloads&direction=-1&limit="
            f"{lineage.SIBLING_LIMIT}")
-    w = world({url: [{"id": "g/sib"}], cfg_url("g/sib"): {**CFG, "num_hidden_layers": 60}})
-    r = build(w, installed=[Installed("tt/sib", "g/sib", "6", 1)])
-    sib = [c for c in r["candidates"] if c["repo"] == "g/sib"][0]
+
+
+def sibling_row(cfg):
+    """The report row for an installed sibling `g/sib` whose config.json is `cfg` (None: unreadable)."""
+    routes = {SIB_URL: [{"id": "g/sib"}]}
+    routes[cfg_url("g/sib")] = cfg if cfg is not None else FetchError("HTTP 404 at x")
+    r = build(world(routes), installed=[Installed("tt/sib", "g/sib", "6", 1)])
+    return [c for c in r["candidates"] if c["repo"] == "g/sib"]
+
+
+def test_a_sibling_with_the_same_decisive_config_is_inferred_with_the_sibling_reason():
+    (sib,) = sibling_row(CFG)
     assert sib["confidence"] == "inferred" and sib["why"] == "another fine-tune of g/base"
+
+
+def test_a_sibling_whose_decisive_config_differs_is_weak_and_says_which_keys():
+    (sib,) = sibling_row({**CFG, "num_hidden_layers": 60})
+    assert sib["confidence"] == "weak"
+    assert "another fine-tune of g/base" in sib["why"] and "num_hidden_layers" in sib["why"]
+
+
+def test_a_sibling_of_another_architecture_family_is_left_out():
+    assert sibling_row({**CFG, "model_type": "llama"}) == []
+
+
+def test_a_sibling_whose_config_cannot_be_read_stays_inferred_on_the_relationship_alone():
+    (sib,) = sibling_row(None)
+    assert sib["confidence"] == "inferred"
 
 
 def test_error_text_from_a_bundle_manifest_and_hub_listing_is_cleaned():

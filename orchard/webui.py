@@ -817,9 +817,15 @@ class WebApp:
         stage0 = None
         rec = (load(run / "stages" / "0" / "delta.json") or {}).get("base_research")
         if isinstance(rec, dict):
-            stage0 = {k: (self.redact(rec[k]) if isinstance(rec.get(k), str) else
-                          rec[k] if isinstance(rec.get(k), bool) else None)
-                      for k in ("candidate", "estimated_class", "measured_class", "agreed")}
+            text = lambda v: self.redact(v) if isinstance(v, str) else None            # noqa: E731
+            cand = rec.get("candidate")
+            # The template writes {"repo", "confidence"}; an older record may hold the repo id alone.
+            cand = ({"repo": text(cand.get("repo")), "confidence": text(cand.get("confidence"))}
+                    if isinstance(cand, dict) else {"repo": text(cand), "confidence": None} if isinstance(cand, str)
+                    else None)
+            stage0 = {"candidate": cand, "estimated_class": text(rec.get("estimated_class")),
+                      "measured_class": text(rec.get("measured_class")),
+                      "agreed": rec["agreed"] if isinstance(rec.get("agreed"), bool) else None}
         return {"report": self.research_view(load(run / "research" / "base-candidates.json")), "stage0": stage0}
 
     def preflight(self, model, base=None, mode=None, research=None) -> dict:

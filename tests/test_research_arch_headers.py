@@ -125,6 +125,7 @@ def test_an_index_with_a_weight_map_that_is_not_an_object_is_an_error_row_and_th
     r = headers.read_model(f, "g/it", ["model.safetensors.index.json", "model-00001-of-00001.safetensors"])
     assert any("index" in u.reason for u in r.unavailable)
     assert r.data["shards"] == ["model-00001-of-00001.safetensors"]
+    assert any("index" in e for e in r.data["errors"])          # so the estimate is unknown, not a guess
 
 
 @pytest.mark.parametrize("name", ["../evil.safetensors", "a/b.safetensors", "x y.safetensors", ".safetensors"])
@@ -192,3 +193,31 @@ def test_a_header_read_error_on_either_side_makes_the_estimate_unknown(side):
     r = headers.estimate_class(CFG, new, CFG, cand)
     assert r["class"] == "unknown"
     assert r["reasons"] and any("00002" in x or "read" in x.lower() or "header" in x.lower() for x in r["reasons"])
+
+
+class BrokenIndexFetch(RangeFetch):
+    def json(self, url):
+        raise FetchError("HTTP 500 at " + url)
+
+
+def test_an_index_that_cannot_be_read_is_an_error_not_a_silent_fallback_to_file_names():
+    f = BrokenIndexFetch({"model-00001-of-00001.safetensors": header_bytes(T), "joint_head.safetensors": header_bytes(T)})
+    r = headers.read_model(f, "g/it", ["model.safetensors.index.json", "model-00001-of-00001.safetensors",
+                                       "joint_head.safetensors"])
+    assert any("index" in e for e in r.data["errors"])
+
+
+def test_an_index_that_lists_none_of_the_repos_safetensors_is_an_error():
+    f = RangeFetch({"model-00001-of-00001.safetensors": header_bytes(T)},
+                   indexes={"model.safetensors.index.json": {"weight_map": {"a": "elsewhere.safetensors"}}})
+    r = headers.read_model(f, "g/it", ["model.safetensors.index.json", "model-00001-of-00001.safetensors"])
+    assert any("index" in e for e in r.data["errors"])
+
+
+def test_a_broken_index_makes_the_class_estimate_unknown():
+    f = BrokenIndexFetch({"model-00001-of-00001.safetensors": header_bytes(T)})
+    new = headers.read_model(f, "g/it", ["model.safetensors.index.json", "model-00001-of-00001.safetensors"])
+    other = headers.read_model(RangeFetch({"model-00001-of-00001.safetensors": header_bytes(T)}), "g/base",
+                               ["model-00001-of-00001.safetensors"])
+    est = headers.estimate_class({"model_type": "g"}, new.data, {"model_type": "g"}, other.data)
+    assert est["class"] == "unknown"

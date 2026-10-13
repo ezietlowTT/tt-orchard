@@ -877,7 +877,8 @@ function researchBlock(view, stage0) {
   if (stage0) {
     box.append(h("p", { class: "research-line" },
       h("strong", {}, "Stage 0 measured: "), `${stage0.measured_class || "unknown"} against the estimate ${stage0.estimated_class || "none"}`,
-      stage0.candidate ? ` (compared with ${stage0.candidate})` : "",
+      stage0.candidate && stage0.candidate.repo
+        ? ` (compared with ${stage0.candidate.repo}${stage0.candidate.confidence ? `, ${stage0.candidate.confidence}` : ""})` : "",
       stage0.agreed === true ? " · agreed" : stage0.agreed === false ? " · did not agree; the measurement decides" : ""));
   }
   if (!view) return box;

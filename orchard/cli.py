@@ -231,14 +231,21 @@ def _watch(run_dir: Path, args, style, out) -> int:
 UI_RESEARCH_TTL_S = 300
 
 
-def _ui_preflight(cfg):
+def _ui_preflight_for():
+    """The `preflight_for` the UI server uses. The server builds the preflight callable again for every request
+    (and for every mode), so the research memo is made once here and handed to each callable."""
+    memo: dict = {}
+    return lambda cfg: _ui_preflight(cfg, memo)
+
+
+def _ui_preflight(cfg, memo=None):
     """The preflight the UI runs: the same checks as `bringup --dry-run`, with `--base` resolved without
     installing anything (an install happens only when the run itself starts). The base-model research runs
     as in a dry run: read-only requests, no cache and no file. The page asks again after every edit of the
     form, so one answer is kept for UI_RESEARCH_TTL_S per model, base and option; GitHub allows 60
     unauthenticated requests an hour and one research run makes about 6."""
     from orchard.research import Options
-    memo: dict = {}
+    memo = {} if memo is None else memo
 
     def run(model, base, research=None):
         options = Options(cache_dir=None, offline=research == "offline",
@@ -311,7 +318,7 @@ def _ui(args, env, home, out) -> int:
         cfg = bringup_config.load(path)
     except (NoConfig, bringup_config.BringupConfigError) as exc:
         return _refuse(str(exc))
-    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight_for=_ui_preflight,
+    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight_for=_ui_preflight_for(),
                        lan=args.lan, toplike=_toplike_argv(args.toplike))
     try:
         server = webui.make_server(app, host, args.port)

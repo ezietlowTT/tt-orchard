@@ -62,7 +62,7 @@ A test fails if the two disagree on a fixture.
 ### 3.1 Confidence
 
 - `stated`: the card or `--base` names it.
-- `inferred`: the card names none, and the architecture fields and tensor shapes match.
+- `inferred`: the card names none, and the architecture fields and tensor shapes match. A sibling fine-tune of the stated base is judged the same way from its own `config.json`: `weak` when decisive values differ, left out when its architecture family differs, and `inferred` on the relationship alone when its config cannot be read.
 - `weak`: only a name or tag overlap.
 
 Stage 0 treats `stated` and `inferred` as comparison targets. A `weak` candidate appears in the report

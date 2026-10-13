@@ -558,7 +558,7 @@ anything large. It reads, with no Hugging Face token:
 
 The result is `<run dir>/research/base-candidates.md` and `.json`. Each row says where it came from and how
 sure it is: `stated` (the card or `--base` names it), `inferred` (same architecture family and the same
-decisive config values) or `weak` (same family only). Only a stated or inferred candidate with an installed v6
+decisive config values) or `weak` (same family only; a sibling fine-tune of the base is judged by its own config in the same way). Only a stated or inferred candidate with an installed v6
 bundle is chosen on its own. Stage 0 gets a shorter file, `base-candidates.stage0.json`, as the input
 `base_candidates`. It lists each candidate's model id, confidence, group, estimated class and bundle names, and
 none of the text fetched from the internet; the full report stays in `base-candidates.json` for you. Stage 0
@@ -824,7 +824,7 @@ does not change.
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
 
 A sidecar is found by name: the backbone is the shards the model's `model.safetensors.index.json` lists (or
-`model*.safetensors` without an index), and any other weights file the nearest model does not have is a
+`model*.safetensors` without an index; an index that cannot be read is reported and the class estimate is `unknown`), and any other weights file the nearest model does not have is a
 sidecar. `delta.json` lists each sidecar with its size, sha256, tensor count and tensor names, and each
 top-level `.py` file in the repo with its sha256 (`code_files`). The triage script reads headers and
 hashes files. It never imports or runs a code file.

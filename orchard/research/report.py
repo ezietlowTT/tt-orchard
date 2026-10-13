@@ -156,8 +156,14 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
             if cfg is not None and new_cfg else no_match
         if repo in stated:
             confidence, why = STATED, ("named with --base" if repo == base_override else "named as the base model")
+        elif repo in sibling_ids and not cmp["confidence"] and cfg is not None and new_cfg:
+            continue                          # a fine-tune of the base in another architecture family: not a candidate
         elif repo in sibling_ids:
-            confidence, why = INFERRED, f"another fine-tune of {stated[0]}"
+            # A sibling shares the base, which says nothing about this model's own architecture: when both configs
+            # are known the comparison decides; when one is missing the relationship alone stays "inferred".
+            confidence = cmp["confidence"] or INFERRED
+            why = f"another fine-tune of {stated[0]}" + (
+                "" if confidence == INFERRED else ", other decisive config values: " + ", ".join(cmp["differing"]))
         elif cmp["confidence"]:
             confidence = cmp["confidence"]
             why = ("same architecture family and the same decisive config values" if confidence == INFERRED

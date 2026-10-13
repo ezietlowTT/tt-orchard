@@ -128,12 +128,12 @@ def test_a_run_shows_its_report_and_stage_0s_comparison(root):
     (run / "research" / "base-candidates.json").write_text(json.dumps(REPORT))
     (run / "stages" / "0").mkdir(parents=True)
     (run / "stages" / "0" / "delta.json").write_text(json.dumps(
-        {"base_research": {"candidate": "google/g-it", "estimated_class": "weights-only",
-                           "measured_class": "weights-only", "agreed": True}}))
+        {"base_research": {"candidate": {"repo": "google/g-it", "confidence": "inferred"},
+                           "estimated_class": "weights-only", "measured_class": "weights-only", "agreed": True}}))
     out = make_app(root).run_research("org--a")
     assert out["report"]["choices"][0]["name"] == "stisi/g-it-p150"
-    assert out["stage0"] == {"candidate": "google/g-it", "estimated_class": "weights-only",
-                             "measured_class": "weights-only", "agreed": True}
+    assert out["stage0"] == {"candidate": {"repo": "google/g-it", "confidence": "inferred"},
+                             "estimated_class": "weights-only", "measured_class": "weights-only", "agreed": True}
 
 
 def test_a_run_without_research_says_so(root):
@@ -209,3 +209,38 @@ def test_the_ui_preflight_remembers_an_answer_for_a_while(monkeypatch):
     clock[0] += cli.UI_RESEARCH_TTL_S + 1
     run("org/new", None)
     assert len(calls) == 4
+
+
+def test_stage_0s_candidate_is_the_object_the_template_writes_and_is_bounded_and_redacted(root):
+    run = write_ledger(root / "org--a")
+    (run / "stages" / "0").mkdir(parents=True)
+    delta = run / "stages" / "0" / "delta.json"
+    delta.write_text(json.dumps({"base_research": {"candidate": {
+        "repo": f"{HOME}/x", "confidence": "inferred", "extra": "dropped"}, "agreed": True}}))
+    cand = make_app(root).run_research("org--a")["stage0"]["candidate"]
+    assert set(cand) == {"repo", "confidence"} and HOME not in cand["repo"]
+    delta.write_text(json.dumps({"base_research": {"candidate": "org/plain", "agreed": True}}))
+    assert make_app(root).run_research("org--a")["stage0"]["candidate"] == {"repo": "org/plain", "confidence": None}
+    delta.write_text(json.dumps({"base_research": {"candidate": ["x"], "agreed": True}}))
+    assert make_app(root).run_research("org--a")["stage0"]["candidate"] is None
+
+
+def test_the_ui_shares_one_research_memo_across_requests_and_configs(monkeypatch):
+    """The page's server builds the preflight callable again for every request (and for every mode), so the memo
+    must live outside it: edits in the form must not repeat the hub and GitHub calls."""
+    import io
+    from pathlib import Path
+    from types import SimpleNamespace
+    cli, calls, seen = _ui(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(cli.webui if hasattr(cli, "webui") else __import__("orchard.webui", fromlist=["x"]),
+                        "WebApp", lambda **kw: captured.update(kw) or SimpleNamespace(hostname="h"), raising=True)
+    monkeypatch.setattr("orchard.webui.make_server", lambda *a, **k: (_ for _ in ()).throw(OSError("stop here")))
+    monkeypatch.setattr(cli, "find_config", lambda *a, **k: Path("/x/bringup.toml"))
+    monkeypatch.setattr(cli.bringup_config, "load", lambda p: SimpleNamespace(runs_root=Path("/x")))
+    args = SimpleNamespace(host=None, lan=False, port=1, config=None, toplike=None)
+    cli._ui(args, {}, Path("/h"), io.StringIO())
+    for_cfg = captured["preflight_for"]
+    for_cfg(object())("org/new", None)
+    for_cfg(object())("org/new", None)                            # a second request, a second callable
+    assert len(calls) == 1

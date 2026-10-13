@@ -45,7 +45,9 @@ def shard_header(fetch, repo: str, name: str) -> dict:
 
 def read_model(fetch, repo: str, files: list[str]) -> Result:
     """The backbone's tensors from the headers of its shards. `files` is the repo's file list from the hub.
-    The backbone is the shards the index lists, or `model*.safetensors` when there is no index."""
+    The backbone is the shards the index lists, or `model*.safetensors` when there is no index. An index the repo
+    advertises but that cannot be used still falls back to the file names, and says so in `errors`, so the class
+    estimate is `unknown` instead of a confident guess about which shards are the backbone."""
     res = Result(data={"tensors": {}, "shards": [], "extra_safetensors": [], "errors": []})
     if not valid_id(repo):
         res.unavailable.append(Unavailable("headers", f"{clean(repo, 60)!r} is not a model id"))
@@ -63,10 +65,14 @@ def read_model(fetch, repo: str, files: list[str]) -> Result:
             if isinstance(weight_map, dict):
                 listed = {v for v in weight_map.values() if isinstance(v, str)}
                 shards = [n for n in safe if n in listed] or None
+                if shards is None:
+                    res.data["errors"].append(f"{INDEX_NAME}: lists none of the repository's safetensors files")
             else:
                 res.unavailable.append(Unavailable("headers", f"{repo}: the index has no weight_map object"))
-        except FetchError:
+                res.data["errors"].append(f"{INDEX_NAME}: no weight_map object")
+        except FetchError as exc:
             shards = None
+            res.data["errors"].append(f"{INDEX_NAME}: {getattr(exc, 'reason', exc)}")
     if shards is None:
         pattern = triage_rules.load().BACKBONE_SHARD
         shards = [n for n in safe if pattern.fullmatch(n)] or safe

@@ -854,3 +854,17 @@ None of the fine-tunes is small; "small" was read as a small change from the bas
   The stale chip state is a hypothesis that fits the evidence and the pass after the reset; it was not isolated (no run with
   only the reset changed and a control without it). Harness gap, not fixed here: before a test that opens more chips than the
   coder's board, reset the chips earlier tests used.
+
+## 2026-10-13: fixes for the review of PR 6 (version 0.5.2)
+Prompt (operator): "fix requests on PR 6". The automated review left four findings, each checked against the code and each real:
+- The UI's five-minute research memo was rebuilt for every request, because the server builds the preflight callable again each
+  time (and per mode), so form edits repeated the hub and GitHub calls. The memo now lives in `_ui_preflight_for()`.
+- An index the repo advertises but that is unreadable, lists none of its safetensors files or has no `weight_map` object fell back
+  to file names silently, so the class estimate could be a confident guess. It now adds an error and the estimate is `unknown`.
+- A sibling fine-tune was always `inferred`, whatever its config. Now the architecture comparison decides (`weak` with the
+  differing keys, left out when the family differs); with no readable config it stays `inferred` on the relationship alone. The
+  earlier test used a sibling with a different layer count and asserted `inferred`, which is the behaviour the review objected to.
+- The page dropped stage 0's `candidate` because the template writes an object `{repo, confidence}` and the filter accepted only
+  strings; my test used a string. The view now keeps a bounded, redacted object and the page shows both fields.
+- Each fix has a test that failed first; 10 mutations, all red. Lesson: the UI test used the shape I assumed, not the shape the
+  producer writes. Read the producing code when writing a test for a consumer.
