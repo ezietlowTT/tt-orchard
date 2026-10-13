@@ -80,6 +80,7 @@ from pathlib import Path
 HERE_DIR = Path(__file__).resolve().parent
 EVIDENCE = HERE_DIR / "evidence"
 CONFIG_KEYS = ("run_dir", "model_id", "model_snapshot", "nearest_model_id", "nearest_snapshot")
+REPORT_MAX_BYTES = 2 * 1024 * 1024        # the research report is read only up to this size
 OPTIONAL_KEYS = ("base_candidates",)      # read when present: the research report (research/base-candidates.json)
 
 # The text config values that decide whether the nearest model's code can run the new weights.
@@ -229,6 +230,12 @@ def with_revision(model_id: str, snapshot: str) -> str:
     return f"{model_id}@{snap.name}"
 
 
+# The estimate comes from headers and configs alone, so it cannot name a sidecar. A measured
+# weights+sidecar model has a matching backbone, which is what the estimate describes, so it is compared
+# as weights-only. `measured_class` still records the real measured class.
+SEEN_BY_HEADERS = {"weights+sidecar": "weights-only"}
+
+
 def report_text(value):
     """A string from the research report, which is fetched text: one line, control characters removed,
     at most 300 characters. Anything that is not a string gives None. It is only recorded, never used as a
@@ -245,7 +252,11 @@ def base_research(cfg: dict, nearest_id: str, measured_class: str):
     path = cfg.get("base_candidates")
     if not isinstance(path, str) or not path.strip():
         return None
-    data, _ = read_json(Path(path))
+    try:
+        too_big = Path(path).stat().st_size > REPORT_MAX_BYTES
+    except OSError:
+        too_big = False
+    data, _ = (None, None) if too_big else read_json(Path(path))
     rows = data.get("candidates") if isinstance(data, dict) else None
     repo = nearest_id.split("@", 1)[0]
     row = (next((r for r in rows if isinstance(r, dict) and r.get("repo") == repo), None)
@@ -254,7 +265,7 @@ def base_research(cfg: dict, nearest_id: str, measured_class: str):
     est = report_text(estimate.get("class") if isinstance(estimate, dict) else None) or None
     return {"candidate": ({"repo": repo, "confidence": report_text(row.get("confidence"))} if row else None),
             "estimated_class": est, "measured_class": measured_class,
-            "agreed": (est == measured_class) if est else None}
+            "agreed": (est == (SEEN_BY_HEADERS.get(measured_class, measured_class))) if est else None}
 
 
 def read_json(path: Path):
