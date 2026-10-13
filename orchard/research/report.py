@@ -9,6 +9,7 @@ or inferred candidate in group 0 is `selected`. Nothing here asks a model; every
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -176,7 +177,7 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     for cand in [c for c in ordered if c["confidence"] != WEAK][:MAX_ESTIMATES]:
         try:
             info, err = hub_info(cand["repo"])
-        except Exception as exc:                              # the caller's lookup failing is a gap, not a crash
+        except Exception as exc:                              # a failing lookup becomes a row in the report
             info, err = None, type(exc).__name__
         if info is None:
             res.unavailable.append(Unavailable("class estimate", clean(f"{cand['repo']}: {err}")))
@@ -242,11 +243,68 @@ def markdown(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+STAGE0_FILE = "base-candidates.stage0.json"
+CLASSES = tuple(CLASS_RANK)
+CONFIDENCES = tuple(CONFIDENCE_RANK)
+
+
+def _enum(value, allowed):
+    return value if isinstance(value, str) and value in allowed else None
+
+
+def _id(value):
+    return value if valid_id(value) else None
+
+
+def stage0_view(report: dict) -> dict:
+    """What the stage 0 agent may read: candidates only. The full report holds text from the internet (issue and
+    pull request titles, claims, reasons, config values), which an agent must not read as instructions. Every
+    string in this view is a model id that passed `valid_id`, one of the fixed confidence values, or a class
+    name; anything else becomes None, and a candidate whose repo is not a model id is left out."""
+    rows = report.get("candidates") if isinstance(report, dict) else None
+    out = []
+    for c in rows if isinstance(rows, list) else []:
+        if not isinstance(c, dict) or _id(c.get("repo")) is None:
+            continue
+        est = c.get("class_estimate")
+        bundles = c.get("bundles")
+        out.append({"repo": c["repo"], "confidence": _enum(c.get("confidence"), CONFIDENCES),
+                    "group": c["group"] if isinstance(c.get("group"), int) else None,
+                    "class_estimate": _enum(est.get("class") if isinstance(est, dict) else None, CLASSES),
+                    "bundles": [b["name"] for b in bundles if isinstance(b, dict) and _id(b.get("name"))]
+                    if isinstance(bundles, list) else []})
+    sel = report.get("selected") if isinstance(report, dict) else None
+    selected = None
+    if isinstance(sel, dict) and _id(sel.get("repo")) and _id(sel.get("bundle")):
+        selected = {"repo": sel["repo"], "bundle": sel["bundle"],
+                    "confidence": _enum(sel.get("confidence"), CONFIDENCES), "class": _enum(sel.get("class"), CLASSES)}
+    return {"model": _id(report.get("model")) if isinstance(report, dict) else None,
+            "selected": selected, "candidates": out}
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """Write beside the target and rename over it, so a reader sees the old file or the whole new one."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def write(run_dir, report: dict) -> Path:
-    """`<run_dir>/research/base-candidates.json` and `.md`. Nothing else is written."""
+    """`<run_dir>/research/base-candidates.json`, `.md` and `base-candidates.stage0.json` (the view stage 0
+    reads). Nothing else is written. Each file is replaced atomically, and all three texts are built before the
+    first file is touched. A resume builds the report again and overwrites these files; `Evidence.fetched_at`
+    in them is the time of that build, because the cache stores the fetch time but the evidence is stamped
+    from `fetch.now()` when it is made."""
     out = Path(run_dir) / RESEARCH_DIR
     out.mkdir(parents=True, exist_ok=True)
     path = out / "base-candidates.json"
-    path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (out / "base-candidates.md").write_text(markdown(report), encoding="utf-8")
+    texts = {path: json.dumps(report, indent=2, sort_keys=True) + "\n",
+             out / "base-candidates.md": markdown(report),
+             out / STAGE0_FILE: json.dumps(stage0_view(report), indent=2, sort_keys=True) + "\n"}
+    for target, text in texts.items():
+        _write_atomic(target, text)
     return path

@@ -905,3 +905,38 @@ def test_a_measured_full_port_does_not_agree_with_a_weights_only_estimate(text_c
     assert run_triage(stage).returncode == 0
     br = delta(stage)["base_research"]
     assert br["measured_class"] == "full-port" and br["agreed"] is False
+
+
+def write_view(stage, rows, **top):
+    """The file `bringup` hands stage 0 (research/base-candidates.stage0.json): a class string per candidate."""
+    path = stage.parent.parent / "research" / "base-candidates.stage0.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"model": "h/new", "selected": None, "candidates": rows, **top}))
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    cfg["base_candidates"] = str(path)
+    (stage / "triage_config.json").write_text(json.dumps(cfg))
+    return path
+
+
+VIEW_ROW = {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated", "group": 0, "class_estimate": "weights-only",
+            "bundles": ["tt/q"]}
+
+
+def test_the_stage_0_view_shape_is_read_too(text_case):
+    stage = text_case()
+    write_view(stage, [VIEW_ROW])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    assert br["candidate"] == {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated"}
+    assert (br["estimated_class"], br["measured_class"], br["agreed"]) == ("weights-only", "weights-only", True)
+
+
+def test_a_view_with_no_estimate_or_a_disagreeing_one_is_recorded_without_changing_the_decision(text_case):
+    stage = text_case()
+    write_view(stage, [{**VIEW_ROW, "class_estimate": "full-port"}])
+    run_triage(stage)
+    d = delta(stage)
+    assert d["base_research"]["agreed"] is False and d["path"] == "weights-only"
+    write_view(stage, [{**VIEW_ROW, "class_estimate": None}])
+    run_triage(stage)
+    assert delta(stage)["base_research"]["estimated_class"] is None

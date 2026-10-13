@@ -414,8 +414,8 @@ cp config/bringup.example.toml config/bringup.toml            # then edit it; CH
 tt-orchard bringup org/name --dry-run                         # the checks and the command; starts nothing
 tt-orchard bringup org/name                                   # check, fetch, run
 tt-orchard bringup org/name --base <bundle or model id>       # base the run on this model
-tt-orchard bringup org/name --offline                         # skip the base-model research; no lookups online
-tt-orchard bringup org/name --no-github                       # research without the GitHub searches
+tt-orchard bringup org/name --offline                         # skip the base-model research (the hub lookup and downloads still run)
+tt-orchard bringup org/name --no-github                       # research without the GitHub issue and code searches
 tt-orchard bringup org/name --refresh-research                # ignore answers cached by an earlier attempt
 tt-orchard watch org/name                                     # follow a run from another terminal
 tt-orchard ui                                                 # watch and control every run in a browser
@@ -555,13 +555,21 @@ anything large. It reads, with no Hugging Face token:
 The result is `<run dir>/research/base-candidates.md` and `.json`. Each row says where it came from and how
 sure it is: `stated` (the card or `--base` names it), `inferred` (same architecture family and the same
 decisive config values) or `weak` (same family only). Only a stated or inferred candidate with an installed v6
-bundle is chosen on its own. Stage 0 gets the file as the input `base_candidates` and records in
-`delta.json` whether its measured class agreed with the estimate. The measurement decides; the estimate is
-a hint.
+bundle is chosen on its own. Stage 0 gets a shorter file, `base-candidates.stage0.json`, as the input
+`base_candidates`. It lists each candidate's model id, confidence, group, estimated class and bundle names, and
+none of the text fetched from the internet; the full report stays in `base-candidates.json` for you. Stage 0
+measures the class and records in `delta.json` whether the estimate agreed. The estimate is recorded next to the
+measurement and changes neither the class nor the path.
 
-A source that cannot be reached is listed as unavailable in the report. `--offline` skips all of it.
-`--no-github` skips the GitHub searches and keeps the rest. `--refresh-research` ignores answers cached by an earlier attempt.
-`--dry-run` does the same lookups and prints what it finds, but keeps no cache and writes no file.
+A source that cannot be reached is listed as unavailable in the report. After one connection failure to a host
+(no route, a timeout), the remaining requests to that host fail at once. `--offline` skips the research and makes
+no request for it. The preflight's own hub lookup, `tt model search` and the download still run.
+`--no-github` skips the GitHub issue and pull request search and the GitHub code search. The listings of tt-metal's
+`models/` directories and its models README are still read. `--refresh-research` ignores answers cached by an
+earlier attempt. `--dry-run` does the same lookups as a real run (unless `--offline`) and prints what it finds. It
+keeps no cache and writes no report file. A real run writes its cache to `<run dir>/research/cache/` while the
+preflight runs, so a run that the preflight then blocks can leave that directory behind. It writes no report and
+starts nothing.
 
 ### 4.1 Before you start
 

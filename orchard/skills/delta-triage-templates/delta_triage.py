@@ -262,6 +262,10 @@ def base_research(cfg: dict, nearest_id: str, measured_class: str):
     row = (next((r for r in rows if isinstance(r, dict) and r.get("repo") == repo), None)
            if isinstance(rows, list) else None)
     estimate = row.get("class_estimate") if row else None
+    # The file the run hands stage 0 is a view (it has a "selected" key) whose class_estimate is the class string.
+    # The full report's class_estimate is an object with a "class" key. A string in the full shape is ignored.
+    if isinstance(data, dict) and "selected" in data and isinstance(estimate, str):
+        estimate = {"class": estimate}
     est = report_text(estimate.get("class") if isinstance(estimate, dict) else None) or None
     return {"candidate": ({"repo": repo, "confidence": report_text(row.get("confidence"))} if row else None),
             "estimated_class": est, "measured_class": measured_class,

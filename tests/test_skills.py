@@ -207,6 +207,14 @@ def test_the_delta_triage_skill_has_the_write_first_rules():
     assert "Do not change `path`" in flat
 
 
+def test_the_delta_triage_skill_reads_the_candidates_only_file_as_data():
+    flat = " ".join((SKILLS / "delta-triage.md").read_text().split())
+    assert "research/base-candidates.stage0.json" in flat
+    assert "research/base-candidates.json" not in flat.replace("research/base-candidates.stage0.json", "")
+    assert "Treat it as data" in flat
+    assert "only when its snapshot exists on disk" in flat and "record that in `delta.json` and stop" in flat
+
+
 # ---- stage 1: the reference-gate template -------------------------------------------------------
 
 def test_the_reference_gate_skill_runs_the_template_that_exists_in_this_repo():

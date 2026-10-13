@@ -87,10 +87,11 @@ def _parser() -> argparse.ArgumentParser:
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
     b.add_argument("--offline", action="store_true",
-                   help="do not look anything up online: the base-model research is skipped (the preflight's "
-                        "own hub lookup still happens)")
+                   help="skip the base-model research and make no request for it. The preflight's hub lookup, "
+                        "`tt model search` and any download still happen")
     b.add_argument("--no-github", action="store_true",
-                   help="skip the GitHub part of the base-model research")
+                   help="skip the GitHub issue and pull request search and the GitHub code search in the "
+                        "base-model research. tt-metal's model listings and README are still read")
     b.add_argument("--refresh-research", action="store_true",
                    help="ignore the cached answers from an earlier attempt of this run")
     b.add_argument("--mode", choices=bringup_config.MODES,
@@ -446,10 +447,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         base_snapshot = fetch.snapshot_dir(hf_home, base_data["base"], base_hub.sha)
     candidates_path = None
     # The report is written only after the preflight passed (a blocked run returned above) and never on a
-    # dry run. The model id is checked again here because --run-dir skips the slug check that guards the path.
+    # dry run. The research cache (<run dir>/research/cache) is different: the fetcher fills it during the
+    # preflight, before anyone knows the preflight passes, so a blocked run can leave that directory behind. The model id is checked again here because --run-dir skips the slug check that guards the path.
     if base_data.get("report") and not args.dry_run and research_types.valid_id(args.model):
         from orchard.research import report as research_report
-        candidates_path = research_report.write(run_dir, base_data["report"])
+        research_report.write(run_dir, base_data["report"])
+        # Stage 0 reads the candidates-only view. The full report (base-candidates.json) holds text from the
+        # internet and stays for the operator.
+        candidates_path = run_dir / research_report.RESEARCH_DIR / research_report.STAGE0_FILE
     inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
               **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,

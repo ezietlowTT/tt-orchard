@@ -26,7 +26,7 @@ README_URL = "https://raw.githubusercontent.com/" + METAL + "/main/models/README
 ISSUES_URL = "https://api.github.com/search/issues?q={q}&per_page={n}"
 GITHUB_PREFIX = "https://github.com/"
 README_ROW = re.compile(r"^\|\s*\[([^\]]+)\]\((https://[^)\s]+)\)")
-NOT_A_MODEL = frozenset({"common", "utils", "perf"})      # shared code in a bundle, not a port
+NOT_A_MODEL = frozenset({"common", "utils", "perf"})      # shared code in a bundle that is not a model port
 GH_TIMEOUT_S = 30
 MAX_ITEMS = 5
 
