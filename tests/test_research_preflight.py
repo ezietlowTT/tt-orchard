@@ -155,3 +155,68 @@ def test_default_signals_research_with_offline_makes_no_request(tmp_path):
     sig = pf.default_signals(cfg(tmp_path), research_options=Options(offline=True))
     rep = sig.research("a/b", None, None, [])
     assert rep["offline"] is True and rep["unavailable"] == [{"source": "research", "reason": "--offline"}]
+
+
+class RecordingFetcher:
+    """Stands in for orchard.research.http.Fetcher: keeps the constructor arguments and every URL asked for."""
+    instances = []
+
+    def __init__(self, cache_dir, **kw):
+        self.cache_dir, self.kw, self.urls, self.offline = cache_dir, kw, [], kw.get("offline", False)
+        self.refresh = kw.get("refresh", False)
+        RecordingFetcher.instances.append(self)
+
+    def now(self):
+        return "t"
+
+    def json(self, url, **kw):
+        from orchard.research.http import FetchError
+        self.urls.append(url)
+        if url.endswith("/resolve/main/config.json"):
+            return {"model_type": "gemma4", "architectures": ["X"]}
+        if url.startswith("https://huggingface.co/api/models/"):
+            return {"id": "a/b", "tags": [], "cardData": {}}
+        raise FetchError("HTTP 404")
+
+    def get(self, url, **kw):
+        from orchard.research.http import FetchError
+        self.urls.append(url)
+        raise FetchError("HTTP 404")
+
+
+def run_real_research(tmp_path, monkeypatch, options):
+    """The real default_signals and the real report.build, with the network, `tt model search` and `gh` faked."""
+    from test_preflight import cfg
+    from orchard import nearest
+    from orchard.research import http, ports
+    from orchard.research.types import Result
+    RecordingFetcher.instances = []
+    github_code_calls = []
+    monkeypatch.setattr(http, "Fetcher", RecordingFetcher)
+    monkeypatch.setattr(nearest, "search", lambda q: [])
+    monkeypatch.setattr(ports, "catalog", lambda *a, **kw: Result(data={"bundles": []}))
+    monkeypatch.setattr(ports, "github_code", lambda *a, **kw: github_code_calls.append(1) or Result())
+    sig = pf.default_signals(cfg(tmp_path), research_options=options)
+    sig.research("a/b", None, None, [])
+    (fetcher,) = RecordingFetcher.instances
+    return fetcher, github_code_calls
+
+
+def test_the_real_default_signals_hand_the_options_to_the_fetcher_and_the_report(tmp_path, monkeypatch):
+    from orchard.research import Options
+    cache = tmp_path / "cache"
+    fetcher, github_code_calls = run_real_research(
+        tmp_path, monkeypatch, Options(cache_dir=cache, no_github=True, refresh=True))
+    assert fetcher.cache_dir == cache
+    assert fetcher.kw.get("refresh") is True and fetcher.kw.get("offline") is False
+    assert not any("search/issues" in u for u in fetcher.urls)
+    assert github_code_calls == []
+    assert any("models/demos" in u or "tt-metal" in u for u in fetcher.urls)     # the run did reach the ports step
+
+
+def test_without_no_github_the_issue_and_code_searches_are_made(tmp_path, monkeypatch):
+    from orchard.research import Options
+    fetcher, github_code_calls = run_real_research(tmp_path, monkeypatch, Options(cache_dir=tmp_path / "c"))
+    assert any("search/issues" in u for u in fetcher.urls)
+    assert github_code_calls == [1]
+    assert fetcher.kw.get("refresh") is False
