@@ -61,7 +61,7 @@ def _bundles(installed, search, family: str, fetch, res: Result) -> dict[str, di
             repo = manifest["weights"]["repo_id"]
             schema = str(manifest.get("schema_version", ""))
         except (FetchError, KeyError, TypeError, AttributeError) as exc:
-            res.unavailable.append(Unavailable("bundle manifest", f"{name}: {getattr(exc, 'reason', 'unreadable')}"))
+            res.unavailable.append(Unavailable("bundle manifest", clean(f"{name}: {getattr(exc, 'reason', 'unreadable')}")))
             continue
         if not valid_id(repo):
             continue
@@ -154,9 +154,12 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
                                                          len(c["differing"]), c["repo"]))
     new_model = None
     for cand in [c for c in ordered if c["confidence"] != WEAK][:MAX_ESTIMATES]:
-        info, err = hub_info(cand["repo"])
+        try:
+            info, err = hub_info(cand["repo"])
+        except Exception as exc:                              # the caller's lookup failing is a gap, not a crash
+            info, err = None, type(exc).__name__
         if info is None:
-            res.unavailable.append(Unavailable("class estimate", f"{cand['repo']}: {err}"))
+            res.unavailable.append(Unavailable("class estimate", clean(f"{cand['repo']}: {err}")))
             continue
         cand["download_gb"] = round(info.total_bytes / 1e9, 1)
         if new_model is None:

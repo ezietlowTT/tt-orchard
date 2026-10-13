@@ -3,6 +3,7 @@
 """The research report: ranking, the offline case, and the files it writes (orchard/research/report.py)."""
 import json
 import struct
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +11,7 @@ pytest.importorskip("tokenizers", reason="the class estimate uses the delta-tria
 
 from orchard import nearest, preflight as pf  # noqa: E402
 from orchard.nearest import Installed  # noqa: E402
-from orchard.research import report  # noqa: E402
+from orchard.research import lineage, report  # noqa: E402
 from orchard.research.http import FetchError  # noqa: E402
 
 NOW = "2026-10-12T00:00:00Z"
@@ -216,10 +217,14 @@ def test_search_that_raises_is_unavailable_and_the_rest_of_the_report_stands():
     assert r["candidates"] and any(u["source"] == "bundle search" for u in r["unavailable"])
 
 
-def test_the_report_is_json_and_contains_no_home_path():
-    r = build(world())
-    json.dumps(r)
-    assert "/home/" not in json.dumps(r)
+def test_the_report_is_json_and_a_home_path_in_fetched_text_is_replaced():
+    home = str(Path.home())
+    w = world({cfg_url("g/base"): FetchError(f"HTTP 500 at {home}/secret/x"),
+               manifest_url("o/gone"): FetchError(f"HTTP 500 at {home}/y"), api("o/gone"): {"siblings": []}})
+    r = build(w, search=lambda q: [{"name": "o/gone", "installed": False}],
+              hub_info=lambda repo: (None, f"failed in {home}/z"))
+    text = json.dumps(r)
+    assert home not in text and "[removed" in text
 
 
 def test_write_puts_json_and_markdown_in_the_run_directory_only(tmp_path):
@@ -259,7 +264,7 @@ def test_a_gated_base_is_unavailable_with_its_status_and_the_run_still_gets_an_a
     assert r["selected"]["repo"] == "g/base"      # an installed v6 bundle still serves the stated base
 
 
-def test_a_second_build_over_the_same_answers_gives_the_same_report():
+def test_build_is_deterministic_for_the_same_answers():  # the cache-resume case is tested with the real Fetcher in Task 7
     first, second = build(world()), build(world())
     assert first == second
 
@@ -269,3 +274,93 @@ def test_a_hub_listing_that_fails_is_unavailable_with_its_reason_and_leaves_no_e
     assert {"source": "class estimate", "reason": "g/base: HTTP 401"} in r["unavailable"]
     assert r["candidates"][0]["class_estimate"] is None and r["candidates"][0]["download_gb"] is None
     assert r["selected"]["repo"] == "g/base"
+
+
+# --- ranking keys: two candidates in one group that differ in exactly one key -----------------------------------
+
+class PerRepo(World):
+    """A World whose safetensors header depends on the repo, so two candidates can get different classes."""
+
+    def __init__(self, headers_by_repo, **tables):
+        super().__init__(**tables)
+        self.by_repo = headers_by_repo
+
+    def get(self, url, *, byte_range=None, **kw):
+        repo = url.split("huggingface.co/", 1)[1].rsplit("/resolve", 1)[0] if "huggingface.co/" in url else ""
+        if repo in self.by_repo:
+            self.urls.append(url)
+            data = self.by_repo[repo]
+            return data[byte_range[0]:byte_range[1] + 1] if byte_range else data
+        return super().get(url, byte_range=byte_range, **kw)
+
+
+def rank(repos, *, cfgs=None, card=(), order=None, headers_by_repo=None, extra=None, no_estimates=False):
+    """Build with every repo in `repos` served by an installed v6 bundle (group 0). `card` are the stated bases."""
+    cfgs = cfgs or {}
+    routes = {api("h/new"): hub_model("h/new"), cfg_url("h/new"): CFG,
+              **{cfg_url(r): cfgs.get(r, CFG) for r in repos}, **(extra or {})}
+    w = PerRepo(headers_by_repo or {}, json=routes, files={"model.safetensors": header(T) + b"\0" * 64})
+    table = Hub({r: FILES for r in [*repos, "h/new"]})
+    names = list(repos if order is None else order)
+    return report.build(model_id="h/new", hub=new_hub(*card), base_override=None, search=NO_SEARCH, hub_info=(lambda repo: (None, "HTTP 404")) if no_estimates else table,
+                        installed=[Installed(f"tt/{r.split('/')[1]}", r, "6", 1) for r in names], fetch=w, run=RUN,
+                        which=lambda n: None, no_github=True)
+
+
+def order_of(r):
+    return [c["repo"] for c in r["candidates"]]
+
+
+def test_a_stated_candidate_ranks_before_an_inferred_one_in_the_same_group():
+    # g/aa sorts first by name, so only the confidence key can put g/zz ahead.
+    r = rank(["g/aa", "g/zz"], card=["g/zz"])
+    assert [(c["repo"], c["confidence"]) for c in r["candidates"]] == [("g/zz", "stated"), ("g/aa", "inferred")]
+
+
+def test_fewer_differing_config_keys_rank_first_in_the_same_group():
+    # No class estimates here, so the number of differing keys is the only key that separates the two.
+    r = rank(["g/aa", "g/zz"], card=["g/aa", "g/zz"], cfgs={"g/aa": {**CFG, "num_hidden_layers": 31}}, no_estimates=True)
+    by = {c["repo"]: c for c in r["candidates"]}
+    assert len(by["g/aa"]["differing"]) == 1 and by["g/zz"]["differing"] == {}
+    assert order_of(r) == ["g/zz", "g/aa"]
+
+
+def test_a_weights_only_estimate_ranks_before_a_full_port_estimate_in_the_same_group():
+    extra_tensor = {**T, "model.layers.1.q.weight": ("BF16", [64, 64])}      # a text tensor the new model lacks
+    r = rank(["g/aa", "g/zz"], card=["g/aa", "g/zz"], headers_by_repo={"g/aa": header(extra_tensor) + b"\0" * 64})
+    by = {c["repo"]: c["class_estimate"]["class"] for c in r["candidates"]}
+    assert by == {"g/aa": "full-port", "g/zz": "weights-only"}
+    assert order_of(r) == ["g/zz", "g/aa"]
+
+
+def test_equal_candidates_end_in_repo_name_order_whatever_the_input_order():
+    forward = rank(["g/aa", "g/mm", "g/zz"], card=["g/aa", "g/mm", "g/zz"])
+    backward = rank(["g/aa", "g/mm", "g/zz"], card=["g/zz", "g/mm", "g/aa"], order=["g/zz", "g/mm", "g/aa"])
+    assert order_of(forward) == order_of(backward) == ["g/aa", "g/mm", "g/zz"]
+
+
+def test_a_sibling_fine_tune_is_inferred_with_the_sibling_reason():
+    url = ("https://huggingface.co/api/models?filter=base_model:finetune:g/base&sort=downloads&direction=-1&limit="
+           f"{lineage.SIBLING_LIMIT}")
+    w = world({url: [{"id": "g/sib"}], cfg_url("g/sib"): {**CFG, "num_hidden_layers": 60}})
+    r = build(w, installed=[Installed("tt/sib", "g/sib", "6", 1)])
+    sib = [c for c in r["candidates"] if c["repo"] == "g/sib"][0]
+    assert sib["confidence"] == "inferred" and sib["why"] == "another fine-tune of g/base"
+
+
+def test_error_text_from_a_bundle_manifest_and_hub_listing_is_cleaned():
+    junk = "bad\x07line\nbreak " + "y" * 600
+    w = world({manifest_url("o/gone"): FetchError(junk), api("o/gone"): {"siblings": []}})
+    r = build(w, search=lambda q: [{"name": "o/gone", "installed": False}], hub_info=lambda repo: (None, junk))
+    rows = [u for u in r["unavailable"] if u["source"] in ("bundle manifest", "class estimate")]
+    assert {u["source"] for u in rows} == {"bundle manifest", "class estimate"}
+    for u in rows:
+        assert "\x07" not in u["reason"] and "\n" not in u["reason"] and len(u["reason"]) <= 320
+
+
+def test_a_hub_info_that_raises_becomes_an_unavailable_row():
+    def boom(repo):
+        raise RuntimeError("hub is down")
+    r = build(world(), hub_info=boom)
+    assert {"source": "class estimate", "reason": "g/base: RuntimeError"} in r["unavailable"]
+    assert r["candidates"][0]["class_estimate"] is None and r["selected"]["repo"] == "g/base"
