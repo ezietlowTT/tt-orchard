@@ -83,6 +83,51 @@ def test_a_redirect_to_another_host_is_refused_and_a_hub_cdn_redirect_is_followe
     assert ok.full_url.startswith("https://us.aws.cdn.hf.co/")
 
 
+def test_a_redirect_from_https_down_to_http_is_refused():
+    req = urllib.request.Request(HF)
+    with pytest.raises(FetchError, match="redirect"):
+        _Redirects().redirect_request(req, None, 302, "Found", Message(), "http://huggingface.co/x")
+
+
+def test_the_production_opener_carries_the_guarded_redirect_handler():
+    handlers = Fetcher(None).opener.handlers
+    assert any(isinstance(h, _Redirects) for h in handlers)
+
+
+def test_after_one_connection_failure_later_requests_to_that_host_make_no_request(tmp_path):
+    other = "https://huggingface.co/api/models/c/d"
+    f = fetcher(tmp_path, {HF: OSError("network is unreachable"), other: Resp(b"{}")})
+    with pytest.raises(FetchError, match="unreachable"):
+        f.get(HF)
+    with pytest.raises(FetchError, match="network unreachable: huggingface.co"):
+        f.get(other)
+    assert len(f.opener.requests) == 1
+
+
+def test_a_connection_failure_on_one_host_does_not_stop_requests_to_another(tmp_path):
+    gh = "https://api.github.com/x"
+    f = fetcher(tmp_path, {HF: OSError("timed out"), gh: Resp(b"{}")})
+    with pytest.raises(FetchError):
+        f.get(HF)
+    assert f.get(gh) == b"{}"
+
+
+def test_a_value_error_does_not_mark_the_host_unreachable(tmp_path):
+    other = "https://huggingface.co/api/models/c/d"
+    f = fetcher(tmp_path, {HF: ValueError("bad url"), other: Resp(b"{}")})
+    with pytest.raises(FetchError, match="bad url"):
+        f.get(HF)
+    assert f.get(other) == b"{}"
+
+
+def test_an_http_error_does_not_mark_the_host_unreachable(tmp_path):
+    other = "https://huggingface.co/api/models/c/d"
+    f = fetcher(tmp_path, {HF: http_error(404), other: Resp(b"{}")})
+    with pytest.raises(FetchError, match="404"):
+        f.get(HF)
+    assert f.get(other) == b"{}"
+
+
 def test_a_range_must_be_answered_with_206(tmp_path):
     f = fetcher(tmp_path, {HF: Resp(b"12345678", status=200)})
     with pytest.raises(FetchError, match="range"):

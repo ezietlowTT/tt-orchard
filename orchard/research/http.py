@@ -61,6 +61,9 @@ class Fetcher:
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.opener = opener or urllib.request.build_opener(_Redirects)
         self.offline, self.refresh, self.timeout = offline, refresh, timeout
+        # Hosts that failed at the connection level (no route, DNS failure, timeout). Later requests to the
+        # same host fail at once, so a machine with no network does not wait out the timeout once per request.
+        self._unreachable: set[str] = set()
         self._now = now or (lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     def now(self) -> str:
@@ -92,7 +95,7 @@ class Fetcher:
             path.write_text(json.dumps({"url": url, "range": byte_range, "fetched_at": self.now(),
                                         "body": base64.b64encode(body).decode()}), encoding="utf-8")
         except OSError:
-            pass                                    # a cache that cannot be written is only a missed cache
+            pass                                    # an unwritable cache costs a repeat request on the next run
 
     # ---- requests --------------------------------------------------------------------------------
 
@@ -105,6 +108,8 @@ class Fetcher:
         cached = self._read_cache(url, byte_range)
         if cached is not None:
             return cached
+        if parts.hostname in self._unreachable:
+            raise FetchError(f"network unreachable: {parts.hostname}")
         headers = {"User-Agent": "tt-orchard", "Accept": "*/*"}      # no Authorization, ever
         limit = max_bytes
         if byte_range is not None:
@@ -118,6 +123,8 @@ class Fetcher:
         except FetchError:
             raise
         except (OSError, ValueError) as exc:
+            if isinstance(exc, OSError):
+                self._unreachable.add(parts.hostname)
             raise FetchError(f"{type(exc).__name__}: {exc}") from None
         with closing(resp):
             if byte_range is not None and getattr(resp, "status", None) != 206:
