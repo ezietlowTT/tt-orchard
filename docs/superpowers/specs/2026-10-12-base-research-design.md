@@ -102,8 +102,8 @@ ranked list. It keeps no cache and writes no file. `--offline` makes no network 
 - Fetched text is untrusted data. It is length-limited, passed through `orchard/scrub.py`, stored as
   evidence, and never placed in a command line or in a prompt as an instruction.
 - Responses are cached in the run directory with the fetch time. A resume reads the cache, so the report
-  does not change between attempts. `--refresh-research` ignores the cache.
-- The collectors write only inside the run directory. They never publish, push, pull or install.
+  does not change between attempts. `--refresh-research` ignores the cache. Except in a dry run, which keeps no cache and writes no file.
+- The collectors write only inside the run directory, except in a dry run, which writes nothing. They never publish, push, pull or install.
 - Hosts are fixed: `huggingface.co`, `api.github.com`, `raw.githubusercontent.com`. Hugging Face answers a
   file request with a signed redirect to a CDN host, so a redirect is followed only when its host ends in
   `.hf.co` or `.huggingface.co`. Any other host, and any `http://` URL, is refused.
@@ -120,7 +120,7 @@ Mutations that must each turn a test red, with the suite green first:
 no token on hub calls (a token in the environment must not appear in a request), untrusted text not
 scrubbed, an unavailable source reported as an empty result, a `weak` candidate selected, the cache ignored
 on resume, a redirect to another host followed, a header read with no size cap, the class rules copied and
-changed, `--offline` still calling the network, a dry run making calls.
+changed, `--offline` still calling the network, a dry run writing a cache or a file.
 
 One opt-in live test (like the `~/.qwen` replay) runs the humanizer case: `jialinyyzz/humanizer` must rank
 the installed or published Gemma bundles and report the Gemma 3 and Gemma 4 relationship.
