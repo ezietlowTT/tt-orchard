@@ -53,6 +53,18 @@ def test_a_card_with_no_base_and_an_inferred_installed_bundle_warns_and_names_th
     assert c.data["base"] == "g/base" and c.data["bundle"] == "tt/base-p150" and c.data["needs_fetch"] is True
 
 
+def test_the_inferred_text_names_the_row_why_and_a_stated_selection_says_stated():
+    sel = {"repo": "g/base", "bundle": "tt/base-p150", "confidence": "inferred", "class": None}
+    cand = {"repo": "g/base", "class_estimate": None, "why": "another fine-tune of g/root"}
+    inst = [Installed("tt/base-p150", "g/base", "6", 1)]
+    c = check(report(selected=sel, candidates=[cand]), installed=inst)
+    assert "inferred (another fine-tune of g/root)" in c.detail and "inferred from its architecture" not in c.detail
+    stated = check(report(selected={**sel, "confidence": "stated"},
+                          candidates=[{**cand, "why": "named as the base model"}]), installed=inst)
+    assert "stated (named as the base model)" in stated.detail and "inferred" not in stated.detail
+    assert "the card names none" in stated.detail
+
+
 def test_a_card_base_wins_over_the_selection():
     sel = {"repo": "g/other", "bundle": "tt/other", "confidence": "inferred", "class": None}
     c = check(report(selected=sel), h=hub(base_model=GEMMA),

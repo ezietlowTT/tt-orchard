@@ -78,11 +78,14 @@ where it is.
 
 ### 3.3 Preflight integration
 
-`check_base` calls the report. It still blocks with `nearest-model-missing` only when no installed or
-published bundle can serve any candidate. The block now carries the ranked list with the expected class
-and an existing-port link for each, and the `--base` prompt chooses from that list. When a candidate has
-an installed v6 bundle, the check is OK and its message names the expected class and download size. The
-snapshot download is unchanged.
+`check_base` calls the report. The check passes (OK or WARN) in two cases only. A bundle serves the card's
+base (or the `--base` value), or the card names no base and the report selected an installed v6 bundle
+(a WARN, because the base is inferred). When the card names a base that no installed bundle serves, the check
+blocks with `nearest-model-missing`, even if the report selected an installed bundle for a different model such
+as a sibling fine-tune. The block lists the ranked bundles with their expected class and confidence (the selected sibling is among
+them, ranked first), adds the existing-port links, and tells the operator to pick one with `--base <bundle>`.
+The `--base` prompt chooses from that list. When a bundle serves the base, the check is OK and its message names
+the expected class and download size. The snapshot download is unchanged.
 
 `bringup` hands `base-candidates.json` to the supervisor as `--input base_candidates=<path>`. The
 delta-triage skill reads it with the existing `base` input and records, in `delta.json`, which candidate
@@ -102,7 +105,7 @@ ranked list. It keeps no cache and writes no file. `--offline` makes no network 
 - Fetched text is untrusted data. It is length-limited, passed through `orchard/scrub.py`, stored as
   evidence, and never placed in a command line or in a prompt as an instruction.
 - Responses are cached in the run directory with the fetch time. A resume reads the cache, so the report
-  does not change between attempts. `--refresh-research` ignores the cache. Except in a dry run, which keeps no cache and writes no file.
+  does not change between attempts. `--refresh-research` ignores the cache. A dry run keeps no cache and writes no file.
 - The collectors write only inside the run directory, except in a dry run, which writes nothing. They never publish, push, pull or install.
 - Hosts are fixed: `huggingface.co`, `api.github.com`, `raw.githubusercontent.com`. Hugging Face answers a
   file request with a signed redirect to a CDN host, so a redirect is followed only when its host ends in

@@ -206,6 +206,16 @@ def _port_note(report) -> str:
     return " Existing work: " + "; ".join(f"{p['claim']} ({p['url']})" for p in found[:2]) + "."
 
 
+def _selection_basis(report) -> str:
+    """How the research chose the base when the card names none: its confidence and the candidate row's reason."""
+    sel = report["selected"]
+    conf = sel.get("confidence") or "inferred"
+    why = next((c.get("why") for c in report.get("candidates") or [] if c.get("repo") == sel.get("repo")), None)
+    if why:
+        return f"{conf} ({why})"
+    return "inferred from its architecture" if conf == "inferred" else conf
+
+
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
                installed: list, search: Callable | None, report: dict | None = None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
@@ -232,7 +242,7 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
         where = "its snapshot is local" if snap else "its snapshot will be downloaded"
         note = _class_note(report, base)
         if inferred:
-            return Check("base", WARN, f"base {base}: inferred from its architecture; the card names none. Bundle "
+            return Check("base", WARN, f"base {base}: {_selection_basis(report)}; the card names none. Bundle "
                          f"{serving[0].name} is installed; {where}{note}. Pass --base to choose another", data=data)
         if not any(b.schema == "6" for b in serving):
             return Check("base", WARN, f"base {base}: bundle {serving[0].name} is installed, but it is a "
