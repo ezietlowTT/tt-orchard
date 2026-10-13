@@ -227,6 +227,28 @@ def test_clean_makes_one_short_line_and_removes_a_home_path_or_token():
     assert types.clean("tok " + "hf_" + "a" * 34).startswith("[removed:")
 
 
+def test_a_token_that_starts_before_the_length_limit_and_ends_after_it_is_not_kept_even_in_part():
+    token = "hf_" + "a" * 34
+    text = "x" * 279 + " " + token + " tail"
+    out = types.clean(text)
+    assert "hf_" not in out and "aaaa" not in out
+    assert out.startswith("[removed:")
+
+
+def test_clean_strips_c1_controls_and_bidi_overrides():
+    out = types.clean("a\u009b31m \u202eevil\u2066 x\u2069 y\u202a")
+    for ch in "\u009b\u202e\u2066\u2069\u202a":
+        assert ch not in out
+    assert "evil" in out
+
+
+def test_an_unavailable_reason_is_cleaned_when_it_is_written_out():
+    row = types.Unavailable("lineage", "boom\x1b[31m in /home/someone/.cache/x").as_dict()
+    assert "\x1b" not in row["reason"] and "/home/someone" not in row["reason"]
+    assert row["source"] == "lineage"
+    assert types.Unavailable("s", "plain reason").as_dict() == {"source": "s", "reason": "plain reason"}
+
+
 @pytest.mark.parametrize("value,ok", [
     ("google/gemma-4-12B", True), ("Qwen/Qwen3.8-27B", True), ("a/b", True),
     ("x/../../y?z", False), ("a/b c", False), ("a/b\n", False), ("nogroup", False), ("a/b/c", False),

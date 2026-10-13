@@ -14,7 +14,8 @@ STATED, INFERRED, WEAK = "stated", "inferred", "weak"
 CONFIDENCE_RANK = {STATED: 0, INFERRED: 1, WEAK: 2}
 MAX_CLAIM = 300
 
-_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+# C0 and C1 controls, and the bidirectional overrides and isolates that can reorder displayed text.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]")
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}/[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 
 
@@ -36,7 +37,8 @@ class Unavailable:
     reason: str
 
     def as_dict(self) -> dict:
-        return asdict(self)
+        # The reason is often the text of an exception or an HTTP answer, so it is cleaned here, once.
+        return {"source": self.source, "reason": clean(self.reason)}
 
 
 @dataclass
@@ -54,9 +56,10 @@ class Result:
 def clean(text, limit: int = MAX_CLAIM) -> str:
     """Fetched text is untrusted data: one line, no control characters, a length limit, and nothing the
     scrub would refuse (a home path, a host name, a token). A hit replaces the whole text."""
-    one = " ".join(_CONTROL.sub(" ", str(text)).split())[:limit]
+    one = " ".join(_CONTROL.sub(" ", str(text)).split())
+    # Scrub the whole line before cutting it, so a token that straddles the limit cannot leave a prefix behind.
     hits = scrub_text(one, hostname=socket.gethostname(), home=str(Path.home()))
-    return f"[removed: {', '.join(hits)}]" if hits else one
+    return f"[removed: {', '.join(hits)}]" if hits else one[:limit]
 
 
 def valid_id(value) -> bool:
