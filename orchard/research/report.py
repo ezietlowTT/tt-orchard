@@ -43,13 +43,24 @@ def _empty(model_id: str, now: str, offline: bool, reason: str) -> dict:
             "unavailable": [Unavailable("research", reason).as_dict()]}
 
 
+def _guard(res: Result, source: str, call, fallback):
+    """Run one collector. An exception the collector did not expect (a field of the wrong type in an answer from
+    the internet, say) becomes an Unavailable row with the exception's type, and `fallback` stands in for its
+    answer, so `build` never raises."""
+    try:
+        return call()
+    except Exception as exc:
+        res.unavailable.append(Unavailable(source, type(exc).__name__))
+        return fallback() if callable(fallback) else fallback
+
+
 def _bundles(installed, search, family: str, fetch, res: Result) -> dict[str, dict]:
     """name -> {"name", "installed", "schema", "repo", "code"} for installed and published bundles."""
     rows = {b.name: {"name": b.name, "installed": True, "schema": str(b.schema), "repo": b.weights_repo, "code": []}
             for b in installed}
     try:
         found = search(family) if search is not None else []
-    except Exception as exc:                                  # a failing search is a gap, not a crash
+    except Exception as exc:                                  # a failing search leaves a gap in the report
         res.unavailable.append(Unavailable("bundle search", f"{type(exc).__name__}"))
         found = []
     for item in (found or [])[:MAX_PUBLISHED]:
@@ -63,13 +74,16 @@ def _bundles(installed, search, family: str, fetch, res: Result) -> dict[str, di
         except (FetchError, KeyError, TypeError, AttributeError) as exc:
             res.unavailable.append(Unavailable("bundle manifest", clean(f"{name}: {getattr(exc, 'reason', 'unreadable')}")))
             continue
+        except Exception as exc:
+            res.unavailable.append(Unavailable("bundle manifest", f"{name}: {type(exc).__name__}"))
+            continue
         if not valid_id(repo):
             continue
         code = []
         try:
             payload = fetch.json(lineage.HUB_MODEL.format(id=name))
             code = ports.bundle_code(payload.get("siblings"), name, fetch.now()) if isinstance(payload, dict) else []
-        except FetchError:
+        except Exception:                       # the code listing is optional; the bundle is still a candidate
             pass
         rows[name] = {"name": name, "installed": False, "schema": schema, "repo": repo, "code": code}
     return rows
@@ -93,6 +107,9 @@ def _config(fetch, repo: str, res: Result) -> dict | None:
     except FetchError as exc:
         res.unavailable.append(Unavailable("config", clean(f"{repo}: {exc.reason}")))
         return None
+    except Exception as exc:
+        res.unavailable.append(Unavailable("config", f"{repo}: {type(exc).__name__}"))
+        return None
     if not isinstance(cfg, dict):
         res.unavailable.append(Unavailable("config", f"{repo}: config.json is not an object"))
         return None
@@ -113,16 +130,17 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     if getattr(fetch, "offline", False):
         return _empty(model_id, now, True, "--offline")
     res = Result()
-    lin = lineage.chain(fetch, model_id)
+    lin = _guard(res, "lineage", lambda: lineage.chain(fetch, model_id), lambda: Result(data={"ancestors": [], "edges": []}))
     res.extend(lin)
     stated = _unique([base_override] + list(hub.base_models if hub else []) + lin.data["ancestors"])
     new_cfg = _config(fetch, model_id, res) or {}
     letters = re.match(r"[a-z]+", str(new_cfg.get("model_type") or "").lower())
     family = nearest.family_query(stated[0]) if stated else (letters.group(0) if letters else "")
-    sib = lineage.siblings(fetch, stated[0], exclude={model_id}) if stated else Result(data={"siblings": []})
+    sib = _guard(res, "siblings", lambda: lineage.siblings(fetch, stated[0], exclude={model_id}),
+                 lambda: Result(data={"siblings": []})) if stated else Result(data={"siblings": []})
     res.extend(sib)
     sibling_ids = set(sib.data["siblings"])
-    rows = _bundles(installed, search, family, fetch, res) if family else {}
+    rows = _guard(res, "bundles", lambda: _bundles(installed, search, family, fetch, res), dict) if family else {}
     by_repo: dict[str, list[dict]] = {}
     for row in rows.values():
         by_repo.setdefault(row["repo"], []).append(row)
@@ -132,7 +150,9 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     cfgs: dict[str, dict] = {}
     for repo in _unique(stated + list(by_repo))[:MAX_CANDIDATES]:
         cfg = _config(fetch, repo, res)
-        cmp = arch_match.compare(new_cfg, cfg) if cfg is not None and new_cfg else {"confidence": None, "differing": {}}
+        no_match = {"confidence": None, "differing": {}}
+        cmp = _guard(res, "config", lambda: arch_match.compare(new_cfg, cfg), no_match) \
+            if cfg is not None and new_cfg else no_match
         if repo in stated:
             confidence, why = STATED, ("named with --base" if repo == base_override else "named as the base model")
         elif repo in sibling_ids:
@@ -163,15 +183,18 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
             continue
         cand["download_gb"] = round(info.total_bytes / 1e9, 1)
         if new_model is None:
-            new_model = (headers.read_model(fetch, model_id, list(hub.files)) if hub is not None
+            new_model = (_guard(res, "headers", lambda: headers.read_model(fetch, model_id, list(hub.files)),
+                                lambda: Result(data={"tensors": {}, "errors": []})) if hub is not None
                          else Result(unavailable=[Unavailable("headers", f"{model_id}: the hub did not answer")]))
             res.extend(Result(unavailable=new_model.unavailable))
             _note_header_errors(res, model_id, new_model)
-        other = headers.read_model(fetch, cand["repo"], list(info.files))
+        other = _guard(res, "headers", lambda: headers.read_model(fetch, cand["repo"], list(info.files)),
+                       lambda: Result(data={"tensors": {}, "errors": []}))
         res.extend(Result(unavailable=other.unavailable))
         _note_header_errors(res, cand["repo"], other)
         if new_model.data.get("tensors") and other.data.get("tensors") and cand["repo"] in cfgs:
-            cand["class_estimate"] = headers.estimate_class(new_cfg, new_model.data, cfgs[cand["repo"]], other.data)
+            cand["class_estimate"] = _guard(
+                res, "class estimate", lambda: headers.estimate_class(new_cfg, new_model.data, cfgs[cand["repo"]], other.data), None)
     ordered.sort(key=lambda c: (c["group"], CONFIDENCE_RANK[c["confidence"]], len(c["differing"]),
                                 CLASS_RANK.get((c["class_estimate"] or {}).get("class"), 3), c["repo"]))
 
@@ -185,8 +208,8 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
             selected = {"repo": c["repo"], "bundle": b["name"], "confidence": c["confidence"],
                         "class": (c["class_estimate"] or {}).get("class")}
             break
-    port_res = ports.collect(fetch, new_cfg, family=family or "", run=run, which=which, no_github=no_github) \
-        if family else Result()
+    port_res = _guard(res, "ports", lambda: ports.collect(fetch, new_cfg, family=family or "", run=run, which=which,
+                                                          no_github=no_github), Result) if family else Result()
     res.extend(port_res)
     return {"model": model_id, "generated_at": now, "offline": False, "stated_bases": stated,
             "candidates": ordered, "bundle_choices": choices, "selected": selected,

@@ -30,7 +30,8 @@ def card_bases(payload: dict) -> list[tuple[str, str]]:
             found[ident] = relation
         else:
             found.setdefault(rest, "unknown")
-    card = payload.get("cardData") or {}
+    card = payload.get("cardData")
+    card = card if isinstance(card, dict) else {}
     raw = card.get("base_model")
     names = [raw] if isinstance(raw, str) else [b for b in raw if isinstance(b, str)] if isinstance(raw, list) else []
     relation = card.get("base_model_relation")

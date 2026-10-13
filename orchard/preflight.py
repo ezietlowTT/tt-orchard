@@ -371,14 +371,18 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
 
     def base() -> Check:
         inst = list(s.installed_bundles()) if s.installed_bundles else []
-        report = None
+        report, failed = None, None
         if s.research is not None:
             try:
                 report = s.research(model_id, hub, base_override, inst)
-            except Exception:                         # research is an aid; its failure never blocks a run
-                report = None
-        return check_base(model_id=model_id, hub=hub, base_override=base_override,
-                          local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report)
+            except Exception as exc:                  # a failed research call leaves the earlier checks in force
+                report, failed = None, type(exc).__name__
+        found = check_base(model_id=model_id, hub=hub, base_override=base_override,
+                           local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report)
+        if failed:
+            from orchard.research.types import clean
+            found.detail += f" (research failed: {clean(failed)})"
+        return found
 
     base_check = None
     try:

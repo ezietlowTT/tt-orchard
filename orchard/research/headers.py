@@ -59,8 +59,12 @@ def read_model(fetch, repo: str, files: list[str]) -> Result:
     if INDEX_NAME in files:
         try:
             index = fetch.json(RAW_URL.format(repo=repo, name=INDEX_NAME))
-            listed = set((index.get("weight_map") or {}).values()) if isinstance(index, dict) else set()
-            shards = [n for n in safe if n in listed] or None
+            weight_map = index.get("weight_map") if isinstance(index, dict) else None
+            if isinstance(weight_map, dict):
+                listed = {v for v in weight_map.values() if isinstance(v, str)}
+                shards = [n for n in safe if n in listed] or None
+            else:
+                res.unavailable.append(Unavailable("headers", f"{repo}: the index has no weight_map object"))
         except FetchError:
             shards = None
     if shards is None:

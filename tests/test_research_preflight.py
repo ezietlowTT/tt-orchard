@@ -134,6 +134,26 @@ def test_a_failing_research_leaves_the_earlier_behaviour_and_no_crash(tmp_path):
                            signals=signals(research=research))
     base = next(c for c in out if c.name == "base")
     assert base.status == pf.WARN and base.data["report"] is None
+    assert base.detail.endswith("(research failed: RuntimeError)")
+    assert "hub down" not in base.detail                  # the exception text is not copied, only its type
+
+
+def test_a_blocking_base_check_also_names_a_failed_research(tmp_path):
+    from test_preflight import cfg, signals
+
+    def research(*a):
+        raise KeyError("x")
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False, base_override="g/none",
+                           signals=signals(research=research))
+    base = next(c for c in out if c.name == "base")
+    assert base.status == pf.BLOCK and "research failed: KeyError" in base.detail
+
+
+def test_a_research_that_works_adds_no_failure_note(tmp_path):
+    from test_preflight import cfg, signals
+    out = pf.run_preflight(cfg(tmp_path), "Cloudflare/clef", accept_credentials=False,
+                           signals=signals(research=lambda *a: report()))
+    assert "research failed" not in next(c for c in out if c.name == "base").detail
 
 
 def test_without_research_run_preflight_is_unchanged(tmp_path):

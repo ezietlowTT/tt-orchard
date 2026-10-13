@@ -364,3 +364,45 @@ def test_a_hub_info_that_raises_becomes_an_unavailable_row():
     r = build(world(), hub_info=boom)
     assert {"source": "class estimate", "reason": "g/base: RuntimeError"} in r["unavailable"]
     assert r["candidates"][0]["class_estimate"] is None and r["selected"]["repo"] == "g/base"
+
+
+# --- build never raises: an unexpected exception in a collector becomes an Unavailable row ----------------------
+
+def _boom(*a, **k):
+    raise RuntimeError("collector failed")
+
+
+@pytest.mark.parametrize("target,name,source", [
+    (lineage, "chain", "lineage"), (lineage, "siblings", "siblings"), (report, "_bundles", "bundles"),
+    (report.arch_match, "compare", "config"), (report.headers, "read_model", "headers"),
+    (report.headers, "estimate_class", "class estimate"), (report.ports, "collect", "ports")])
+def test_a_collector_that_raises_is_an_unavailable_row_and_the_rest_of_the_report_stands(monkeypatch, target, name, source):
+    monkeypatch.setattr(target, name, _boom)
+    r = build(world())
+    assert {"source": source, "reason": "RuntimeError"} in r["unavailable"]
+    assert [c["repo"] for c in r["candidates"]] == ["g/base"]
+    if source == "bundles":
+        assert r["selected"] is None                   # no bundle rows, so nothing is installed as far as the report knows
+    else:
+        assert r["selected"]["repo"] == "g/base"       # the stated base still has an installed v6 bundle
+    json.dumps(r)
+
+
+def test_odd_shapes_in_hub_answers_do_not_raise_out_of_build():
+    odd = {"id": "h/new", "tags": [], "cardData": ["not", "a", "dict"], "config": [], "siblings": "x"}
+    w = world({api("h/new"): odd, api("g/base"): {"id": "g/base", "tags": None, "cardData": 7, "siblings": 3},
+               cfg_url("g/base"): ["a", "list"]})
+    r = build(w)
+    assert r["model"] == "h/new" and isinstance(r["unavailable"], list)
+
+
+def test_a_config_that_raises_while_parsing_is_unavailable(monkeypatch):
+    class Weird(World):
+        def json(self, url, **kw):
+            got = super().json(url, **kw)
+            if url == cfg_url("g/base"):
+                raise TypeError("odd")
+            return got
+    w = Weird(json=world().json_routes, files=world().files)
+    r = build(w)
+    assert {"source": "config", "reason": "g/base: TypeError"} in r["unavailable"]

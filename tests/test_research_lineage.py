@@ -116,3 +116,19 @@ def test_a_failed_sibling_query_is_unavailable():
 def test_a_sibling_answer_that_is_not_a_list_is_unavailable():
     r = lineage.siblings(FakeFetch({LIST: {"error": "x"}}), "g/base")
     assert r.unavailable and r.data["siblings"] == []
+
+
+@pytest.mark.parametrize("card", [["a", "list"], "text", 7, None])
+def test_a_card_data_that_is_not_an_object_is_treated_as_absent(card):
+    payload = {"id": "a/b", "tags": ["base_model:finetune:c/d"], "cardData": card}
+    assert lineage.card_bases(payload) == [("c/d", "finetune")]
+    r = lineage.chain(FakeFetch({url("a/b"): payload, url("c/d"): model("c/d")}), "a/b")
+    assert r.data["ancestors"] == ["c/d"]
+
+
+def test_a_model_that_names_itself_has_no_self_edge():
+    f = FakeFetch({url("a/b"): model("a/b", "base_model:finetune:a/b", "base_model:finetune:c/d"),
+                   url("c/d"): model("c/d", "base_model:finetune:c/d")})
+    r = lineage.chain(f, "a/b")
+    assert all(e["child"] != e["parent"] for e in r.data["edges"])
+    assert r.data["edges"] == [{"child": "a/b", "parent": "c/d", "relation": "finetune"}]

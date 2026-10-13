@@ -119,6 +119,14 @@ def test_the_index_wins_over_the_file_name_pattern():
     assert r.data["shards"] == ["weights-a.safetensors"] and r.data["extra_safetensors"] == ["model.safetensors"]
 
 
+@pytest.mark.parametrize("index", [{"weight_map": ["a", "b"]}, {"weight_map": "x"}, ["not", "an", "object"]])
+def test_an_index_with_a_weight_map_that_is_not_an_object_is_an_error_row_and_the_pattern_is_used(index):
+    f = RangeFetch({"model-00001-of-00001.safetensors": header_bytes(T)}, indexes={"model.safetensors.index.json": index})
+    r = headers.read_model(f, "g/it", ["model.safetensors.index.json", "model-00001-of-00001.safetensors"])
+    assert any("index" in u.reason for u in r.unavailable)
+    assert r.data["shards"] == ["model-00001-of-00001.safetensors"]
+
+
 @pytest.mark.parametrize("name", ["../evil.safetensors", "a/b.safetensors", "x y.safetensors", ".safetensors"])
 def test_an_unsafe_shard_name_is_never_fetched(name):
     f = RangeFetch({})
