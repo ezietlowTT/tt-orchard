@@ -183,29 +183,62 @@ def check_reference(python: Path | None, problem: str | None) -> Check:
     return Check("reference", OK, f"{python} imports torch, transformers, tokenizers and safetensors")
 
 
+def _class_note(report, repo: str) -> str:
+    for c in (report or {}).get("candidates", []):
+        est = c.get("class_estimate")
+        if c.get("repo") == repo and est:
+            return f"; research expects class {est['class']}"
+    return ""
+
+
+def _closest(report) -> str:
+    choices = (report or {}).get("bundle_choices") or []
+    if not choices:
+        return ""
+    return " Closest bundles found: " + ", ".join(
+        f"{c['name']} ({c.get('class') or 'no estimate'}, {c['confidence']})" for c in choices[:3]) + "."
+
+
+def _port_note(report) -> str:
+    found = (report or {}).get("ports") or []
+    if not found:
+        return ""
+    return " Existing work: " + "; ".join(f"{p['claim']} ({p['url']})" for p in found[:2]) + "."
+
+
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
-               installed: list, search: Callable | None) -> Check:
+               installed: list, search: Callable | None, report: dict | None = None) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
-    found, so the operator can pick one with --base."""
+    found, so the operator can pick one with --base. `report` is the research report
+    (orchard/research/report.py): it supplies an inferred base when the card names none, the expected
+    class, ranked bundle choices and existing ports. Without a report the behaviour is the earlier one."""
     from orchard import nearest
     base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
+    inferred = False
+    if not base and report and report.get("selected"):
+        base, inferred = report["selected"]["repo"], True
     if not base:
         return Check("base", WARN, "the model card names no base_model, so stage 0 has nothing to compare it "
-                     "with. Pass --base <bundle or model id> to name the model to start from",
-                     data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": []})
+                     "with. Pass --base <bundle or model id> to name the model to start from"
+                     + _closest(report) + _port_note(report),
+                     data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": [], "report": report})
     serving = [b for b in installed if b.weights_repo == base]
     if serving:
         snap = local_snapshot(base)
         data = {"base": base, "snapshot": snap, "bundle": serving[0].name, "needs_fetch": snap is None,
-                "candidates": []}
+                "candidates": [], "report": report}
         where = "its snapshot is local" if snap else "its snapshot will be downloaded"
+        note = _class_note(report, base)
+        if inferred:
+            return Check("base", WARN, f"base {base}: inferred from its architecture; the card names none. Bundle "
+                         f"{serving[0].name} is installed; {where}{note}. Pass --base to choose another", data=data)
         if not any(b.schema == "6" for b in serving):
             return Check("base", WARN, f"base {base}: bundle {serving[0].name} is installed, but it is a "
                          f"{serving[0].schema} container package and stage 2's swap check expects a v6 thin "
-                         f"bundle, so stage 2 will probably not run; {where}", data=data)
-        return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}", data=data)
+                         f"bundle, so stage 2 will probably not run; {where}{note}", data=data)
+        return Check("base", OK, f"base {base}: bundle {serving[0].name} is installed; {where}{note}", data=data)
     family = nearest.family_query(base)
     found = None
     if search is not None:
@@ -213,25 +246,31 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
             found = search(family)
         except Exception:
             found = None
-    cands: dict[str, dict] = {}
-    for b in installed:
-        if nearest.family_query(b.weights_repo) == family and b.name != model_id:
-            cands[b.name] = {"name": b.name, "installed": True}
-    for c in found or []:
-        if c["name"] != model_id and c["name"] not in cands:
-            cands[c["name"]] = {"name": c["name"], "installed": c.get("installed")}
-    ordered = sorted(cands.values(), key=lambda c: (not c["installed"], c["name"]))
-    if found is None:
-        listing = f"the search for '{family}' bundles could not be made"
-    elif ordered:
-        listing = f"`tt model search {family}` found: " + ", ".join(c["name"] for c in ordered)
+    choices = (report or {}).get("bundle_choices") or []
+    if choices:
+        ordered = [dict(c) for c in choices]
+        listing = "ranked bundles: " + ", ".join(
+            f"{c['name']} ({c.get('class') or 'no estimate'}, {c['confidence']})" for c in ordered[:5])
     else:
-        listing = f"`tt model search {family}` found no bundle"
+        cands: dict[str, dict] = {}
+        for b in installed:
+            if nearest.family_query(b.weights_repo) == family and b.name != model_id:
+                cands[b.name] = {"name": b.name, "installed": True}
+        for c in found or []:
+            if c["name"] != model_id and c["name"] not in cands:
+                cands[c["name"]] = {"name": c["name"], "installed": c.get("installed")}
+        ordered = sorted(cands.values(), key=lambda c: (not c["installed"], c["name"]))
+        if found is None:
+            listing = f"the search for '{family}' bundles could not be made"
+        elif ordered:
+            listing = f"`tt model search {family}` found: " + ", ".join(c["name"] for c in ordered)
+        else:
+            listing = f"`tt model search {family}` found no bundle"
     return Check("base", BLOCK, f"no installed bundle serves {base}, the model this one is based on, so stages "
-                 f"0, 2 and 4 have nothing to compare it with or serve it through. {listing}. Pick one "
-                 "with --base <bundle>, or install a bundle yourself and run bringup again",
+                 f"0, 2 and 4 have nothing to compare it with or serve it through. {listing}.{_port_note(report)} "
+                 "Pick one with --base <bundle>, or install a bundle yourself and run bringup again",
                  "nearest-model-missing", data={"base": base, "snapshot": None, "bundle": None,
-                                                "needs_fetch": False, "candidates": ordered})
+                                                "needs_fetch": False, "candidates": ordered, "report": report})
 
 
 def check_gozer(text: str, kept: bool = False) -> Check:
@@ -276,6 +315,7 @@ class Signals:
     installed_bundles: Callable | None = None   # () -> list[nearest.Installed]
     search_bundles: Callable | None = None      # (query) -> [{"name", "installed"}] or None
     lab_status: Callable | None = None          # () -> (answered, text of the lab's `gozer status`, error)
+    research: Callable | None = None            # (model_id, hub, base_override, installed) -> report dict
 
 
 def check_lab(lab, status) -> Check:
@@ -331,8 +371,14 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
 
     def base() -> Check:
         inst = list(s.installed_bundles()) if s.installed_bundles else []
+        report = None
+        if s.research is not None:
+            try:
+                report = s.research(model_id, hub, base_override, inst)
+            except Exception:                         # research is an aid; its failure never blocks a run
+                report = None
         return check_base(model_id=model_id, hub=hub, base_override=base_override,
-                          local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles)
+                          local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report)
 
     base_check = None
     try:
@@ -383,7 +429,7 @@ def _nearest_existing(path: Path) -> Path:
     return p
 
 
-def default_signals(cfg) -> Signals:
+def default_signals(cfg, research_options=None) -> Signals:
     from orchard import supervisor, tiers
 
     def hub_info(model_id: str):
@@ -436,6 +482,15 @@ def default_signals(cfg) -> Signals:
         return Path(cfg.operator_home or supervisor.operator_home()) / ".cache" / "tt-model" / "models"
 
     from orchard import nearest
+    research = None
+    if research_options is not None:
+        from orchard.research import report as research_report
+        from orchard.research.http import Fetcher
+        fetcher = Fetcher(research_options.cache_dir, offline=research_options.offline,
+                          refresh=research_options.refresh)
+        research = lambda model_id, hub, override, inst: research_report.build(     # noqa: E731
+            model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
+            hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
     return Signals(
         installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
@@ -443,7 +498,8 @@ def default_signals(cfg) -> Signals:
         same_device=lambda a, b: os.stat(_nearest_existing(a)).st_dev == os.stat(_nearest_existing(b)).st_dev,
         credentials=lambda: supervisor.visible_credentials(cfg.operator_home or supervisor.operator_home()),
         port_in_use=port_in_use, gozer_status=gozer_status, load_tiers=tiers.load,
-        reference_problem=reference_problem, lab_status=(lambda: _lab_status(cfg.lab)) if getattr(cfg, "lab", None) else None)
+        reference_problem=reference_problem, lab_status=(lambda: _lab_status(cfg.lab)) if getattr(cfg, "lab", None) else None,
+        research=research)
 
 
 def _lab_status(lab) -> tuple[bool, str, str]:
