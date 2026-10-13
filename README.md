@@ -560,6 +560,7 @@ bundle is chosen on its own. Stage 0 gets the file as the input `base_candidates
 a hint.
 
 A source that cannot be reached is listed as unavailable in the report. `--offline` skips all of it.
+`--no-github` skips the GitHub searches and keeps the rest. `--refresh-research` ignores answers cached by an earlier attempt.
 `--dry-run` does the same lookups and prints what it finds, but keeps no cache and writes no file.
 
 ### 4.1 Before you start

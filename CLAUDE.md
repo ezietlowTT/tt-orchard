@@ -773,11 +773,8 @@ more stardew valley type color scheme and elements".
   0.2 to 1.0; the idle board stays at 0. The farmer also waited at plot 0 while the coder booted, because the facts
   name the next stage as current before it starts; the scene now works a plot only once that stage has started.
 
-
 ## 2026-10-12: base model research (branch `research-base-discovery`, version 0.5.0)
-Prompt (operator, summarized from the plan; the original wording is not recorded here): when the `jialinyyzz/humanizer` run stopped because no installed bundle served its
-base, `bringup` should research which model to base a run on, and not only list bundles of one family. Plan:
-`docs/superpowers/plans/2026-10-12-base-research.md`. Tasks 0 to 10, test first, a mutation per guard.
+Prompt (operator): "How do we make this project better at finding and researching the model family it might need to base a new bring up on? Searching tt model manager, inspecting existing models, using HF or GH.. not just looking locally." The operator chose scope C (everything): hub lineage, architecture matching, a class estimate from safetensors headers before any download, a search for existing ports, and a written ranked report. Triggered by the `jialinyyzz/humanizer` run, which stopped because no installed bundle served its base. Plan: `docs/superpowers/plans/2026-10-12-base-research.md`. Tasks 0 to 10, test first, a mutation per guard.
 Key decisions:
 - The collectors are deterministic code. No model is involved. They live in `orchard/research/` (http, lineage,
   arch_match, headers, ports, report, triage_rules, types).
@@ -805,7 +802,7 @@ Not done:
 - The UI preflight panel (`_ui_preflight`) does not run research, so the page shows the earlier base check.
 - The sidecar class cannot be estimated from headers.
 - A resumed run rebuilds the report and overwrites `base-candidates.json` and `.md` (`generated_at` changes).
-- The preflight swallows an exception from research and shows no row saying so.
+- The preflight fails open. An exception from research leaves the earlier base check in place, and no row says that research failed.
 - `report['model']` and the port text depend on upstream `clean()`.
 - `_config` in `report.py` duplicates `arch_match.fetch_config`, because that function drops the failure reason.
 - GitHub's unauthenticated limit is 60 requests per hour and a run makes about 6. This is an open point.
