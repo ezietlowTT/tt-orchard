@@ -844,3 +844,13 @@ None of the fine-tunes is small; "small" was read as a small change from the bas
   park; `setup --start-ollama` runs a plain `ollama serve` that does not see `/mnt/bonus/models/ollama`; stage 4's disk
   check can only be met by deleting earlier runs' caches, and `setup` leaves no hint about that.
 - Not a hands-off run: three resumes by me. Nothing was published, pushed or uploaded.
+- Update (same day): the operator asked whether the chips had been reset before the 4-chip run. They had not all been. The ledger
+  shows the park resets only the coder's board (chips 0 and 1, about 41 s); chips 2 and 3 ran the 1-chip and 2-chip tests and
+  were not reset, and the fabric timeouts were on devices 3 and 2. Their ARC heartbeat read 1275 against 357 for the reset
+  chips. I took all four under `gozer run --chips 4` (a `tt-smi -s` snapshot, then the release reset all four) and resumed.
+  The run then passed stage 4 and stage 8 and ended `ready-for-operator-review`: 2 chips 118.0 s cold-cache-warm, top-1
+  agreement 0.96875; 4 chips 269.9 s, 0.9375 (32 tokens each; draft off; the 1-chip configuration was optional and not in
+  the final list). Counts: 1 retry, 1 escalation, 1 nudge, 3 pauses. Not run: stage 7 (no `--package-format`).
+  The stale chip state is a hypothesis that fits the evidence and the pass after the reset; it was not isolated (no run with
+  only the reset changed and a control without it). Harness gap, not fixed here: before a test that opens more chips than the
+  coder's board, reset the chips earlier tests used.
