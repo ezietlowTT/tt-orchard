@@ -1,0 +1,182 @@
+[
+ {
+  "name": "audio",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/audio"
+ },
+ {
+  "name": "bert",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/bert"
+ },
+ {
+  "name": "bge_large_en",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/bge_large_en"
+ },
+ {
+  "name": "blackhole",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/blackhole"
+ },
+ {
+  "name": "common",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/common"
+ },
+ {
+  "name": "deepseek_v3",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/deepseek_v3"
+ },
+ {
+  "name": "deepseek_v3_b1",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/deepseek_v3_b1"
+ },
+ {
+  "name": "deepseek_v3_d_p",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/deepseek_v3_d_p"
+ },
+ {
+  "name": "falcon7b_common",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/falcon7b_common"
+ },
+ {
+  "name": "gemma4",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/gemma4"
+ },
+ {
+  "name": "gemma4_31b_qb2",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/gemma4_31b_qb2"
+ },
+ {
+  "name": "gemma4_d_p",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/gemma4_d_p"
+ },
+ {
+  "name": "gpt_oss",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/gpt_oss"
+ },
+ {
+  "name": "gpt_oss_d_p",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/gpt_oss_d_p"
+ },
+ {
+  "name": "informer",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/informer"
+ },
+ {
+  "name": "llama31_8b_qb2",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama31_8b_qb2"
+ },
+ {
+  "name": "llama3_70b_galaxy",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama3_70b_galaxy"
+ },
+ {
+  "name": "llama_3p1_8b_d_p",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/llama_3p1_8b_d_p"
+ },
+ {
+  "name": "metal_BERT_large_11",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/metal_BERT_large_11"
+ },
+ {
+  "name": "minimax_m3",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/minimax_m3"
+ },
+ {
+  "name": "multimodal",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/multimodal"
+ },
+ {
+  "name": "qwen25_vl",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/qwen25_vl"
+ },
+ {
+  "name": "qwen38_27b_qb2",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/qwen38_27b_qb2"
+ },
+ {
+  "name": "qwen3_vl",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/qwen3_vl"
+ },
+ {
+  "name": "sample_prompts",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/sample_prompts"
+ },
+ {
+  "name": "sentence_bert",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/sentence_bert"
+ },
+ {
+  "name": "squeezebert",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/squeezebert"
+ },
+ {
+  "name": "stable_diffusion_xl_base",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/stable_diffusion_xl_base"
+ },
+ {
+  "name": "t3000",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000"
+ },
+ {
+  "name": "tg",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/tg"
+ },
+ {
+  "name": "ttnn_falcon7b",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/ttnn_falcon7b"
+ },
+ {
+  "name": "unet_3d",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/unet_3d"
+ },
+ {
+  "name": "utils",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/utils"
+ },
+ {
+  "name": "vision",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision"
+ },
+ {
+  "name": "wormhole",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/wormhole"
+ },
+ {
+  "name": "z_image_turbo",
+  "type": "dir",
+  "html_url": "https://github.com/tenstorrent/tt-metal/tree/main/models/demos/z_image_turbo"
+ }
+]

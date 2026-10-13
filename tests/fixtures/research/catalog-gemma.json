@@ -1,0 +1,14 @@
+{
+  "query": "gemma",
+  "catalog": true,
+  "arch": null,
+  "bundles": [
+    {
+      "name": "stisiTT/gemma-4-12b-it-p150",
+      "private": false,
+      "downloads": 0,
+      "last_modified": null,
+      "installed": false
+    }
+  ]
+}

@@ -1,0 +1,287 @@
+{
+ "id": "stisiTT/gemma-4-12b-it-p150",
+ "tags": [
+  "blackhole",
+  "p150",
+  "tt-model-cache",
+  "tt-model-catalog",
+  "tt-model-container",
+  "vllm-plugin",
+  "region:us"
+ ],
+ "siblings": [
+  {
+   "rfilename": ".gitattributes"
+  },
+  {
+   "rfilename": "README.md"
+  },
+  {
+   "rfilename": "code/models/common/LICENSE-Llama-3.1"
+  },
+  {
+   "rfilename": "code/models/common/README.md"
+  },
+  {
+   "rfilename": "code/models/common/auto_compose.py"
+  },
+  {
+   "rfilename": "code/models/common/device_utils.py"
+  },
+  {
+   "rfilename": "code/models/common/distribute_as.py"
+  },
+  {
+   "rfilename": "code/models/common/generation_utils.py"
+  },
+  {
+   "rfilename": "code/models/common/helper_funcs.py"
+  },
+  {
+   "rfilename": "code/models/common/lightweightmodule.py"
+  },
+  {
+   "rfilename": "code/models/common/llama_models.py"
+  },
+  {
+   "rfilename": "code/models/common/llm_runtime/README.md"
+  },
+  {
+   "rfilename": "code/models/common/llm_runtime/config.py"
+  },
+  {
+   "rfilename": "code/models/common/metrics.py"
+  },
+  {
+   "rfilename": "code/models/common/model_capabilities.py"
+  },
+  {
+   "rfilename": "code/models/common/models/deepseek_r1_distill_qwen_14b/README.md"
+  },
+  {
+   "rfilename": "code/models/common/models/deepseek_r1_distill_qwen_14b/__init__.py"
+  },
+  {
+   "rfilename": "code/models/common/modules/README.md"
+  },
+  {
+   "rfilename": "code/models/common/modules/attention/attention_1d.py"
+  },
+  {
+   "rfilename": "code/models/common/reference_rope.py"
+  },
+  {
+   "rfilename": "code/models/common/rmsnorm.py"
+  },
+  {
+   "rfilename": "code/models/common/sampling/README.md"
+  },
+  {
+   "rfilename": "code/models/common/sampling/__init__.py"
+  },
+  {
+   "rfilename": "code/models/common/tensor_utils.py"
+  },
+  {
+   "rfilename": "code/models/common/tests/conftest.py"
+  },
+  {
+   "rfilename": "code/models/common/tests/demos/cleanup_utils.py"
+  },
+  {
+   "rfilename": "code/models/common/utility_functions.py"
+  },
+  {
+   "rfilename": "code/models/common/utils.py"
+  },
+  {
+   "rfilename": "code/models/common/validation_tools.py"
+  },
+  {
+   "rfilename": "code/models/common/warmup/__init__.py"
+  },
+  {
+   "rfilename": "code/models/common/warmup/warmup_utils.py"
+  },
+  {
+   "rfilename": "code/models/common/weight_cache.py"
+  },
+  {
+   "rfilename": "code/models/demos/gemma4/README.md"
+  },
+  {
+   "rfilename": "code/models/demos/gemma4/__init__.py"
+  },
+  {
+   "rfilename": "code/models/demos/utils/PERF_TARGET_VALIDATION.md"
+  },
+  {
+   "rfilename": "code/models/demos/utils/coco.names"
+  },
+  {
+   "rfilename": "code/models/perf/README.md"
+  },
+  {
+   "rfilename": "code/models/perf/benchmarking_utils.py"
+  },
+  {
+   "rfilename": "code/models/perf/device_perf_utils.py"
+  },
+  {
+   "rfilename": "code/models/perf/images/example_perf_report.png"
+  },
+  {
+   "rfilename": "code/models/perf/merge_device_perf_results.py"
+  },
+  {
+   "rfilename": "code/models/perf/merge_perf_results.py"
+  },
+  {
+   "rfilename": "code/models/perf/perf_utils.py"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/Host_Mem_Profile.md"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/PERF.md"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/README.md"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/conftest.py"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/demo/.gitignore"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/demo/config_16_decoders.json"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/host_mem_profiler.py"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/model_params/EXAONE-4.5-33B/config.json"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/model_params/EXAONE-4.5-33B/ff2_bfp4_decoder_config.json"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/scripts/op_perf_results.py"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/scripts/repack_weights_70b.py"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/tests/configurations/conf0.json"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/tests/configurations/conf1.json"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/tt/attention.py"
+  },
+  {
+   "rfilename": "code/models/tt_transformers/tt/ccl.py"
+  },
+  {
+   "rfilename": "image/blobs/sha256/01fc206ffda9e79f28da7b79f1f5bea50800d54417aafe1345c24546b50662a2"
+  },
+  {
+   "rfilename": "image/blobs/sha256/036d1c392b478f312baa756e3c950b9927614619e637bac4e770a7913e34366e"
+  },
+  {
+   "rfilename": "image/blobs/sha256/07e07d7e8b7e1578c916f8fc7cfbcde88929550f3502fdeaeeb72e7d3eeb54aa"
+  },
+  {
+   "rfilename": "image/blobs/sha256/0da8233e86ad443398124de6ec2b04c41ddb2818ad0862cb45e4cd87ef1a1737"
+  },
+  {
+   "rfilename": "image/blobs/sha256/12ba833975b525651c1b30c92999ec0b7d494e5719dfc83f09d446d996a84f45"
+  },
+  {
+   "rfilename": "image/blobs/sha256/189ec0e6e72818084a68ee8e99d5debce15946c3dbba43d27c187b419c384704"
+  },
+  {
+   "rfilename": "image/blobs/sha256/20c3783cc497b5b0df1fc5f92bd64c3d2fbb24057c88692c8fda205b6ea8a2f2"
+  },
+  {
+   "rfilename": "image/blobs/sha256/44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+  },
+  {
+   "rfilename": "image/blobs/sha256/4f4fb700ef54461cfa02571ae0db9a0dc1e0cdb5577484a6d75e68dc38e8acc1"
+  },
+  {
+   "rfilename": "image/blobs/sha256/4f9e471010a1a07c114d8af624f22dd34221e6e2c400a1ed0b22a35d4912a22a"
+  },
+  {
+   "rfilename": "image/blobs/sha256/60afd7eec970a1115c0a12e8c41984f8b7ace7174e61ec40957e67809b956e1f"
+  },
+  {
+   "rfilename": "image/blobs/sha256/664df5603d9ba88c96cc3b6e7fd27c1490d7498b1a9cde02dbc6bb6d0b264bc1"
+  },
+  {
+   "rfilename": "image/blobs/sha256/70b692b6ba69b648267345a0c970fb79908115605858487f5b850148418a2abe"
+  },
+  {
+   "rfilename": "image/blobs/sha256/721a903e2067a8b29d81a1bcc8320d1b2ad424be1b82385c176a42e52a50750a"
+  },
+  {
+   "rfilename": "image/blobs/sha256/73967a6ce6857c8fa31c8d362018ac7fc59dc81b9b10d2ab3ebabd13ef178647"
+  },
+  {
+   "rfilename": "image/blobs/sha256/7e7bc7b5de544c7624daebc64588adbc74de5e1a7b288a8f46bb2c587b270915"
+  },
+  {
+   "rfilename": "image/blobs/sha256/821a15c1626526963ea76d26e3d531b1449533d642410b7c340a311db14726fa"
+  },
+  {
+   "rfilename": "image/blobs/sha256/82edb5cdc91b862c3de60785ddb4d0bda9af02c678ab3c90b70b598721cb2f3c"
+  },
+  {
+   "rfilename": "image/blobs/sha256/868547b7e011054a3e861155950c8ce8131b09599729d0aaad86774fe8a1aca6"
+  },
+  {
+   "rfilename": "image/blobs/sha256/8a0312bc2bb7e1fcc29eac7c27b0fbd4134acb8c3a8005da36b58f1dc28a7224"
+  },
+  {
+   "rfilename": "image/blobs/sha256/8fdc93eee761bbb1f046291d6787a8d1225413d3bb7b92387a3a7306678f46a5"
+  },
+  {
+   "rfilename": "image/blobs/sha256/9757c3829efe18872a51ed3da2c4b32bd19a591f84e36beef00ab7dd791653d2"
+  },
+  {
+   "rfilename": "image/blobs/sha256/9ab9efae5841d4493b18ea8146a9b4f09550f2c4483cca32556bc0ae876459ed"
+  },
+  {
+   "rfilename": "image/blobs/sha256/a5bfd5dee04e350b37bbad7cd31d1da48b03a24065fc430fd9e59ce766907cbc"
+  },
+  {
+   "rfilename": "image/blobs/sha256/e3af38bf6f99e0e07ae9e9c1a6b7fe40cb11ea743e826c001f4d0d5dc7b60c67"
+  },
+  {
+   "rfilename": "image/blobs/sha256/e6297e2cec15f99f135c4ff2442d7c78028bb143ef0e9b834aaf1c846595b4aa"
+  },
+  {
+   "rfilename": "image/blobs/sha256/eb3dc0ea9d7e57f91b7f26675653ad074f575dab1a3d1331267153c3c6105625"
+  },
+  {
+   "rfilename": "image/blobs/sha256/fa4602feab381b21ada2b237697f2ab01b20ce60f0545bf613ee54d0666eca02"
+  },
+  {
+   "rfilename": "image/index.json"
+  },
+  {
+   "rfilename": "image/manifest.json"
+  },
+  {
+   "rfilename": "image/oci-layout"
+  },
+  {
+   "rfilename": "requirements.lock"
+  },
+  {
+   "rfilename": "tt_kernel_manifest.json"
+  }
+ ]
+}
