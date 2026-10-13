@@ -173,3 +173,14 @@ def test_reasons_are_cleaned_and_limited():
     r = headers.estimate_class(CFG, model_data(other), CFG, model_data(
         {f"model.layers.{i}.q.weight": ("BF16", [2, 2]) for i in range(20)}))
     assert len(r["reasons"]) <= 5
+
+
+@pytest.mark.parametrize("side", ["new", "candidate"])
+def test_a_header_read_error_on_either_side_makes_the_estimate_unknown(side):
+    """read_model records a failed shard in `errors`; the estimate must not call a model with missing
+    tensors weights-only or full-port."""
+    new, cand = model_data(T), model_data(T)
+    (new if side == "new" else cand)["errors"] = ["model-00002-of-00002.safetensors: HTTP 404"]
+    r = headers.estimate_class(CFG, new, CFG, cand)
+    assert r["class"] == "unknown"
+    assert r["reasons"] and any("00002" in x or "read" in x.lower() or "header" in x.lower() for x in r["reasons"])
