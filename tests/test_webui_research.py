@@ -144,7 +144,7 @@ def test_a_run_without_research_says_so(root):
 def test_an_oversized_or_symlinked_report_is_not_read(root, tmp_path):
     run = write_ledger(root / "org--a")
     (run / "research").mkdir()
-    (run / "research" / "base-candidates.json").write_text(" " * (webui.REPORT_MAX_BYTES + 1))
+    (run / "research" / "base-candidates.json").write_text(json.dumps(REPORT) + " " * webui.REPORT_MAX_BYTES)
     assert make_app(root).run_research("org--a")["report"] is None
     outside = tmp_path / "secret.json"
     outside.write_text(json.dumps(REPORT))

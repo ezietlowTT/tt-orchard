@@ -799,7 +799,7 @@ Measured on 2026-10-12 on this machine:
   same two ranked bundles, names tt-metal's `models/demos/gemma4` and `gemma4_31b_qb2` as existing work, and prints the
   `--base` commands. Nothing was started or written. No source was unavailable.
 Not done:
-- The UI preflight panel (`_ui_preflight`) does not run research, so the page shows the earlier base check.
+- (Fixed the same day, version 0.5.1: see the entry below.) The UI preflight panel (`_ui_preflight`) did not run research.
 - The sidecar class cannot be estimated from headers.
 - A resumed run rebuilds the report and overwrites `base-candidates.json` and `.md` (`generated_at` changes).
 - The preflight fails open. An exception from research leaves the earlier base check in place, and no row says that research failed.
@@ -807,3 +807,19 @@ Not done:
 - `_config` in `report.py` duplicates `arch_match.fetch_config`, because that function drops the failure reason.
 - GitHub's unauthenticated limit is 60 requests per hour and a run makes about 6. This is an open point.
 - Nothing was run on hardware.
+
+## 2026-10-13: base research in the web UI (version 0.5.1)
+Prompt (operator): "is this new featureset wired into the web UI too?" The answer was no (only the launched `bringup` had it).
+Then: "add it as part of this PR too". Built in a worktree (`ui-base-research`), because an unattended bring-up of
+`ThakiCloud/RAG-Gate-27B` was running from the main checkout. Tests first, a mutation per guard.
+- The preflight panel runs the research as a dry run does (read-only, no cache, no file) and shows `research`: the ranked
+  bundles, candidates, existing work and what was unavailable, bounded (8, 8, 5, 10 rows), redacted, https links only. The
+  new-run dialog has a research setting (full, no GitHub, off) that becomes `--no-github` or `--offline` on the launch.
+  The page asks again after every form edit, so one answer is kept for 5 minutes per model and setting (GitHub allows 60
+  unauthenticated requests an hour; one research run makes about 6).
+- `GET /api/runs/<name>/research` gives a run's `base-candidates.json` (2 MiB cap, no symlink) as the same view plus stage 0's
+  `base_research` record (known fields only). `base-candidates.json` and `.md` are on the file allow-list; the stage 0 view,
+  the cache and the temp files are not.
+- 17 mutations; the one survivor (the size cap) was a test whose oversized file failed JSON parsing anyway; it now pads a valid
+  report. Smoke test: the real server, a real preflight for `jialinyyzz/humanizer`, same two bundles as the CLI.
+- Not tested: the page's JavaScript runs only under `node --check` and by hand in a browser; no browser run was done here.
