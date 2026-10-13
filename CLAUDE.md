@@ -773,3 +773,40 @@ more stardew valley type color scheme and elements".
   0.2 to 1.0; the idle board stays at 0. The farmer also waited at plot 0 while the coder booted, because the facts
   name the next stage as current before it starts; the scene now works a plot only once that stage has started.
 
+
+## 2026-10-12: base model research (branch `research-base-discovery`, version 0.5.0)
+Prompt (operator, summarized from the plan; the original wording is not recorded here): when the `jialinyyzz/humanizer` run stopped because no installed bundle served its
+base, `bringup` should research which model to base a run on, and not only list bundles of one family. Plan:
+`docs/superpowers/plans/2026-10-12-base-research.md`. Tasks 0 to 10, test first, a mutation per guard.
+Key decisions:
+- The collectors are deterministic code. No model is involved. They live in `orchard/research/` (http, lineage,
+  arch_match, headers, ports, report, triage_rules, types).
+- The class rules are loaded from the delta-triage template (`triage_rules.py`), so the estimate and stage 0 use the same
+  rules.
+- The HTTP fetcher has no token and no Authorization header. It allows three hosts. Hugging Face redirects file downloads
+  to a CDN, so redirects are followed only to an allow-listed host.
+- `gh` is used for code search only, read only.
+- `--dry-run` does the reads and prints the result but keeps no cache and writes no file.
+- An inferred base (same architecture family and decisive config values) is a warning. Only a stated or inferred candidate
+  with an installed v6 bundle is chosen on its own. Stage 0 records whether its measured class agreed with the estimate;
+  the measurement decides.
+- Flags: `--offline`, `--no-github`, `--refresh-research`. Files: `<run dir>/research/base-candidates.json` and `.md`.
+Findings from planning: Hugging Face redirects file requests to a CDN; published bundles carry a manifest and tags that name
+the model they serve; GitHub code search needs a login (`gh auth login`).
+Measured on 2026-10-12 on this machine:
+- Live test (`ORCHARD_LIVE_RESEARCH=1`, `no_github=True`, no bundles installed): passed in 11 s. Stated base
+  `google/gemma-4-12B`. Ranked bundles: `stisiTT/gemma-4-12b-it-p150` first (inferred, group 2, weights-only), then
+  `tt-hous/gemma-4-26B-A4B-it_p150_p150x2_p150x4` (weak, no class estimate). Nothing unavailable. The planning run with `gh`
+  logged in also listed `google/gemma-4-12B` itself as stated with no bundle; this run excluded GitHub.
+- Dry run `tt-orchard bringup jialinyyzz/humanizer --dry-run`: the base check blocks with `nearest-model-missing`, lists the
+  same two ranked bundles, names tt-metal's `models/demos/gemma4` and `gemma4_31b_qb2` as existing work, and prints the
+  `--base` commands. Nothing was started or written. No source was unavailable.
+Not done:
+- The UI preflight panel (`_ui_preflight`) does not run research, so the page shows the earlier base check.
+- The sidecar class cannot be estimated from headers.
+- A resumed run rebuilds the report and overwrites `base-candidates.json` and `.md` (`generated_at` changes).
+- The preflight swallows an exception from research and shows no row saying so.
+- `report['model']` and the port text depend on upstream `clean()`.
+- `_config` in `report.py` duplicates `arch_match.fetch_config`, because that function drops the failure reason.
+- GitHub's unauthenticated limit is 60 requests per hour and a run makes about 6. This is an open point.
+- Nothing was run on hardware.
