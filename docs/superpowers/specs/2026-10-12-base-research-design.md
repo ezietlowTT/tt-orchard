@@ -51,6 +51,10 @@ the report contain all decisions. No model takes part.
 | `ports.py` | `tt model search --catalog`; tt-metal `models/` listing and supported-models list (raw files); GitHub issue and PR search for the architecture class name; code search when `gh` is logged in | existing or partial ports, each with a link |
 | `report.py` | all of the above | `base-candidates.json` and `base-candidates.md` in the run directory |
 
+Published bundles carry `tt_kernel_manifest.json` at the root (its `weights.repo_id` says which model they
+serve) and tags (`thin`: v6; `tt-model-container`: 5.1). A container bundle that lists
+`code/models/autoports/<model>/` ships a port; `ports.py` reports it as evidence.
+
 `headers.py` imports the comparison rules from `orchard/skills/delta-triage-templates/delta_triage.py`
 (the shared-tensor shape and dtype rule, the sidecar rule, the `mtp.*` allowance). The rules are not copied.
 A test fails if the two disagree on a fixture.
@@ -86,8 +90,8 @@ it used and whether the measurement agreed with the estimate.
 
 ### 3.4 Flags
 
-`--offline` skips every network source and the report says so. A dry run lists the queries it would make
-and makes none beyond the hub call the preflight already makes. `--no-github` skips GitHub only.
+`--offline` skips every network source and the report says so. A dry run makes the same read-only research calls as a real run, because it is how the operator reads the
+ranked list. It keeps no cache and writes no file. `--offline` makes no network call. `--no-github` skips GitHub only.
 
 ## 4. Rules
 
@@ -100,8 +104,9 @@ and makes none beyond the hub call the preflight already makes. `--no-github` sk
 - Responses are cached in the run directory with the fetch time. A resume reads the cache, so the report
   does not change between attempts. `--refresh-research` ignores the cache.
 - The collectors write only inside the run directory. They never publish, push, pull or install.
-- Hosts are fixed: `huggingface.co`, `api.github.com`, `raw.githubusercontent.com`. A redirect to another
-  host is refused.
+- Hosts are fixed: `huggingface.co`, `api.github.com`, `raw.githubusercontent.com`. Hugging Face answers a
+  file request with a signed redirect to a CDN host, so a redirect is followed only when its host ends in
+  `.hf.co` or `.huggingface.co`. Any other host, and any `http://` URL, is refused.
 - Header reads fetch only the first `N` bytes the safetensors format names (the length prefix, then the
   header), with a cap of 100 MB per file.
 
@@ -126,6 +131,7 @@ the installed or published Gemma bundles and report the Gemma 3 and Gemma 4 rela
   have to search.
 - No write access to GitHub or the hub.
 - The class estimate does not replace stage 0, and a wrong estimate costs a note in `delta.json`, not a run.
+- The class estimate says weights-only, full-port or unknown, and flags sidecar_possible. It cannot see a sidecar's tensors without downloading them.
 - Models with no safetensors (GGUF only, pickle weights) get `Unavailable("no safetensors")` for the
   class estimate.
 
