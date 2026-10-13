@@ -414,6 +414,9 @@ cp config/bringup.example.toml config/bringup.toml            # then edit it; CH
 tt-orchard bringup org/name --dry-run                         # the checks and the command; starts nothing
 tt-orchard bringup org/name                                   # check, fetch, run
 tt-orchard bringup org/name --base <bundle or model id>       # base the run on this model
+tt-orchard bringup org/name --offline                         # skip the base-model research; no lookups online
+tt-orchard bringup org/name --no-github                       # research without the GitHub searches
+tt-orchard bringup org/name --refresh-research                # ignore answers cached by an earlier attempt
 tt-orchard watch org/name                                     # follow a run from another terminal
 tt-orchard ui                                                 # watch and control every run in a browser
 tt-orchard status org/name                                    # also pause, resume, abort
@@ -514,7 +517,7 @@ its reason; a `warn` is information.
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
-| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning | `nearest-model-missing` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base, also a warning (see "How the base model is found") | `nearest-model-missing` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
@@ -530,6 +533,34 @@ snapshot to be in `hf_home` already.
 with a suggestion. The file is found from `--config`, then `$ORCHARD_BRINGUP_CONFIG`, then
 `<checkout>/config/bringup.toml`, then `~/.config/tt-orchard/bringup.toml`. The tier config stays in
 `tiers.toml`, because the tier loader refuses tables it does not know.
+
+#### How the base model is found
+
+Stage 0 compares the new model with a model that already runs on the chips, and later stages serve the new
+weights through that model's bundle. `bringup` researches which model that should be before it downloads
+anything large. It reads, with no Hugging Face token:
+
+- the Hugging Face hub: the card's `base_model` and its relation (fine-tune, quantized, adapter, merge), the
+  chain of bases above it, and other fine-tunes of the same base;
+- each candidate's `config.json`, to compare the architecture (model type and the layer, width, head and
+  vocabulary sizes);
+- the safetensors headers of the new model and a candidate, by two byte-range requests per file, to
+  estimate the class (`weights-only`, `full-port` or `unknown`) and the download size. A sidecar's
+  tensors would need a download, so the estimate only says one is possible;
+- the tt-model community catalog, published bundles (their manifest says which model they serve, and a
+  container bundle may ship its own port under `code/models/`), tt-metal's `models/` directories and
+  models README, and GitHub issues and pull requests for the architecture name. GitHub code search needs
+  `gh auth login`; without it that one search is skipped and the report says so.
+
+The result is `<run dir>/research/base-candidates.md` and `.json`. Each row says where it came from and how
+sure it is: `stated` (the card or `--base` names it), `inferred` (same architecture family and the same
+decisive config values) or `weak` (same family only). Only a stated or inferred candidate with an installed v6
+bundle is chosen on its own. Stage 0 gets the file as the input `base_candidates` and records in
+`delta.json` whether its measured class agreed with the estimate. The measurement decides; the estimate is
+a hint.
+
+A source that cannot be reached is listed as unavailable in the report. `--offline` skips all of it.
+`--dry-run` does the same lookups and prints what it finds, but keeps no cache and writes no file.
 
 ### 4.1 Before you start
 

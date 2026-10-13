@@ -86,6 +86,13 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--offline", action="store_true",
+                   help="do not look anything up online: the base-model research is skipped (the preflight's "
+                        "own hub lookup still happens)")
+    b.add_argument("--no-github", action="store_true",
+                   help="skip the GitHub part of the base-model research")
+    b.add_argument("--refresh-research", action="store_true",
+                   help="ignore the cached answers from an earlier attempt of this run")
     b.add_argument("--mode", choices=bringup_config.MODES,
                    help="where the hardware tests run for this run: local (this box) or lab (the [lab] box). "
                         "Default: the config's mode")
@@ -384,7 +391,11 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     resuming = (run_dir / "ledger.jsonl").exists()
     print(f"{style.icon('🧭')}mode: " + (f"lab ({cfg.lab.host}): hardware tests run there; the coder stays here"
                                          if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
-    sig = signals or preflight.default_signals(cfg)
+    from orchard.research import Options
+    from orchard.research import types as research_types
+    research_options = Options(cache_dir=None if args.dry_run else run_dir / "research" / "cache",
+                               offline=args.offline, no_github=args.no_github, refresh=args.refresh_research)
+    sig = signals or preflight.default_signals(cfg, research_options=research_options)
     override = None
     if args.base:
         override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run)
@@ -433,7 +444,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         if base_hub is None:
             return _refuse(f"cannot look up the base model {base_data['base']} on the hub: {why}")
         base_snapshot = fetch.snapshot_dir(hf_home, base_data["base"], base_hub.sha)
-    inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {})}
+    candidates_path = None
+    # The report is written only after the preflight passed (a blocked run returned above) and never on a
+    # dry run. The model id is checked again here because --run-dir skips the slug check that guards the path.
+    if base_data.get("report") and not args.dry_run and research_types.valid_id(args.model):
+        from orchard.research import report as research_report
+        candidates_path = research_report.write(run_dir, base_data["report"])
+    inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
+              **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)
