@@ -823,3 +823,24 @@ Then: "add it as part of this PR too". Built in a worktree (`ui-base-research`),
 - 17 mutations; the one survivor (the size cap) was a test whose oversized file failed JSON parsing anyway; it now pads a valid
   report. Smoke test: the real server, a real preflight for `jialinyyzz/humanizer`, same two bundles as the CLI.
 - Not tested: the page's JavaScript runs only under `node --check` and by hand in a browser; no browser run was done here.
+
+## 2026-10-13: first unattended bring-up with the research setup (ThakiCloud/RAG-Gate-27B)
+Prompt (operator): "put the new setup to a test and attempt an unsupervised bring up of a small, novel and useful and relatively
+'official' model". Chosen with the new tooling: dry-run preflights of three Qwen3.8-27B fine-tunes found by a hub search
+(`ThakiCloud/RAG-Gate-27B`, Apache-2.0, text only, a retrieval gate for RAG; ThinkingCap was gated; Omni-Edu's licence is "other").
+None of the fine-tunes is small; "small" was read as a small change from the base. Run: `tt-orchard bringup ThakiCloud/RAG-Gate-27B`
+(Coder-Next on one board). Run directory `~/orchard-runs/thakicloud--rag-gate-27b`.
+- Research: stated base `Qwen/Qwen3.8-27B`, bundle `episod/qwen3.8-27b-dflash2-p150` chosen automatically, estimated class
+  `weights-only`; stage 0 measured `weights-only` (`base_research.agreed` true). Stage 0 2m10s, stage 1 4m01s, stage 2 27m29s
+  (31 of 32 tokens, top-1 agreement 0.96875, ready in 1,482 s cold). Stage 3, 5, 6 skipped by design.
+- Stage 4: 1 chip passed (rc 0), 2 chips passed (rc 0), 4 chips failed twice (rc 4) with `Fabric Router Sync: Timeout after
+  10000 ms ... Ethernet handshake likely failed -- the link may not be healthy`, on a different device each time (3, then 2).
+  Same docker arguments and mesh as the Clef 4-chip test that passed on this box on 2026-10-07. The run ended `blocked`
+  (`stage-failed`). Cause not found: the box's link state is the suspect; nothing was reset by hand.
+- Three blocks on the way, none about the model: (1) ollama was not running, so the park's CPU stand-in failed its canary
+  (`coder-unusable`); I started `OLLAMA_MODELS=/mnt/bonus/models/ollama ollama serve` and retried. (2) Stage 4 needed 110 GB
+  and 109.6 GB was free; the operator approved deleting the Clef tensor cache (84 GB), then retried. (3) the 4-chip failure above.
+- Gaps found, not fixed in this PR: preflight does not check that the CPU stand-in answers although stage 4 needs it for the
+  park; `setup --start-ollama` runs a plain `ollama serve` that does not see `/mnt/bonus/models/ollama`; stage 4's disk
+  check can only be met by deleting earlier runs' caches, and `setup` leaves no hint about that.
+- Not a hands-off run: three resumes by me. Nothing was published, pushed or uploaded.
