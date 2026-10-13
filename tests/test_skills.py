@@ -194,7 +194,7 @@ def test_the_delta_triage_skill_runs_the_template_that_exists_in_this_repo():
     spec = importlib.util.spec_from_file_location("delta_triage_for_skill_test", script)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS)
+    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS) | set(mod.OPTIONAL_KEYS)
     assert "{{HF_HOME}}/hub/models--<org>--<name>/snapshots/<sha>/" in flat
 
 

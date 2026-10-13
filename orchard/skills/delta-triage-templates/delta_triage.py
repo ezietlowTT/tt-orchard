@@ -80,6 +80,7 @@ from pathlib import Path
 HERE_DIR = Path(__file__).resolve().parent
 EVIDENCE = HERE_DIR / "evidence"
 CONFIG_KEYS = ("run_dir", "model_id", "model_snapshot", "nearest_model_id", "nearest_snapshot")
+OPTIONAL_KEYS = ("base_candidates",)      # read when present: the research report (research/base-candidates.json)
 
 # The text config values that decide whether the nearest model's code can run the new weights.
 DECISIVE = ("num_hidden_layers", "hidden_size", "num_attention_heads", "num_key_value_heads",
@@ -226,6 +227,34 @@ def with_revision(model_id: str, snapshot: str) -> str:
     if "@" in model_id or snap.parent.name != "snapshots":
         return model_id
     return f"{model_id}@{snap.name}"
+
+
+def report_text(value):
+    """A string from the research report, which is fetched text: one line, control characters removed,
+    at most 300 characters. Anything that is not a string gives None. It is only recorded, never used as a
+    path, a command or an instruction."""
+    if not isinstance(value, str):
+        return None
+    return " ".join("".join(ch for ch in value if ch.isprintable() or ch.isspace()).split())[:300]
+
+
+def base_research(cfg: dict, nearest_id: str, measured_class: str):
+    """How the research report's estimate for the nearest model compared with this script's measurement.
+    Only recorded; the class and the path come from the measurement. None when `triage_config.json` names no
+    report. A report that cannot be read, or has no row for the nearest model, gives a null candidate."""
+    path = cfg.get("base_candidates")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    data, _ = read_json(Path(path))
+    rows = data.get("candidates") if isinstance(data, dict) else None
+    repo = nearest_id.split("@", 1)[0]
+    row = (next((r for r in rows if isinstance(r, dict) and r.get("repo") == repo), None)
+           if isinstance(rows, list) else None)
+    estimate = row.get("class_estimate") if row else None
+    est = report_text(estimate.get("class") if isinstance(estimate, dict) else None) or None
+    return {"candidate": ({"repo": repo, "confidence": report_text(row.get("confidence"))} if row else None),
+            "estimated_class": est, "measured_class": measured_class,
+            "agreed": (est == measured_class) if est else None}
 
 
 def read_json(path: Path):
@@ -1108,6 +1137,9 @@ def main() -> int:
                                              + ", ".join(f"{x['file']} (sha256 {x['sha256'][:12]})" for x in code)
                                              + ". It was not run. Read it before any run imports it, and "
                                              "record the hash of the file a check used.")})
+    research = base_research(cfg, nearest_id, cls)
+    if research is not None:
+        delta["base_research"] = research
     (HERE_DIR / "delta.json").write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     say(f"wrote delta.json: path {path}, class {cls}")
     for r in reasons:

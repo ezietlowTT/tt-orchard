@@ -41,13 +41,21 @@ You do not write a comparison script.
      `README.md`. For a Qwen3.8-27B fine-tune it is `Qwen/Qwen3.8-27B`.
    - `nearest_snapshot`: the nearest model's snapshot directory, found the same way, or the
      `input base` path.
+   - The run facts may also list an input `base_candidates`: a ranked list of base models that the run's
+     research wrote (`research/base-candidates.json`). Use it only to choose `nearest_model_id` when the
+     run facts name no `input base` and the README names no base: take the first candidate whose
+     `confidence` is `stated` or `inferred`. Do not search the web. The script measures; the list is an
+     estimate, and `delta.json` records whether the two agreed.
 2. Write `triage_config.json` in your stage directory (absolute paths):
 
        {"run_dir": "<the run directory>",
         "model_id": "<the run's model value>",
         "model_snapshot": "<new model snapshot>",
         "nearest_model_id": "<nearest model id>",
-        "nearest_snapshot": "<nearest model snapshot>"}
+        "nearest_snapshot": "<nearest model snapshot>",
+        "base_candidates": "<the input base_candidates path, when the run facts list one>"}
+
+   Leave the `base_candidates` key out when there is no such input.
 
 3. Copy the template into your stage directory:
 

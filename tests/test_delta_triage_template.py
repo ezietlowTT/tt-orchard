@@ -758,3 +758,89 @@ def test_the_directory_wrappers_report_their_directories_as_paths(text_case):
     c = mod.compare_configs(model, nearest)
     assert c["model_config_path"] == str(model / "config.json")
     assert c["base_config_path"] == str(nearest / "config.json")
+
+
+# ---- the research report as an optional input -------------------------------------------------------
+
+def write_candidates(stage, rows):
+    path = stage.parent.parent / "research" / "base-candidates.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"candidates": rows}))
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    cfg["base_candidates"] = str(path)
+    (stage / "triage_config.json").write_text(json.dumps(cfg))
+    return path
+
+
+ROW = {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated", "class_estimate": {"class": "weights-only"}}
+
+
+def test_the_draft_records_how_the_research_estimate_compared_with_the_measurement(text_case):
+    stage = text_case()
+    write_candidates(stage, [ROW])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    assert br["candidate"] == {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated"}
+    assert (br["estimated_class"], br["measured_class"], br["agreed"]) == ("weights-only", "weights-only", True)
+
+
+def test_a_disagreement_is_recorded_and_changes_nothing_else(text_case):
+    stage = text_case()
+    write_candidates(stage, [{**ROW, "class_estimate": {"class": "full-port"}}])
+    run_triage(stage)
+    d = delta(stage)
+    assert d["base_research"]["agreed"] is False and d["path"] == "weights-only" and d["class"] == "weights-only"
+
+
+@pytest.mark.parametrize("content", ["not json", "[]", '{"candidates": "x"}', '{"candidates": []}',
+                                     '{"candidates": [7, null]}'])
+def test_an_unreadable_or_empty_report_gives_a_null_candidate_and_no_failure(text_case, content):
+    stage = text_case()
+    write_candidates(stage, []).write_text(content)
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    br = delta(stage)["base_research"]
+    assert br["candidate"] is None and br["agreed"] is None and br["estimated_class"] is None
+
+
+@pytest.mark.parametrize("estimate", [None, "weights-only", ["weights-only"], {"class": None}, {}])
+def test_a_missing_or_malformed_estimate_is_ignored(text_case, estimate):
+    stage = text_case()
+    write_candidates(stage, [{"repo": "Qwen/Qwen3.8-27B", "confidence": "stated", "class_estimate": estimate}])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    assert br["candidate"]["repo"] == "Qwen/Qwen3.8-27B" and br["estimated_class"] is None and br["agreed"] is None
+
+
+def test_without_the_key_the_draft_has_no_base_research(text_case):
+    stage = text_case()
+    run_triage(stage)
+    assert "base_research" not in delta(stage)
+
+
+def test_a_candidate_for_another_repo_is_not_matched(text_case):
+    stage = text_case()
+    write_candidates(stage, [{**ROW, "repo": "other/model"}])
+    run_triage(stage)
+    assert delta(stage)["base_research"]["candidate"] is None
+
+
+def test_the_draft_with_base_research_still_passes_the_stage_0_gate(text_case):
+    stage = text_case()
+    write_candidates(stage, [ROW])
+    run_triage(stage)
+    assert "base_research" in delta(stage)
+    assert gate_delta(stage, stage.parent.parent).ok
+
+
+def test_report_text_is_cleaned_before_it_is_recorded(text_case):
+    """The report is fetched text. Control characters and newlines are removed, the length is capped, and
+    a value that is not a string is recorded as null."""
+    stage = text_case()
+    write_candidates(stage, [{**ROW, "confidence": "sta\nted\x1b[31m" + "x" * 400,
+                              "class_estimate": {"class": ["weights-only"]}}])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    conf = br["candidate"]["confidence"]
+    assert "\n" not in conf and "\x1b" not in conf and len(conf) <= 300
+    assert br["estimated_class"] is None and br["agreed"] is None
