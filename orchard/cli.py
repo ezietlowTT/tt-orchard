@@ -27,6 +27,7 @@ The supervisor, the download and the outside signals are parameters of `main`, s
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import io
 import json
 import os
@@ -227,11 +228,34 @@ def _watch(run_dir: Path, args, style, out) -> int:
     return EXIT_OK
 
 
+UI_RESEARCH_TTL_S = 300
+
+
 def _ui_preflight(cfg):
     """The preflight the UI runs: the same checks as `bringup --dry-run`, with `--base` resolved without
-    installing anything (an install happens only when the run itself starts)."""
-    def run(model, base):
-        sig = preflight.default_signals(cfg)
+    installing anything (an install happens only when the run itself starts). The base-model research runs
+    as in a dry run: read-only requests, no cache and no file. The page asks again after every edit of the
+    form, so one answer is kept for UI_RESEARCH_TTL_S per model, base and option; GitHub allows 60
+    unauthenticated requests an hour and one research run makes about 6."""
+    from orchard.research import Options
+    memo: dict = {}
+
+    def run(model, base, research=None):
+        options = Options(cache_dir=None, offline=research == "offline",
+                          no_github=research in ("offline", "no-github"))
+        sig = preflight.default_signals(cfg, research_options=options)
+        if sig.research is not None:
+            fresh = sig.research
+
+            def remembered(model_id, hub, override, inst):
+                key = (model_id, override, research)
+                hit = memo.get(key)
+                if hit and time.monotonic() - hit[0] < UI_RESEARCH_TTL_S:
+                    return hit[1]
+                report = fresh(model_id, hub, override, inst)
+                memo[key] = (time.monotonic(), report)
+                return report
+            sig = dataclasses.replace(sig, research=remembered)
         override = None
         if base:
             override, why = resolve_base(base, sig, None, io.StringIO(), ui.Style("none", False), dry_run=True)

@@ -75,6 +75,9 @@ from orchard.tiers import LOCAL_HOSTS
 DEFAULT_PORT = 8780
 GOZER_TTL_S = 5.0               # one `gozer status` serves every request in this window (the farm
                                 # scene sends the farmer to the shed when a lease changes, so keep it short)
+REPORT_MAX_BYTES = 2 * 1024 * 1024   # the base research report is read up to 2 MiB (stage 0 reads it with the same cap)
+RESEARCH_CHOICES = ("full", "no-github", "offline")
+RESEARCH_FLAGS = {"no-github": ["--no-github"], "offline": ["--offline"]}
 FILE_TAIL_BYTES = 256 * 1024    # a longer file is served as its last 256 KB
 BODY_LIMIT = 64 * 1024
 SSE_PING_S = 15.0
@@ -105,11 +108,12 @@ ALLOWED = re.compile(
     r"|stages/4/tests/(?:plan\.json|\d+/(?:test-result\.json|output\.txt))"
     r"|stages/4/configs/\d+/(?:swap_config\.json|evidence/[A-Za-z0-9._-]+\.(?:json|txt|log))"
     r"|evidence/[A-Za-z0-9._-]+\.txt"
+    r"|research/base-candidates\.(?:json|md)"
     r"|stages/8/bundle/[A-Za-z0-9._-]+\.(?:md|txt))$")
 LISTED = ("BLOCKED.md", "blocked.json", "coder.log", "stages/*/*.json", "stages/*/evidence/*",
           "stages/4/tests/plan.json", "stages/4/tests/*/test-result.json", "stages/4/tests/*/output.txt",
           "stages/4/configs/*/swap_config.json", "stages/4/configs/*/evidence/*", "evidence/*",
-          "stages/8/bundle/*")
+          "stages/8/bundle/*", "research/base-candidates.*")
 # Runs that need a person first, then the ones still going, then the finished ones.
 ATTENTION = {"blocked": 0, "stopped-or-crashed": 0, "unreadable": 0, "paused": 1, "running": 2,
              "not-started": 3, "ready-for-operator-review": 4, "aborted": 5}
@@ -490,10 +494,12 @@ class WebApp:
         except bringup_config.BringupConfigError as exc:
             raise BadRequest(str(exc)) from exc
 
-    def _checks_for(self, model, base, mode):
+    def _checks_for(self, model, base, mode, research=None):
         cfg = self._cfg_for(mode)
         fn = self._preflight_for(cfg) if self._preflight_for else self._preflight
-        return fn(model, base)
+        if research in (None, "full"):
+            return fn(model, base)
+        return fn(model, base, research=research)
 
     # ---- settings: which chip layout and which CPU stand-in (orchard/settings.py) ----
     def settings(self) -> dict:
@@ -756,9 +762,70 @@ class WebApp:
             raise BadRequest("the base must be a bundle or model id as org/name")
         return model, base or None
 
-    def preflight(self, model, base=None, mode=None) -> dict:
+    @staticmethod
+    def _check_research(research):
+        if research not in (None, "") + RESEARCH_CHOICES:
+            raise BadRequest(f"research must be one of {', '.join(RESEARCH_CHOICES)}")
+        return research or None
+
+    def research_view(self, report) -> dict | None:
+        """What the page receives of a research report: a bounded, redacted summary. The report holds text from
+        the internet (reasons, claims, reasons a read failed), so every string is redacted here and the page
+        sets each with textContent. A link is kept only when it is https; anything else becomes None."""
+        if not isinstance(report, dict):
+            return None
+        red = lambda v: self.redact(v) if isinstance(v, str) else None            # noqa: E731
+
+        def rows(key, limit):
+            v = report.get(key)
+            return [r for r in v[:limit] if isinstance(r, dict)] if isinstance(v, list) else []
+
+        def link(v):
+            return red(v) if isinstance(v, str) and v.startswith("https://") else None
+
+        sel = report.get("selected")
+        return {
+            "generated_at": red(report.get("generated_at")), "offline": report.get("offline") is True,
+            "selected": {k: red(sel.get(k)) for k in ("repo", "bundle", "confidence", "class")}
+            if isinstance(sel, dict) else None,
+            "choices": [{"name": red(c.get("name")), "installed": c.get("installed") is True, "class": red(c.get("class")),
+                         "confidence": red(c.get("confidence")), "schema": red(c.get("schema"))}
+                        for c in rows("bundle_choices", 8)],
+            "candidates": [{"repo": red(c.get("repo")), "confidence": red(c.get("confidence")), "why": red(c.get("why")),
+                            "group": c.get("group") if isinstance(c.get("group"), int) else None,
+                            "download_gb": c.get("download_gb") if isinstance(c.get("download_gb"), (int, float)) else None,
+                            "class": red((c.get("class_estimate") or {}).get("class")
+                                         if isinstance(c.get("class_estimate"), dict) else None)}
+                           for c in rows("candidates", 8)],
+            "ports": [{"claim": red(p.get("claim")), "url": link(p.get("url"))} for p in rows("ports", 5)],
+            "unavailable": [{"source": red(u.get("source")), "reason": red(u.get("reason"))}
+                            for u in rows("unavailable", 10)]}
+
+    def run_research(self, name: str) -> dict:
+        """The report a run wrote, and stage 0's record of how its measured class compared with the estimate.
+        Either is None when the run has none. Reads stay inside the run and under REPORT_MAX_BYTES."""
+        run = self._run(name)
+
+        def load(path: Path):
+            try:
+                if path.is_symlink() or not path.is_file() or path.stat().st_size > REPORT_MAX_BYTES:
+                    return None
+                return json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+
+        stage0 = None
+        rec = (load(run / "stages" / "0" / "delta.json") or {}).get("base_research")
+        if isinstance(rec, dict):
+            stage0 = {k: (self.redact(rec[k]) if isinstance(rec.get(k), str) else
+                          rec[k] if isinstance(rec.get(k), bool) else None)
+                      for k in ("candidate", "estimated_class", "measured_class", "agreed")}
+        return {"report": self.research_view(load(run / "research" / "base-candidates.json")), "stage0": stage0}
+
+    def preflight(self, model, base=None, mode=None, research=None) -> dict:
         model, base = self._check_ids(model, base)
-        checks = self._checks_for(model, base, mode)
+        research = self._check_research(research)
+        checks = self._checks_for(model, base, mode, research)
         name = bringup_config.slug(model)
         rows = []
         for c in checks:
@@ -767,21 +834,25 @@ class WebApp:
                          "candidates": data.get("candidates"), "base": data.get("base")})
         return {"model": model, "base": base, "run": name, "run_dir": str(self.runs_root / name),
                 "resuming": (self.runs_root / name / "ledger.jsonl").is_file(),
-                "ok": not any(c.status == "block" for c in checks), "checks": rows}
+                "ok": not any(c.status == "block" for c in checks), "checks": rows,
+                "research": self.research_view(next((c.data.get("report") for c in checks if c.name == "base"
+                                                     and isinstance(c.data, dict)), None))}
 
-    def bringup(self, model, base=None, mode=None) -> dict:
+    def bringup(self, model, base=None, mode=None, research=None) -> dict:
         model, base = self._check_ids(model, base)
+        research = self._check_research(research)
         self._cfg_for(mode)                               # a mode the config cannot run is refused first
         name = bringup_config.slug(model)
         if (self.runs_root / name / "ledger.jsonl").is_file():
             state = self._collect(self.runs_root / name)["state"]
             if state in ("running", "paused"):
                 raise Conflict(f"{name} is already {state}")
-        checks = self._checks_for(model, base, mode)
+        checks = self._checks_for(model, base, mode, research)
         stops = [c for c in checks if c.status == "block"]
         if stops:
             raise Conflict("the preflight blocks: " + ", ".join(f"{c.name} ({c.reason})" for c in stops))
-        extra = (["--base", base] if base else []) + (["--mode", mode] if mode else [])
+        extra = (["--base", base] if base else []) + (["--mode", mode] if mode else []) \
+            + RESEARCH_FLAGS.get(research, [])
         return self._launch(name, self._bringup_argv(model, extra))
 
 
@@ -1053,6 +1124,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, app.run_detail(segs[2]))
         if len(segs) == 4 and segs[1] == "runs":
             name, what = segs[2], segs[3]
+            if what == "research":
+                return self._json(200, app.run_research(name))
             if what == "ledger":
                 try:
                     after = int(q.get("after", "0"))
@@ -1071,9 +1144,11 @@ class Handler(BaseHTTPRequestHandler):
         app = self.app
         body = self._body()
         if segs == ["api", "preflight"]:
-            return self._json(200, app.preflight(body.get("model"), body.get("base"), body.get("mode")))
+            return self._json(200, app.preflight(body.get("model"), body.get("base"), body.get("mode"),
+                                                       body.get("research")))
         if segs == ["api", "bringup"]:
-            return self._json(200, app.bringup(body.get("model"), body.get("base"), body.get("mode")))
+            return self._json(200, app.bringup(body.get("model"), body.get("base"), body.get("mode"),
+                                                     body.get("research")))
         if segs == ["api", "settings"]:
             return self._json(200, app.save_settings(body.get("layout"), body.get("cpu_model"), body.get("mode")))
         if segs == ["api", "checks"]:
