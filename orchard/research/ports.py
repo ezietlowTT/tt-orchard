@@ -17,7 +17,7 @@ from urllib.parse import quote
 
 from orchard import nearest
 from orchard.research.http import FetchError
-from orchard.research.types import INFERRED, WEAK, Evidence, Result, Unavailable, clean
+from orchard.research.types import INFERRED, WEAK, Evidence, Result, Unavailable, clean, valid_id
 
 SAFE_TERM = re.compile(r"[A-Za-z0-9_.-]{3,80}")
 METAL = "tenstorrent/tt-metal"
@@ -145,6 +145,8 @@ def github_code(t: dict, *, run=subprocess.run, which=shutil.which, now: str = "
             continue
         try:
             items = json.loads(done.stdout).get("items") or []
+            if not isinstance(items, list):
+                raise ValueError("items is not a list")
         except (ValueError, AttributeError):
             res.unavailable.append(Unavailable("github code search", "gh gave no JSON"))
             continue
@@ -158,6 +160,10 @@ def github_code(t: dict, *, run=subprocess.run, which=shutil.which, now: str = "
 def catalog(family: str, *, run=subprocess.run, which=shutil.which, now: str = "") -> Result:
     """Bundles in the community catalog for this family (`tt model search <family> --catalog --json`)."""
     res = Result(data={"bundles": []})
+    # The family becomes an argv element of `tt`. A leading dash would be read as an option.
+    if not (isinstance(family, str) and SAFE_TERM.fullmatch(family) and not family.startswith("-")):
+        res.unavailable.append(Unavailable("catalog", "the search term is not a plain word, so no search was made"))
+        return res
     exe = which("tt")
     if not exe:
         res.unavailable.append(Unavailable("catalog", "the `tt` command is not installed"))
@@ -172,15 +178,24 @@ def catalog(family: str, *, run=subprocess.run, which=shutil.which, now: str = "
     if got is None:
         res.unavailable.append(Unavailable("catalog", f"`tt model search --catalog` gave no answer (exit {done.returncode})"))
         return res
-    res.data["bundles"] = got
+    skipped = 0
     for b in got:
+        # `tt` output is untrusted; a name that is not a Hub id never becomes a URL or a bundle row.
+        if not valid_id(b.get("name")):
+            skipped += 1
+            continue
+        res.data["bundles"].append(b)
         res.evidence.append(Evidence("catalog", clean(f"the community catalog lists {b['name']}"),
                                      f"https://huggingface.co/{b['name']}", INFERRED, now))
+    if skipped:
+        res.unavailable.append(Unavailable("catalog", clean(f"{skipped} catalog name(s) skipped: not a Hub id")))
     return res
 
 
 def bundle_code(siblings, bundle: str, now: str) -> list[Evidence]:
     """A bundle's file list names the code it ships: code/models/autoports/<model>/ or code/models/demos/<model>/."""
+    if not valid_id(bundle):                                  # the id goes into a URL
+        return []
     seen: list[str] = []
     for item in siblings if isinstance(siblings, list) else []:
         name = item.get("rfilename") if isinstance(item, dict) else None

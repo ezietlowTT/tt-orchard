@@ -237,3 +237,45 @@ def test_collect_runs_the_github_searches_by_default():
     ports.collect(f, CFG, family="gemma", run=run, which=which_gh)
     assert any("search/issues" in u for u in f.urls)
     assert any("search/code" in argv for argv in run.argv)
+
+
+# ---- ids and terms are checked before they reach a URL or argv (fix round 1) -------------------------------
+
+HOSTILE = ["../x", "a/b?c", "a/b/c", "x/y z", "a//b", "", None, 5]
+
+
+def test_catalog_names_that_are_not_hub_ids_are_skipped_with_a_row_and_never_become_urls():
+    payload = {"bundles": [{"name": n} for n in HOSTILE] + [{"name": "ok/good-1"}]}
+    run = Run(json.dumps(payload))
+    r = ports.catalog("gemma", run=run, which=lambda n: "/x/tt", now=NOW)
+    assert [e.url for e in r.evidence] == ["https://huggingface.co/ok/good-1"]
+    assert all("../" not in e.url and "?" not in e.url for e in r.evidence)
+    assert [b["name"] for b in r.data["bundles"]] == ["ok/good-1"]
+    assert r.unavailable and r.unavailable[0].source == "catalog" and "skipped" in r.unavailable[0].reason
+
+
+def test_bundle_code_refuses_a_bundle_id_that_is_not_a_hub_id():
+    sib = [{"rfilename": "code/models/demos/gemma4/x.py"}]
+    for bad in ["../x", "a/b?c", "a b/c", "", None]:
+        assert ports.bundle_code(sib, bad, NOW) == []
+    assert len(ports.bundle_code(sib, "ok/good", NOW)) == 1
+
+
+@pytest.mark.parametrize("family", ["-xyz", "--help", "a b", "a;b", "ab", "", None, "x" * 81, "a/b"])
+def test_a_family_that_is_not_a_plain_term_never_reaches_tt(family):
+    run = Run(json.dumps({"bundles": []}))
+    r = ports.catalog(family, run=run, which=lambda n: "/x/tt", now=NOW)
+    assert run.argv == [] and r.unavailable and r.unavailable[0].source == "catalog"
+
+
+def test_gh_items_that_are_not_a_list_are_unavailable_not_a_crash():
+    run = Run(json.dumps({"items": {"a": 1}}))
+    r = ports.github_code(ports.terms(CFG), run=run, which=which_gh, now=NOW)
+    assert r.evidence == [] and "gh gave no JSON" in r.unavailable[0].reason
+
+
+def test_a_tt_metal_answer_that_is_not_a_listing_is_unavailable():
+    # GitHub answers a missing path or a rate limit with an object, not a list.
+    f = FakeFetch({DEMOS: {"message": "Not Found"}, EXPER: [], README: b""})
+    r = ports.metal(f, ports.terms(CFG))
+    assert r.evidence == [] and any("not a listing" in u.reason for u in r.unavailable)
