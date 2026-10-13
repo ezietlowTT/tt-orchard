@@ -735,3 +735,26 @@ def test_no_drafter_hazard_is_added_when_neither_model_has_mtp_tensors(tmp_path,
     d = delta(stage)
     assert d["mtp"] == {"nearest_tensors": 0, "new_tensors": 0}
     assert len([h for h in d["hazards"] if h["area"] == "drafter"]) == 1
+
+
+def test_a_cut_short_shard_is_reported_by_the_directory_wrapper(text_case):
+    """compare_tensors reads the directories and hands the read errors to compare_tensor_maps; a shard
+    that cannot be read in the nearest model must still show up as an error."""
+    stage = text_case()
+    nearest = Path(json.loads((stage / "triage_config.json").read_text())["nearest_snapshot"])
+    shard = sorted(nearest.glob("model*.safetensors"))[0]
+    shard.write_bytes(shard.read_bytes()[:5])
+    mod = template_module()
+    out = mod.compare_tensors(model_dir_of(stage), nearest)
+    assert any(shard.name in e for e in out["errors"]), out
+
+
+def test_the_directory_wrappers_report_their_directories_as_paths(text_case):
+    stage = text_case()
+    model, nearest = model_dir_of(stage), Path(json.loads((stage / "triage_config.json").read_text())["nearest_snapshot"])
+    mod = template_module()
+    t = mod.compare_tensors(model, nearest)
+    assert t["model"]["path"] == str(model) and t["base"]["path"] == str(nearest)
+    c = mod.compare_configs(model, nearest)
+    assert c["model_config_path"] == str(model / "config.json")
+    assert c["base_config_path"] == str(nearest / "config.json")

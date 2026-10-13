@@ -287,8 +287,14 @@ def effective(cfg: dict, key: str):
 def compare_configs(model_dir: Path, base_dir: Path) -> dict:
     mcfg, merr = read_json(model_dir / "config.json")
     bcfg, berr = read_json(base_dir / "config.json")
-    out = {"model_config_path": str(model_dir / "config.json"),
-           "base_config_path": str(base_dir / "config.json"), "errors": [e for e in (merr, berr) if e]}
+    return compare_config_dicts(mcfg, bcfg, [e for e in (merr, berr) if e],
+                                str(model_dir / "config.json"), str(base_dir / "config.json"))
+
+
+def compare_config_dicts(mcfg, bcfg, errors: list, model_path: str, base_path: str) -> dict:
+    """The config comparison on two already-read configs. `compare_configs` reads them from snapshot
+    directories; the research package reads them from the hub."""
+    out = {"model_config_path": model_path, "base_config_path": base_path, "errors": list(errors)}
     if not isinstance(mcfg, dict) or not isinstance(bcfg, dict):
         out["errors"].append("config.json is missing or not an object in "
                              + ("the new model" if not isinstance(mcfg, dict) else "the nearest model"))
@@ -412,6 +418,14 @@ def dtype_histogram(tensors: dict) -> dict:
 def compare_tensors(model_dir: Path, base_dir: Path) -> dict:
     mshards, mt, merr = read_tensors(model_dir)
     bshards, bt, berr = read_tensors(base_dir)
+    return compare_tensor_maps(mt, bt, mshards=mshards, bshards=bshards, merr=merr, berr=berr,
+                               model_path=str(model_dir), base_path=str(base_dir))
+
+
+def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, merr: list, berr: list,
+                        model_path: str, base_path: str) -> dict:
+    """The tensor comparison on two already-read {name: {"dtype", "shape", "shard"}} maps. The research
+    package builds the maps from safetensors headers fetched by range request."""
     m_raw, b_raw = set(mt), set(bt)
     mn = {normalize(k): v for k, v in mt.items()}
     bn = {normalize(k): v for k, v in bt.items()}
@@ -422,10 +436,10 @@ def compare_tensors(model_dir: Path, base_dir: Path) -> dict:
     dtype_diffs = [{"name": k, "model": mn[k]["dtype"], "base": bn[k]["dtype"]}
                    for k in common if mn[k]["dtype"] != bn[k]["dtype"]]
     return {
-        "model": {"path": str(model_dir), "shards": mshards, "num_tensors": len(mt),
+        "model": {"path": model_path, "shards": mshards, "num_tensors": len(mt),
                   "dtype_histogram": dtype_histogram(mt),
                   "uses_language_model_prefix": any(k.startswith(LM_PREFIX) for k in mt)},
-        "base": {"path": str(base_dir), "shards": bshards, "num_tensors": len(bt),
+        "base": {"path": base_path, "shards": bshards, "num_tensors": len(bt),
                  "dtype_histogram": dtype_histogram(bt),
                  "uses_language_model_prefix": any(k.startswith(LM_PREFIX) for k in bt)},
         "errors": merr + berr,
