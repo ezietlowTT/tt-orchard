@@ -568,7 +568,9 @@ measures the class and records in `delta.json` whether the estimate agreed. The 
 measurement and changes neither the class nor the path.
 
 A source that cannot be reached is listed as unavailable in the report. After one connection failure to a host
-(no route, a timeout), the remaining requests to that host fail at once. `--offline` skips the research and makes
+(no route, a timeout), the remaining requests to that host fail at once. One research run makes at most 600
+requests in at most 240 seconds (answers from the cache do not count); after that the remaining requests fail
+at once, are listed as unavailable, and an estimate that misses a header is `unknown`. `--offline` skips the research and makes
 no request for it. The preflight's own hub lookup, `tt model search` and the download still run.
 `--no-github` skips the GitHub issue and pull request search and the GitHub code search. The listings of tt-metal's
 `models/` directories and its models README are still read. `--refresh-research` ignores answers cached by an
