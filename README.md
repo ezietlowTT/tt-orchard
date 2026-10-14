@@ -456,7 +456,8 @@ until it ends, and `--once` prints the recent history and stops.
 every run under `runs_root` (runs that need you first), and for the run you pick an animated orchard, its stages,
 the same live lines as `watch`, the ledger, its files (gate results, evidence, the operator bundle,
 `BLOCKED.md`, the coder log) and what to do next. The new-run dialog runs the base-model research with the
-preflight (read-only requests, no cache, no file; one answer is kept for five minutes) and lists the ranked
+preflight (read-only requests, no cache, no file; one answer per model, base and setting is kept for five
+minutes, at most 32 of them) and lists the ranked
 bundles, the existing work and anything that could not be read; its research setting maps to `--no-github` and
 `--offline`. A run's Details tab shows the report that run wrote and how stage 0's measured class compared with
 the estimate. The Hardware view shows

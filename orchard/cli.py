@@ -33,6 +33,7 @@ import json
 import os
 import shlex
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -237,12 +238,43 @@ def _watch(run_dir: Path, args, style, out) -> int:
 
 
 UI_RESEARCH_TTL_S = 300
+UI_RESEARCH_MEMO_MAX = 32       # research answers the UI keeps (one per model, base and research setting)
+
+
+class _ResearchMemo:
+    """The UI's research answers, each kept for UI_RESEARCH_TTL_S. The server answers requests on threads, so
+    every read and write holds the lock; storing drops expired answers and then the oldest beyond
+    UI_RESEARCH_MEMO_MAX. Two requests that miss at the same moment may both ask; that costs a repeat, not an
+    error."""
+
+    def __init__(self):
+        self._items: dict = {}          # key -> (stored at, report), oldest first
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def get(self, key):
+        with self._lock:
+            hit = self._items.get(key)
+            return hit[1] if hit and time.monotonic() - hit[0] < UI_RESEARCH_TTL_S else None
+
+    def put(self, key, report) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._items.pop(key, None)
+            self._items[key] = (now, report)
+            for old in [k for k, (at, _) in self._items.items() if now - at >= UI_RESEARCH_TTL_S]:
+                del self._items[old]
+            while len(self._items) > UI_RESEARCH_MEMO_MAX:
+                del self._items[next(iter(self._items))]
 
 
 def _ui_preflight_for():
     """The `preflight_for` the UI server uses. The server builds the preflight callable again for every request
     (and for every mode), so the research memo is made once here and handed to each callable."""
-    memo: dict = {}
+    memo = _ResearchMemo()
     return lambda cfg: _ui_preflight(cfg, memo)
 
 
@@ -253,7 +285,7 @@ def _ui_preflight(cfg, memo=None):
     form, so one answer is kept for UI_RESEARCH_TTL_S per model, base and option; GitHub allows 60
     unauthenticated requests an hour and one research run makes about 6."""
     from orchard.research import Options
-    memo = {} if memo is None else memo
+    memo = _ResearchMemo() if memo is None else memo
 
     def run(model, base, research=None):
         options = Options(cache_dir=None, offline=research == "offline",
@@ -265,10 +297,10 @@ def _ui_preflight(cfg, memo=None):
             def remembered(model_id, hub, override, inst):
                 key = (model_id, override, research)
                 hit = memo.get(key)
-                if hit and time.monotonic() - hit[0] < UI_RESEARCH_TTL_S:
-                    return hit[1]
+                if hit is not None:
+                    return hit
                 report = fresh(model_id, hub, override, inst)
-                memo[key] = (time.monotonic(), report)
+                memo.put(key, report)
                 return report
             sig = dataclasses.replace(sig, research=remembered)
         override = None
