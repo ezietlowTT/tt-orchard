@@ -5,21 +5,9 @@ template's decisive keys, so the answer follows the same rules the later stages 
 from __future__ import annotations
 
 from orchard.research import triage_rules
-from orchard.research.http import FetchError
-from orchard.research.types import INFERRED, WEAK, valid_id
+from orchard.research.types import INFERRED, WEAK
 
-CONFIG_URL = "https://huggingface.co/{repo}/resolve/main/config.json"
-
-
-def fetch_config(fetch, repo: str) -> dict | None:
-    """A repo's config.json, or None when it cannot be read for any reason."""
-    if not valid_id(repo):
-        return None
-    try:
-        cfg = fetch.json(CONFIG_URL.format(repo=repo))
-    except FetchError:
-        return None
-    return cfg if isinstance(cfg, dict) else None
+CONFIG_URL = "https://huggingface.co/{repo}/resolve/main/config.json"     # read by report._config
 
 
 def family(cfg: dict) -> str:

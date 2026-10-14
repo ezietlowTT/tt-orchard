@@ -49,12 +49,18 @@ class FakeFetch:
         return "2026-10-12T00:00:00Z"
 
 
-def test_fetch_config_returns_the_config_or_none():
+def test_the_config_reader_keeps_the_reason_a_config_could_not_be_read():
+    """report._config is the one config reader (arch_match.fetch_config, which dropped the reason, is gone)."""
+    from orchard.research import report
+    from orchard.research.types import Result
     url = "https://huggingface.co/g/it/resolve/main/config.json"
-    assert arch_match.fetch_config(FakeFetch({url: CFG}), "g/it") == CFG
-    assert arch_match.fetch_config(FakeFetch({}), "g/it") is None
-    assert arch_match.fetch_config(FakeFetch({url: [1]}), "g/it") is None
-    assert arch_match.fetch_config(FakeFetch({}), "bad id") is None
+    assert not hasattr(arch_match, "fetch_config")
+    res = Result()
+    assert report._config(FakeFetch({url: CFG}), "g/it", res) == CFG and res.unavailable == []
+    assert report._config(FakeFetch({url: FetchError("HTTP 401 (needs a login)")}), "g/it", res) is None
+    assert report._config(FakeFetch({url: [1]}), "g/it", res) is None
+    assert report._config(FakeFetch({}), "bad id", res) is None
+    assert [u.reason for u in res.unavailable] == ["g/it: HTTP 401 (needs a login)", "g/it: config.json is not an object"]
 
 
 # ---- headers ---------------------------------------------------------------------------------------
