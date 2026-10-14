@@ -913,3 +913,15 @@ recent run should be selected first or be the most obvious.
   that had just finished. The state badge still says which runs need a person. The first row carries a `now` or `latest` tag.
 - Mutations: no recency sort and no live-first rule both turn a test red. The first draft of the recency test passed
   without the sort, because the directory names were already in the right order; the names were changed.
+
+## 2026-10-14: potential next choice, a music model (not run)
+Prompt (operator): "is there music generation model we could try instead?" of `CiroN2022/ascii-art` (an SDXL LoRA; the
+preflight blocks with `nearest-model-missing`, and the LoRA cannot apply to tt-animatediff, which serves SD 1.4).
+- Base found: `MiniMaxAI/MiniMax-Music3` has a Tenstorrent bundle, `jashansinghTT/minimax-music3-blackhole` (`p150`,
+  `tt-dit-server`, 0 downloads, not installed), and tt-metal has `models/demos/minimax_m3`. MusicGen and Stable Audio 3 have no bundle.
+- Most MiniMax-Music3 fine-tunes are LoRA adapters (orchard has no merge step). `SonexaAI/Sonexa-Music-v0.1-Beta` ships full
+  weights (57.4 GB, no license metadata, 213-byte README, 6 downloads) and its weights were not compared with the base.
+- Dry run for Sonexa: blocks on `disk-full` (needs 137 GB, 89 GB free) and `nearest-model-missing` (ranks the bundle above as the
+  stated base; `--base jashansinghTT/minimax-music3-blackhole` installs it). Nothing started.
+- Open: the bundle's README was not read, so whether its server accepts swapped weights is unknown; the preflight warns stage 2
+  expects a v6 thin bundle; the triage template was written for LLM tensors and has not seen this layout. Needs about 50 GB freed first.
