@@ -868,3 +868,25 @@ Prompt (operator): "fix requests on PR 6". The automated review left four findin
   strings; my test used a string. The view now keeps a bounded, redacted object and the page shows both fields.
 - Each fix has a test that failed first; 10 mutations, all red. Lesson: the UI test used the shape I assumed, not the shape the
   producer writes. Read the producing code when writing a test for a consumer.
+
+## 2026-10-14: research hardening after PR 6 (branch `ezietlow/research-hardening`, version 0.5.3)
+Prompt (operator, through a review of merged PR 6): fix forward the review's follow-ups, one commit each, each with a test
+that failed first. Nothing was pushed or run on hardware.
+- A safetensors header is read only up to 8 MiB (`headers.MAX_HEADER_READ` = the fetcher's body cap). The template's 100 MiB
+  limit had overridden that cap for header reads; a larger claimed header is an error, so the estimate is `unknown`.
+- An inferred base (the card names none; research picked one by architecture) blocks with `inferred-base-unconfirmed`
+  until the operator confirms it: the chooser at a terminal, the candidate pick in the UI, `--base`, or
+  `--accept-inferred-base`. Before, it was a warning and the run downloaded the base and started unattended. The model is
+  never its own candidate.
+- The fetcher has a budget per research run: 600 network requests, 240 s from the first one (`MAX_REQUESTS`, `DEADLINE_S`).
+  After that the remaining requests fail at once and become unavailable rows; they are not cached and do not mark the host.
+- An index that lists a shard the repo does not have makes the estimate `unknown` (it read part of the backbone before).
+- Only `--base` and a direct base whose config does not disagree are `stated`. A direct base whose decisive values differ is
+  `weak`; a base of the base is judged by its own config (`inferred` or `weak`), so it needs the confirmation above.
+- A URL the fetcher opens, and every redirect, must have the bare allowed host as its authority (no user info, port or
+  escape): urlsplit and urllib read `evil.com\@huggingface.co` differently.
+- The report has `new_model_gated` and says in the Markdown and the UI that a gated model's short candidate list is not
+  evidence of no base.
+- The UI's research memo has a lock and keeps at most 32 answers. `arch_match.fetch_config` (only the tests called it) is gone.
+Not done: one connection failure still marks a host unreachable for the rest of the run (by design); two UI requests that miss
+the memo at the same moment both ask (no single-flight); `app.js` was not run in a browser here (no node on this box).
