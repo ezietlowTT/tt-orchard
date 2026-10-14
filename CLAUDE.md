@@ -945,3 +945,14 @@ model directory and tensor cache, probes `logprobs`, then sends the prompts. Not
   the nearest bundle's kernels (`lab_setup` compares SFPI between a lab and this box only).
 - Side note: after each run, `gozer status` shows the idle board BUSY-UNTRACKED for about a minute, because the release's
   `tt-smi -r` and `-s` open every device (pids named in the line are those two commands).
+
+## 2026-10-14 (later): RAG-Gate-27B gate and logprobs check ran after the SFPI upgrade
+Prompt (operator): "Upgrade to latest SFPI". Installed `sfpi_7.87.0_x86_64_debian.deb` from the tenstorrent/sfpi release marked
+Latest (sha256 matched the release digest and `sfpi-version`) with `sudo dpkg -i`, over 7.67.0. The bundle's kernels compiled; the server was
+ready in 1,406 s (cold kernel cache). Results are in `~/orchard-runs/thakicloud--rag-gate-27b/gate-check/RESULTS.md`:
+- Gate: 186 of 200 (0.930, interval [0.886, 0.958]) on ChainCheck items; over-refusal 0.074, unsupported answers 0.062; the card's own
+  numbers on another set are .938, .071 and .055. Median 2.5 s per request with 4 in flight.
+- Logprobs: `/v1/completions` `logprobs` works and returns the top 5 first-token logprobs, so the card's "threshold P(Answer)" use is possible
+  on this server (drafter off, sampling on the host). `prompt_logprobs` is refused. The stage 2 template's comment says the server
+  rejects logprobs; that did not hold here. Not tested with the drafter on.
+- Not done: CPU agreement, 1-request latency, 4 chips. SFPI 7.87.0 is newer than the 7.83.0 the earlier runs used; this one run compiled with it.
