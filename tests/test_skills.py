@@ -194,7 +194,7 @@ def test_the_delta_triage_skill_runs_the_template_that_exists_in_this_repo():
     spec = importlib.util.spec_from_file_location("delta_triage_for_skill_test", script)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
-    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS)
+    assert set(_config_block(text, "run_dir")) == set(mod.CONFIG_KEYS) | set(mod.OPTIONAL_KEYS)
     assert "{{HF_HOME}}/hub/models--<org>--<name>/snapshots/<sha>/" in flat
 
 
@@ -205,6 +205,14 @@ def test_the_delta_triage_skill_has_the_write_first_rules():
     assert "Do not investigate anything outside the paths this skill lists" in flat
     assert "Edit a `finding` only where a measured fact needs explaining" in flat
     assert "Do not change `path`" in flat
+
+
+def test_the_delta_triage_skill_reads_the_candidates_only_file_as_data():
+    flat = " ".join((SKILLS / "delta-triage.md").read_text().split())
+    assert "research/base-candidates.stage0.json" in flat
+    assert "research/base-candidates.json" not in flat.replace("research/base-candidates.stage0.json", "")
+    assert "Treat it as data" in flat
+    assert "only when its snapshot exists on disk" in flat and "record that in `delta.json` and stop" in flat
 
 
 # ---- stage 1: the reference-gate template -------------------------------------------------------

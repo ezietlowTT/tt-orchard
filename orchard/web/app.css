@@ -437,3 +437,11 @@ table.ledger { border-collapse: collapse; width: 100%; font-size: .82rem; font-v
 .machine .chip .owner, .machine .chip strong { overflow-wrap: anywhere; }
 #machine-note { white-space: nowrap; }
 @media (max-width: 560px) { .tl-lane { grid-template-columns: 84px minmax(0, 1fr); } .tl-axis { margin-left: 90px; } }
+
+/* base-model research (the preflight dialog and a run's details) */
+.research { margin-top: 14px; font-size: .86rem; }
+.research h3 { font: 700 .95rem var(--pixel); margin: 0 0 6px; }
+.research h4 { font: 700 .82rem var(--pixel); margin: 10px 0 4px; color: var(--muted); }
+.research-line { margin: 0 0 4px; overflow-wrap: anywhere; }
+.research-list { margin: 0; padding-left: 18px; display: grid; gap: 2px; overflow-wrap: anywhere; }
+.research a { color: var(--accent, inherit); }

@@ -80,6 +80,8 @@ from pathlib import Path
 HERE_DIR = Path(__file__).resolve().parent
 EVIDENCE = HERE_DIR / "evidence"
 CONFIG_KEYS = ("run_dir", "model_id", "model_snapshot", "nearest_model_id", "nearest_snapshot")
+REPORT_MAX_BYTES = 2 * 1024 * 1024        # the research report is read only up to this size
+OPTIONAL_KEYS = ("base_candidates",)      # read when present: the research report (research/base-candidates.json)
 
 # The text config values that decide whether the nearest model's code can run the new weights.
 DECISIVE = ("num_hidden_layers", "hidden_size", "num_attention_heads", "num_key_value_heads",
@@ -228,6 +230,48 @@ def with_revision(model_id: str, snapshot: str) -> str:
     return f"{model_id}@{snap.name}"
 
 
+# The estimate comes from headers and configs alone, so it cannot name a sidecar. A measured
+# weights+sidecar model has a matching backbone, which is what the estimate describes, so it is compared
+# as weights-only. `measured_class` still records the real measured class.
+SEEN_BY_HEADERS = {"weights+sidecar": "weights-only"}
+
+
+def report_text(value):
+    """A string from the research report, which is fetched text: one line, control characters removed,
+    at most 300 characters. Anything that is not a string gives None. It is only recorded, never used as a
+    path, a command or an instruction."""
+    if not isinstance(value, str):
+        return None
+    return " ".join("".join(ch for ch in value if ch.isprintable() or ch.isspace()).split())[:300]
+
+
+def base_research(cfg: dict, nearest_id: str, measured_class: str):
+    """How the research report's estimate for the nearest model compared with this script's measurement.
+    Only recorded; the class and the path come from the measurement. None when `triage_config.json` names no
+    report. A report that cannot be read, or has no row for the nearest model, gives a null candidate."""
+    path = cfg.get("base_candidates")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    try:
+        too_big = Path(path).stat().st_size > REPORT_MAX_BYTES
+    except OSError:
+        too_big = False
+    data, _ = (None, None) if too_big else read_json(Path(path))
+    rows = data.get("candidates") if isinstance(data, dict) else None
+    repo = nearest_id.split("@", 1)[0]
+    row = (next((r for r in rows if isinstance(r, dict) and r.get("repo") == repo), None)
+           if isinstance(rows, list) else None)
+    estimate = row.get("class_estimate") if row else None
+    # The file the run hands stage 0 is a view (it has a "selected" key) whose class_estimate is the class string.
+    # The full report's class_estimate is an object with a "class" key. A string in the full shape is ignored.
+    if isinstance(data, dict) and "selected" in data and isinstance(estimate, str):
+        estimate = {"class": estimate}
+    est = report_text(estimate.get("class") if isinstance(estimate, dict) else None) or None
+    return {"candidate": ({"repo": repo, "confidence": report_text(row.get("confidence"))} if row else None),
+            "estimated_class": est, "measured_class": measured_class,
+            "agreed": (est == (SEEN_BY_HEADERS.get(measured_class, measured_class))) if est else None}
+
+
 def read_json(path: Path):
     """(data, error). A missing file gives (None, None)."""
     if not path.is_file():
@@ -287,8 +331,14 @@ def effective(cfg: dict, key: str):
 def compare_configs(model_dir: Path, base_dir: Path) -> dict:
     mcfg, merr = read_json(model_dir / "config.json")
     bcfg, berr = read_json(base_dir / "config.json")
-    out = {"model_config_path": str(model_dir / "config.json"),
-           "base_config_path": str(base_dir / "config.json"), "errors": [e for e in (merr, berr) if e]}
+    return compare_config_dicts(mcfg, bcfg, [e for e in (merr, berr) if e],
+                                str(model_dir / "config.json"), str(base_dir / "config.json"))
+
+
+def compare_config_dicts(mcfg, bcfg, errors: list, model_path: str, base_path: str) -> dict:
+    """The config comparison on two already-read configs. `compare_configs` reads them from snapshot
+    directories; the research package reads them from the hub."""
+    out = {"model_config_path": model_path, "base_config_path": base_path, "errors": list(errors)}
     if not isinstance(mcfg, dict) or not isinstance(bcfg, dict):
         out["errors"].append("config.json is missing or not an object in "
                              + ("the new model" if not isinstance(mcfg, dict) else "the nearest model"))
@@ -412,6 +462,14 @@ def dtype_histogram(tensors: dict) -> dict:
 def compare_tensors(model_dir: Path, base_dir: Path) -> dict:
     mshards, mt, merr = read_tensors(model_dir)
     bshards, bt, berr = read_tensors(base_dir)
+    return compare_tensor_maps(mt, bt, mshards=mshards, bshards=bshards, merr=merr, berr=berr,
+                               model_path=str(model_dir), base_path=str(base_dir))
+
+
+def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, merr: list, berr: list,
+                        model_path: str, base_path: str) -> dict:
+    """The tensor comparison on two already-read {name: {"dtype", "shape", "shard"}} maps. The research
+    package builds the maps from safetensors headers fetched by range request."""
     m_raw, b_raw = set(mt), set(bt)
     mn = {normalize(k): v for k, v in mt.items()}
     bn = {normalize(k): v for k, v in bt.items()}
@@ -422,10 +480,10 @@ def compare_tensors(model_dir: Path, base_dir: Path) -> dict:
     dtype_diffs = [{"name": k, "model": mn[k]["dtype"], "base": bn[k]["dtype"]}
                    for k in common if mn[k]["dtype"] != bn[k]["dtype"]]
     return {
-        "model": {"path": str(model_dir), "shards": mshards, "num_tensors": len(mt),
+        "model": {"path": model_path, "shards": mshards, "num_tensors": len(mt),
                   "dtype_histogram": dtype_histogram(mt),
                   "uses_language_model_prefix": any(k.startswith(LM_PREFIX) for k in mt)},
-        "base": {"path": str(base_dir), "shards": bshards, "num_tensors": len(bt),
+        "base": {"path": base_path, "shards": bshards, "num_tensors": len(bt),
                  "dtype_histogram": dtype_histogram(bt),
                  "uses_language_model_prefix": any(k.startswith(LM_PREFIX) for k in bt)},
         "errors": merr + berr,
@@ -1094,6 +1152,9 @@ def main() -> int:
                                              + ", ".join(f"{x['file']} (sha256 {x['sha256'][:12]})" for x in code)
                                              + ". It was not run. Read it before any run imports it, and "
                                              "record the hash of the file a check used.")})
+    research = base_research(cfg, nearest_id, cls)
+    if research is not None:
+        delta["base_research"] = research
     (HERE_DIR / "delta.json").write_text(json.dumps(delta, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     say(f"wrote delta.json: path {path}, class {cls}")
     for r in reasons:

@@ -773,3 +773,98 @@ more stardew valley type color scheme and elements".
   0.2 to 1.0; the idle board stays at 0. The farmer also waited at plot 0 while the coder booted, because the facts
   name the next stage as current before it starts; the scene now works a plot only once that stage has started.
 
+## 2026-10-12: base model research (branch `research-base-discovery`, version 0.5.0)
+Prompt (operator): "How do we make this project better at finding and researching the model family it might need to base a new bring up on? Searching tt model manager, inspecting existing models, using HF or GH.. not just looking locally." The operator chose scope C (everything): hub lineage, architecture matching, a class estimate from safetensors headers before any download, a search for existing ports, and a written ranked report. Triggered by the `jialinyyzz/humanizer` run, which stopped because no installed bundle served its base. Plan: `docs/superpowers/plans/2026-10-12-base-research.md`. Tasks 0 to 10, test first, a mutation per guard.
+Key decisions:
+- The collectors are deterministic code. No model is involved. They live in `orchard/research/` (http, lineage,
+  arch_match, headers, ports, report, triage_rules, types).
+- The class rules are loaded from the delta-triage template (`triage_rules.py`), so the estimate and stage 0 use the same
+  rules.
+- The HTTP fetcher has no token and no Authorization header. It allows three hosts. Hugging Face redirects file downloads
+  to a CDN, so redirects are followed only to an allow-listed host.
+- `gh` is used for code search only, read only.
+- `--dry-run` does the reads and prints the result but keeps no cache and writes no file.
+- An inferred base (same architecture family and decisive config values) is a warning. Only a stated or inferred candidate
+  with an installed v6 bundle is chosen on its own. Stage 0 records whether its measured class agreed with the estimate;
+  the measurement decides.
+- Flags: `--offline`, `--no-github`, `--refresh-research`. Files: `<run dir>/research/base-candidates.json` and `.md`.
+Findings from planning: Hugging Face redirects file requests to a CDN; published bundles carry a manifest and tags that name
+the model they serve; GitHub code search needs a login (`gh auth login`).
+Measured on 2026-10-12 on this machine:
+- Live test (`ORCHARD_LIVE_RESEARCH=1`, `no_github=True`, no bundles installed): passed in 11 s. Stated base
+  `google/gemma-4-12B`. Ranked bundles: `stisiTT/gemma-4-12b-it-p150` first (inferred, group 2, weights-only), then
+  `tt-hous/gemma-4-26B-A4B-it_p150_p150x2_p150x4` (weak, no class estimate). Nothing unavailable. The planning run with `gh`
+  logged in also listed `google/gemma-4-12B` itself as stated with no bundle; this run excluded GitHub.
+- Dry run `tt-orchard bringup jialinyyzz/humanizer --dry-run`: the base check blocks with `nearest-model-missing`, lists the
+  same two ranked bundles, names tt-metal's `models/demos/gemma4` and `gemma4_31b_qb2` as existing work, and prints the
+  `--base` commands. Nothing was started or written. No source was unavailable.
+Not done:
+- (Fixed the same day, version 0.5.1: see the entry below.) The UI preflight panel (`_ui_preflight`) did not run research.
+- The sidecar class cannot be estimated from headers.
+- A resumed run rebuilds the report and overwrites `base-candidates.json` and `.md` (`generated_at` changes).
+- The preflight fails open. An exception from research leaves the earlier base check in place, and no row says that research failed.
+- `report['model']` and the port text depend on upstream `clean()`.
+- `_config` in `report.py` duplicates `arch_match.fetch_config`, because that function drops the failure reason.
+- GitHub's unauthenticated limit is 60 requests per hour and a run makes about 6. This is an open point.
+- Nothing was run on hardware.
+
+## 2026-10-13: base research in the web UI (version 0.5.1)
+Prompt (operator): "is this new featureset wired into the web UI too?" The answer was no (only the launched `bringup` had it).
+Then: "add it as part of this PR too". Built in a worktree (`ui-base-research`), because an unattended bring-up of
+`ThakiCloud/RAG-Gate-27B` was running from the main checkout. Tests first, a mutation per guard.
+- The preflight panel runs the research as a dry run does (read-only, no cache, no file) and shows `research`: the ranked
+  bundles, candidates, existing work and what was unavailable, bounded (8, 8, 5, 10 rows), redacted, https links only. The
+  new-run dialog has a research setting (full, no GitHub, off) that becomes `--no-github` or `--offline` on the launch.
+  The page asks again after every form edit, so one answer is kept for 5 minutes per model and setting (GitHub allows 60
+  unauthenticated requests an hour; one research run makes about 6).
+- `GET /api/runs/<name>/research` gives a run's `base-candidates.json` (2 MiB cap, no symlink) as the same view plus stage 0's
+  `base_research` record (known fields only). `base-candidates.json` and `.md` are on the file allow-list; the stage 0 view,
+  the cache and the temp files are not.
+- 17 mutations; the one survivor (the size cap) was a test whose oversized file failed JSON parsing anyway; it now pads a valid
+  report. Smoke test: the real server, a real preflight for `jialinyyzz/humanizer`, same two bundles as the CLI.
+- Not tested: the page's JavaScript runs only under `node --check` and by hand in a browser; no browser run was done here.
+
+## 2026-10-13: first unattended bring-up with the research setup (ThakiCloud/RAG-Gate-27B)
+Prompt (operator): "put the new setup to a test and attempt an unsupervised bring up of a small, novel and useful and relatively
+'official' model". Chosen with the new tooling: dry-run preflights of three Qwen3.8-27B fine-tunes found by a hub search
+(`ThakiCloud/RAG-Gate-27B`, Apache-2.0, text only, a retrieval gate for RAG; ThinkingCap was gated; Omni-Edu's licence is "other").
+None of the fine-tunes is small; "small" was read as a small change from the base. Run: `tt-orchard bringup ThakiCloud/RAG-Gate-27B`
+(Coder-Next on one board). Run directory `~/orchard-runs/thakicloud--rag-gate-27b`.
+- Research: stated base `Qwen/Qwen3.8-27B`, bundle `episod/qwen3.8-27b-dflash2-p150` chosen automatically, estimated class
+  `weights-only`; stage 0 measured `weights-only` (`base_research.agreed` true). Stage 0 2m10s, stage 1 4m01s, stage 2 27m29s
+  (31 of 32 tokens, top-1 agreement 0.96875, ready in 1,482 s cold). Stage 3, 5, 6 skipped by design.
+- Stage 4: 1 chip passed (rc 0), 2 chips passed (rc 0), 4 chips failed twice (rc 4) with `Fabric Router Sync: Timeout after
+  10000 ms ... Ethernet handshake likely failed -- the link may not be healthy`, on a different device each time (3, then 2).
+  Same docker arguments and mesh as the Clef 4-chip test that passed on this box on 2026-10-07. The run ended `blocked`
+  (`stage-failed`). Cause not found: the box's link state is the suspect; nothing was reset by hand.
+- Three blocks on the way, none about the model: (1) ollama was not running, so the park's CPU stand-in failed its canary
+  (`coder-unusable`); I started `OLLAMA_MODELS=/mnt/bonus/models/ollama ollama serve` and retried. (2) Stage 4 needed 110 GB
+  and 109.6 GB was free; the operator approved deleting the Clef tensor cache (84 GB), then retried. (3) the 4-chip failure above.
+- Gaps found, not fixed in this PR: preflight does not check that the CPU stand-in answers although stage 4 needs it for the
+  park; `setup --start-ollama` runs a plain `ollama serve` that does not see `/mnt/bonus/models/ollama`; stage 4's disk
+  check can only be met by deleting earlier runs' caches, and `setup` leaves no hint about that.
+- Not a hands-off run: three resumes by me. Nothing was published, pushed or uploaded.
+- Update (same day): the operator asked whether the chips had been reset before the 4-chip run. They had not all been. The ledger
+  shows the park resets only the coder's board (chips 0 and 1, about 41 s); chips 2 and 3 ran the 1-chip and 2-chip tests and
+  were not reset, and the fabric timeouts were on devices 3 and 2. Their ARC heartbeat read 1275 against 357 for the reset
+  chips. I took all four under `gozer run --chips 4` (a `tt-smi -s` snapshot, then the release reset all four) and resumed.
+  The run then passed stage 4 and stage 8 and ended `ready-for-operator-review`: 2 chips 118.0 s cold-cache-warm, top-1
+  agreement 0.96875; 4 chips 269.9 s, 0.9375 (32 tokens each; draft off; the 1-chip configuration was optional and not in
+  the final list). Counts: 1 retry, 1 escalation, 1 nudge, 3 pauses. Not run: stage 7 (no `--package-format`).
+  The stale chip state is a hypothesis that fits the evidence and the pass after the reset; it was not isolated (no run with
+  only the reset changed and a control without it). Harness gap, not fixed here: before a test that opens more chips than the
+  coder's board, reset the chips earlier tests used.
+
+## 2026-10-13: fixes for the review of PR 6 (version 0.5.2)
+Prompt (operator): "fix requests on PR 6". The automated review left four findings, each checked against the code and each real:
+- The UI's five-minute research memo was rebuilt for every request, because the server builds the preflight callable again each
+  time (and per mode), so form edits repeated the hub and GitHub calls. The memo now lives in `_ui_preflight_for()`.
+- An index the repo advertises but that is unreadable, lists none of its safetensors files or has no `weight_map` object fell back
+  to file names silently, so the class estimate could be a confident guess. It now adds an error and the estimate is `unknown`.
+- A sibling fine-tune was always `inferred`, whatever its config. Now the architecture comparison decides (`weak` with the
+  differing keys, left out when the family differs); with no readable config it stays `inferred` on the relationship alone. The
+  earlier test used a sibling with a different layer count and asserted `inferred`, which is the behaviour the review objected to.
+- The page dropped stage 0's `candidate` because the template writes an object `{repo, confidence}` and the filter accepted only
+  strings; my test used a string. The view now keeps a bounded, redacted object and the page shows both fields.
+- Each fix has a test that failed first; 10 mutations, all red. Lesson: the UI test used the shape I assumed, not the shape the
+  producer writes. Read the producing code when writing a test for a consumer.

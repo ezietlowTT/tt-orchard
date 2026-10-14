@@ -27,6 +27,7 @@ The supervisor, the download and the outside signals are parameters of `main`, s
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import io
 import json
 import os
@@ -86,6 +87,14 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--offline", action="store_true",
+                   help="skip the base-model research and make no request for it. The preflight's hub lookup, "
+                        "`tt model search` and any download still happen")
+    b.add_argument("--no-github", action="store_true",
+                   help="skip the GitHub issue and pull request search and the GitHub code search in the "
+                        "base-model research. tt-metal's model listings and README are still read")
+    b.add_argument("--refresh-research", action="store_true",
+                   help="ignore the cached answers from an earlier attempt of this run")
     b.add_argument("--mode", choices=bringup_config.MODES,
                    help="where the hardware tests run for this run: local (this box) or lab (the [lab] box). "
                         "Default: the config's mode")
@@ -219,11 +228,41 @@ def _watch(run_dir: Path, args, style, out) -> int:
     return EXIT_OK
 
 
-def _ui_preflight(cfg):
+UI_RESEARCH_TTL_S = 300
+
+
+def _ui_preflight_for():
+    """The `preflight_for` the UI server uses. The server builds the preflight callable again for every request
+    (and for every mode), so the research memo is made once here and handed to each callable."""
+    memo: dict = {}
+    return lambda cfg: _ui_preflight(cfg, memo)
+
+
+def _ui_preflight(cfg, memo=None):
     """The preflight the UI runs: the same checks as `bringup --dry-run`, with `--base` resolved without
-    installing anything (an install happens only when the run itself starts)."""
-    def run(model, base):
-        sig = preflight.default_signals(cfg)
+    installing anything (an install happens only when the run itself starts). The base-model research runs
+    as in a dry run: read-only requests, no cache and no file. The page asks again after every edit of the
+    form, so one answer is kept for UI_RESEARCH_TTL_S per model, base and option; GitHub allows 60
+    unauthenticated requests an hour and one research run makes about 6."""
+    from orchard.research import Options
+    memo = {} if memo is None else memo
+
+    def run(model, base, research=None):
+        options = Options(cache_dir=None, offline=research == "offline",
+                          no_github=research in ("offline", "no-github"))
+        sig = preflight.default_signals(cfg, research_options=options)
+        if sig.research is not None:
+            fresh = sig.research
+
+            def remembered(model_id, hub, override, inst):
+                key = (model_id, override, research)
+                hit = memo.get(key)
+                if hit and time.monotonic() - hit[0] < UI_RESEARCH_TTL_S:
+                    return hit[1]
+                report = fresh(model_id, hub, override, inst)
+                memo[key] = (time.monotonic(), report)
+                return report
+            sig = dataclasses.replace(sig, research=remembered)
         override = None
         if base:
             override, why = resolve_base(base, sig, None, io.StringIO(), ui.Style("none", False), dry_run=True)
@@ -279,7 +318,7 @@ def _ui(args, env, home, out) -> int:
         cfg = bringup_config.load(path)
     except (NoConfig, bringup_config.BringupConfigError) as exc:
         return _refuse(str(exc))
-    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight_for=_ui_preflight,
+    app = webui.WebApp(runs_root=cfg.runs_root, config_path=path, cfg=cfg, preflight_for=_ui_preflight_for(),
                        lan=args.lan, toplike=_toplike_argv(args.toplike))
     try:
         server = webui.make_server(app, host, args.port)
@@ -384,7 +423,11 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     resuming = (run_dir / "ledger.jsonl").exists()
     print(f"{style.icon('🧭')}mode: " + (f"lab ({cfg.lab.host}): hardware tests run there; the coder stays here"
                                          if cfg.mode == "lab" else "local: everything runs on this box"), file=out)
-    sig = signals or preflight.default_signals(cfg)
+    from orchard.research import Options
+    from orchard.research import types as research_types
+    research_options = Options(cache_dir=None if args.dry_run else run_dir / "research" / "cache",
+                               offline=args.offline, no_github=args.no_github, refresh=args.refresh_research)
+    sig = signals or preflight.default_signals(cfg, research_options=research_options)
     override = None
     if args.base:
         override, why = resolve_base(args.base, sig, puller, out, style, dry_run=args.dry_run)
@@ -433,7 +476,18 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         if base_hub is None:
             return _refuse(f"cannot look up the base model {base_data['base']} on the hub: {why}")
         base_snapshot = fetch.snapshot_dir(hf_home, base_data["base"], base_hub.sha)
-    inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {})}
+    candidates_path = None
+    # The report is written only after the preflight passed (a blocked run returned above) and never on a
+    # dry run. The research cache (<run dir>/research/cache) is different: the fetcher fills it during the
+    # preflight, before anyone knows the preflight passes, so a blocked run can leave that directory behind. The model id is checked again here because --run-dir skips the slug check that guards the path.
+    if base_data.get("report") and not args.dry_run and research_types.valid_id(args.model):
+        from orchard.research import report as research_report
+        research_report.write(run_dir, base_data["report"])
+        # Stage 0 reads the candidates-only view. The full report (base-candidates.json) holds text from the
+        # internet and stays for the operator.
+        candidates_path = run_dir / research_report.RESEARCH_DIR / research_report.STAGE0_FILE
+    inputs = {"model": str(snapshot), **({"base": str(base_snapshot)} if base_snapshot else {}),
+              **({"base_candidates": str(candidates_path)} if candidates_path else {})}
     argv_run = bringup_config.supervisor_argv(cfg, args.model, run_dir, inputs=inputs,
                                               accept_credentials=not args.refuse_credentials_visible)
     command = "python3 -m orchard.supervisor " + shlex.join(argv_run)

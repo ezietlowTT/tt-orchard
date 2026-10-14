@@ -588,6 +588,9 @@ function renderDetails(d) {
   row("Leases on this machine now", d.leases.length ? h("span", {}, d.leases.map((l) => h("span", { class: "mono" }, l, h("br")))) : "none listed");
   if (d.hint) row("Runbook hint", h("span", { class: "muted" }, d.hint));
   row("Control word", d.control_pending || "none waiting");
+  const cached = S.research && S.research.name === d.name ? S.research.data : null;
+  showResearch($("research"), cached && cached.report, cached && cached.stage0);
+  loadResearch(d.name);
 }
 
 // ---- actions ------------------------------------------------------------------------------------------
@@ -851,8 +854,9 @@ async function runChecks() {
   $("nr-check").textContent = "Checking…";
   $("nr-start").disabled = true;
   try {
-    const out = await api("/api/preflight", { body: { model, base: base || null, mode: $("nr-mode").value } });
+    const out = await api("/api/preflight", { body: { model, base: base || null, mode: $("nr-mode").value, research: $("nr-research").value } });
     out.mode = $("nr-mode").value;
+    out.researchChoice = $("nr-research").value;
     lastPreflight = out;
     renderPreflight(out);
   } catch (err) {
@@ -865,6 +869,69 @@ async function runChecks() {
 
 const CHECK_MARK = { ok: "✓", warn: "!", block: "✕" };
 
+// The base-model research (orchard/research). `view` is the server's bounded, redacted summary; every string in
+// it is set as text, and a link is shown only when the server kept it (https).
+function researchBlock(view, stage0) {
+  const box = h("div", { class: "research-body" });
+  if (!view && !stage0) return null;
+  if (stage0) {
+    box.append(h("p", { class: "research-line" },
+      h("strong", {}, "Stage 0 measured: "), `${stage0.measured_class || "unknown"} against the estimate ${stage0.estimated_class || "none"}`,
+      stage0.candidate && stage0.candidate.repo
+        ? ` (compared with ${stage0.candidate.repo}${stage0.candidate.confidence ? `, ${stage0.candidate.confidence}` : ""})` : "",
+      stage0.agreed === true ? " · agreed" : stage0.agreed === false ? " · did not agree; the measurement decides" : ""));
+  }
+  if (!view) return box;
+  if (view.offline) box.append(h("p", { class: "muted" }, "Research was off for this run (no requests were made)."));
+  if (view.selected) {
+    box.append(h("p", { class: "research-line" }, h("strong", {}, "Chosen: "),
+      h("span", { class: "mono" }, view.selected.bundle || view.selected.repo || "–"),
+      ` · ${view.selected.confidence || ""}${view.selected.class ? ` · ${view.selected.class}` : ""}`));
+  }
+  if (view.choices.length) {
+    box.append(h("h4", {}, "Bundles that could serve it, best first"),
+      h("ul", { class: "research-list" }, view.choices.map((c) => h("li", {},
+        h("span", { class: "mono" }, c.name || "?"),
+        h("span", { class: "muted" }, ` ${c.installed ? "installed" : "published"} · ${c.class || "no estimate"} · ${c.confidence || ""}${c.schema ? ` · v${c.schema}` : ""}`)))));
+  }
+  if (view.candidates.length) {
+    box.append(h("h4", {}, "Candidate base models"),
+      h("ul", { class: "research-list" }, view.candidates.map((c) => h("li", {},
+        h("span", { class: "mono" }, c.repo || "?"),
+        h("span", { class: "muted" }, ` ${c.confidence || ""}${c.download_gb ? ` · ${c.download_gb} GB` : ""}${c.class ? ` · ${c.class}` : ""}${c.why ? ` · ${c.why}` : ""}`)))));
+  }
+  if (view.ports.length) {
+    box.append(h("h4", {}, "Existing work"),
+      h("ul", { class: "research-list" }, view.ports.map((p) => h("li", {}, p.claim || "",
+        p.url ? h("span", {}, " ", h("a", { href: p.url, target: "_blank", rel: "noopener noreferrer" }, p.url)) : ""))));
+  }
+  if (view.unavailable.length) {
+    box.append(h("h4", {}, "Could not be read"),
+      h("ul", { class: "research-list muted" }, view.unavailable.map((u) => h("li", {}, `${u.source}: ${u.reason}`))));
+  }
+  return box;
+}
+
+function showResearch(el, view, stage0) {
+  const body = researchBlock(view, stage0);
+  clear(el);
+  el.hidden = !body;
+  if (body) el.append(h("h3", {}, "Base-model research"), body);
+}
+
+// A run's report and stage 0's comparison. Asked for when a run is opened and again every 30 s, because the
+// report appears before stage 0 and the comparison after it.
+async function loadResearch(name) {
+  const r = S.research;
+  if (r && r.name === name && Date.now() - r.at < 30000) return;
+  S.research = { name, at: Date.now(), data: r && r.name === name ? r.data : null };
+  try {
+    const data = await api(`/api/runs/${encodeURIComponent(name)}/research`);
+    S.research = { name, at: Date.now(), data };
+    if (S.detail && S.detail.name === name) showResearch($("research"), data.report, data.stage0);
+  } catch (err) { /* the details still show; the research card is optional */ }
+}
+
 function renderPreflight(out) {
   $("nr-result").hidden = false;
   $("nr-run").textContent = `${out.resuming ? "Resumes" : "Creates"} the run ${out.run} in ${out.run_dir}.`;
@@ -875,6 +942,7 @@ function renderPreflight(out) {
       h("span", { class: "name" }, c.name),
       h("span", { class: "detail" }, c.detail + (c.reason ? ` [${c.reason}]` : ""))));
   }
+  showResearch($("nr-research-view"), out.research, null);
   const base = out.checks.find((c) => c.name === "base" && c.status === "block" && c.candidates && c.candidates.length);
   const fs = $("nr-candidates"), list = clear($("nr-candidate-list"));
   fs.hidden = !base;
@@ -891,12 +959,13 @@ function renderPreflight(out) {
 async function startBringup() {
   if (!lastPreflight || !lastPreflight.ok) return;
   const model = $("nr-model").value.trim(), base = $("nr-base").value.trim();
-  if (model !== lastPreflight.model || (base || null) !== lastPreflight.base || $("nr-mode").value !== lastPreflight.mode) {
-    formError("The model, base or mode changed since the checks ran. Run the checks again."); return;
+  if (model !== lastPreflight.model || (base || null) !== lastPreflight.base || $("nr-mode").value !== lastPreflight.mode
+      || $("nr-research").value !== lastPreflight.researchChoice) {
+    formError("The model, base, mode or research setting changed since the checks ran. Run the checks again."); return;
   }
   $("nr-start").disabled = true;
   try {
-    const out = await api("/api/bringup", { body: { model, base: base || null, mode: $("nr-mode").value } });
+    const out = await api("/api/bringup", { body: { model, base: base || null, mode: $("nr-mode").value, research: $("nr-research").value } });
     $("new-run").close();
     toast(`Started ${model} (pid ${out.pid}). It shows in the run list once its ledger exists; the download can take a while.`);
     S.startingRun = out.run;
@@ -920,6 +989,7 @@ function wire() {
   setInterval(renderNow, 1000);
   $("machine-check-btn").addEventListener("click", () => { setView("settings"); startChecks(); });
   $("nr-mode").addEventListener("change", () => { $("nr-start").disabled = true; });
+  $("nr-research").addEventListener("change", () => { $("nr-start").disabled = true; });
   $("hw-zoom-in").addEventListener("click", () => zoomToplike(+1));
   $("hw-zoom-out").addEventListener("click", () => zoomToplike(-1));
   $("hw-wide").addEventListener("click", () => {

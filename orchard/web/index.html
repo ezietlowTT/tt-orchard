@@ -279,6 +279,7 @@
 
       <section role="tabpanel" id="pane-details" aria-labelledby="tab-details" class="pane" hidden>
         <dl class="details" id="details"></dl>
+        <div class="research" id="research" hidden></div>
       </section>
     </article>
   </main>
@@ -319,10 +320,20 @@
       </select>
       <span class="field-help" id="nr-mode-help"></span>
     </div>
+    <div class="field">
+      <label for="nr-research">Base-model research</label>
+      <select id="nr-research">
+        <option value="full">Hub, tt-model, tt-metal and GitHub</option>
+        <option value="no-github">Without GitHub issue and code searches</option>
+        <option value="offline">Off (no requests)</option>
+      </select>
+      <span class="field-help">Looks for the model this one was made from, ranks the bundles that could serve it and estimates the class from the safetensors headers, before any download.</span>
+    </div>
     <p class="form-error" id="nr-error" role="alert" hidden></p>
     <div id="nr-result" class="preflight" hidden>
       <p class="preflight-run" id="nr-run"></p>
       <ul class="checks" id="nr-checks"></ul>
+      <div class="research" id="nr-research-view" hidden></div>
       <fieldset class="candidates" id="nr-candidates" hidden>
         <legend>Choose a bundle to base the run on</legend>
         <div id="nr-candidate-list"></div>

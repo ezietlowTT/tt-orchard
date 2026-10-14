@@ -735,3 +735,208 @@ def test_no_drafter_hazard_is_added_when_neither_model_has_mtp_tensors(tmp_path,
     d = delta(stage)
     assert d["mtp"] == {"nearest_tensors": 0, "new_tensors": 0}
     assert len([h for h in d["hazards"] if h["area"] == "drafter"]) == 1
+
+
+def test_a_cut_short_shard_is_reported_by_the_directory_wrapper(text_case):
+    """compare_tensors reads the directories and hands the read errors to compare_tensor_maps; a shard
+    that cannot be read in the nearest model must still show up as an error."""
+    stage = text_case()
+    nearest = Path(json.loads((stage / "triage_config.json").read_text())["nearest_snapshot"])
+    shard = sorted(nearest.glob("model*.safetensors"))[0]
+    shard.write_bytes(shard.read_bytes()[:5])
+    mod = template_module()
+    out = mod.compare_tensors(model_dir_of(stage), nearest)
+    assert any(shard.name in e for e in out["errors"]), out
+
+
+def test_the_directory_wrappers_report_their_directories_as_paths(text_case):
+    stage = text_case()
+    model, nearest = model_dir_of(stage), Path(json.loads((stage / "triage_config.json").read_text())["nearest_snapshot"])
+    mod = template_module()
+    t = mod.compare_tensors(model, nearest)
+    assert t["model"]["path"] == str(model) and t["base"]["path"] == str(nearest)
+    c = mod.compare_configs(model, nearest)
+    assert c["model_config_path"] == str(model / "config.json")
+    assert c["base_config_path"] == str(nearest / "config.json")
+
+
+# ---- the research report as an optional input -------------------------------------------------------
+
+def write_candidates(stage, rows):
+    path = stage.parent.parent / "research" / "base-candidates.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"candidates": rows}))
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    cfg["base_candidates"] = str(path)
+    (stage / "triage_config.json").write_text(json.dumps(cfg))
+    return path
+
+
+ROW = {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated", "class_estimate": {"class": "weights-only"}}
+
+
+def baseline_decision(stage):
+    """(class, path) of a run with no base_candidates input, taken before the key is added to the config."""
+    cfg_path = stage / "triage_config.json"
+    saved = cfg_path.read_text()
+    cfg = json.loads(saved)
+    cfg.pop("base_candidates", None)
+    cfg_path.write_text(json.dumps(cfg))
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    cfg_path.write_text(saved)
+    return d["class"], d["path"]
+
+
+def test_the_draft_records_how_the_research_estimate_compared_with_the_measurement(text_case):
+    stage = text_case()
+    write_candidates(stage, [ROW])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    assert br["candidate"] == {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated"}
+    assert (br["estimated_class"], br["measured_class"], br["agreed"]) == ("weights-only", "weights-only", True)
+
+
+def test_a_disagreement_is_recorded_and_changes_nothing_else(text_case):
+    stage = text_case()
+    write_candidates(stage, [{**ROW, "class_estimate": {"class": "full-port"}}])
+    run_triage(stage)
+    d = delta(stage)
+    assert d["base_research"]["agreed"] is False and d["path"] == "weights-only" and d["class"] == "weights-only"
+
+
+@pytest.mark.parametrize("content", ["not json", "[]", '{"candidates": "x"}', '{"candidates": []}',
+                                     '{"candidates": [7, null]}'])
+def test_an_unreadable_or_empty_report_gives_a_null_candidate_and_no_failure(text_case, content):
+    stage = text_case()
+    write_candidates(stage, []).write_text(content)
+    base = baseline_decision(stage)
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = delta(stage)
+    br = d["base_research"]
+    assert br["candidate"] is None and br["agreed"] is None and br["estimated_class"] is None
+    assert (d["class"], d["path"]) == base
+
+
+@pytest.mark.parametrize("estimate", [None, "weights-only", ["weights-only"], {"class": None}, {}])
+def test_a_missing_or_malformed_estimate_is_ignored(text_case, estimate):
+    stage = text_case()
+    write_candidates(stage, [{"repo": "Qwen/Qwen3.8-27B", "confidence": "stated", "class_estimate": estimate}])
+    base = baseline_decision(stage)
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    br = d["base_research"]
+    assert br["candidate"]["repo"] == "Qwen/Qwen3.8-27B" and br["estimated_class"] is None and br["agreed"] is None
+    assert (d["class"], d["path"]) == base
+
+
+def test_without_the_key_the_draft_has_no_base_research(text_case):
+    stage = text_case()
+    run_triage(stage)
+    assert "base_research" not in delta(stage)
+
+
+def test_a_candidate_for_another_repo_is_not_matched(text_case):
+    stage = text_case()
+    write_candidates(stage, [{**ROW, "repo": "other/model"}])
+    run_triage(stage)
+    assert delta(stage)["base_research"]["candidate"] is None
+
+
+def test_the_draft_with_base_research_still_passes_the_stage_0_gate(text_case):
+    stage = text_case()
+    write_candidates(stage, [ROW])
+    run_triage(stage)
+    assert "base_research" in delta(stage)
+    assert gate_delta(stage, stage.parent.parent).ok
+
+
+def test_report_text_is_cleaned_before_it_is_recorded(text_case):
+    """The report is fetched text. Control characters and newlines are removed, the length is capped, and
+    a value that is not a string is recorded as null."""
+    stage = text_case()
+    write_candidates(stage, [{**ROW, "confidence": "sta\nted\x1b[31m" + "x" * 400,
+                              "class_estimate": {"class": ["weights-only"]}}])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    conf = br["candidate"]["confidence"]
+    assert "\n" not in conf and "\x1b" not in conf and len(conf) <= 300
+    assert br["estimated_class"] is None and br["agreed"] is None
+
+
+# ---- a measured sidecar model against the estimate (headers cannot see a sidecar) -------------------
+
+@pytest.mark.parametrize("estimate, agreed", [("weights-only", True), ("full-port", False), ("unknown", False)])
+def test_a_measured_sidecar_model_agrees_with_a_weights_only_estimate_only(text_case, estimate, agreed):
+    stage = text_case()
+    add_sidecar(stage)
+    write_candidates(stage, [{**ROW, "class_estimate": {"class": estimate}}])
+    assert run_triage(stage).returncode == 0
+    d = delta(stage)
+    br = d["base_research"]
+    assert d["class"] == "weights+sidecar" and br["measured_class"] == "weights+sidecar"
+    assert br["estimated_class"] == estimate and br["agreed"] is agreed
+    assert set(br) == {"candidate", "estimated_class", "measured_class", "agreed"}
+
+
+def test_a_measured_weights_only_model_still_agrees_with_a_weights_only_estimate(text_case):
+    stage = text_case()
+    write_candidates(stage, [ROW])
+    run_triage(stage)
+    assert delta(stage)["base_research"]["agreed"] is True
+
+
+def test_a_report_over_the_size_cap_is_treated_as_unreadable(text_case):
+    stage = text_case()
+    base = baseline_decision(stage)
+    path = write_candidates(stage, [ROW])
+    path.write_text(json.dumps({"candidates": [ROW], "pad": "x" * (2 * 1024 * 1024 + 10)}))
+    r = run_triage(stage)
+    assert r.returncode == 0, r.stdout + r.stderr
+    d = delta(stage)
+    assert d["base_research"]["candidate"] is None and d["base_research"]["agreed"] is None
+    assert (d["class"], d["path"]) == base
+
+
+def test_a_measured_full_port_does_not_agree_with_a_weights_only_estimate(text_case):
+    stage = text_case(config_change={"num_key_value_heads": 2})
+    write_candidates(stage, [ROW])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    assert br["measured_class"] == "full-port" and br["agreed"] is False
+
+
+def write_view(stage, rows, **top):
+    """The file `bringup` hands stage 0 (research/base-candidates.stage0.json): a class string per candidate."""
+    path = stage.parent.parent / "research" / "base-candidates.stage0.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"model": "h/new", "selected": None, "candidates": rows, **top}))
+    cfg = json.loads((stage / "triage_config.json").read_text())
+    cfg["base_candidates"] = str(path)
+    (stage / "triage_config.json").write_text(json.dumps(cfg))
+    return path
+
+
+VIEW_ROW = {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated", "group": 0, "class_estimate": "weights-only",
+            "bundles": ["tt/q"]}
+
+
+def test_the_stage_0_view_shape_is_read_too(text_case):
+    stage = text_case()
+    write_view(stage, [VIEW_ROW])
+    assert run_triage(stage).returncode == 0
+    br = delta(stage)["base_research"]
+    assert br["candidate"] == {"repo": "Qwen/Qwen3.8-27B", "confidence": "stated"}
+    assert (br["estimated_class"], br["measured_class"], br["agreed"]) == ("weights-only", "weights-only", True)
+
+
+def test_a_view_with_no_estimate_or_a_disagreeing_one_is_recorded_without_changing_the_decision(text_case):
+    stage = text_case()
+    write_view(stage, [{**VIEW_ROW, "class_estimate": "full-port"}])
+    run_triage(stage)
+    d = delta(stage)
+    assert d["base_research"]["agreed"] is False and d["path"] == "weights-only"
+    write_view(stage, [{**VIEW_ROW, "class_estimate": None}])
+    run_triage(stage)
+    assert delta(stage)["base_research"]["estimated_class"] is None
