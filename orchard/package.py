@@ -296,6 +296,8 @@ REVISION = re.compile(r"[0-9a-f]{40}")
 HF_SNAPSHOT_PATH = re.compile(r"(?:^|/)models--(?P<org>[^/]+?)--(?P<name>[^/]+)/snapshots/"
                               r"(?P<rev>[0-9a-f]{40})/")
 HF_BLOB_PATH = re.compile(r"^(?P<root>.*/models--(?P<org>[^/]+?)--(?P<name>[^/]+))/blobs/[^/]+$")
+# The shared store of a newer huggingface_hub: a repo's blobs/<hash> is a link to <hub>/blobs/<2 hex>/<hash>.
+HF_SHARED_BLOB_PATH = re.compile(r"^(?P<hub>.*)/blobs/[0-9a-f]{2}/[0-9a-f]{64}$")
 MAX_LINK_HOPS = 40
 
 
@@ -311,14 +313,19 @@ def split_model_id(model_id) -> tuple[str, str | None]:
     return text, None
 
 
-def _weight_origin(path: Path) -> tuple[str, set[str]] | None:
+def _weight_origin(path: Path, prefer: str | None = None) -> tuple[str, set[str]] | None:
     """The repo and the candidate revisions one weight file in a model dir comes from, or None.
 
     Each hop of the file's symlink chain is read in turn. A hop inside `snapshots/<rev>/` names the
     revision directly (the layout the HF cache uses, and any link made into it). prepare_swap.py
     instead links each file to `os.path.realpath` of the snapshot file, which is a blob and names
     no revision. Then the candidates are the snapshots of that repo whose same-named file resolves
-    to the same blob. Two revisions that share a blob hold identical bytes for that file."""
+    to the same blob. Two revisions that share a blob hold identical bytes for that file.
+
+    In the shared blob store the real path names no repo either. The candidates are then the snapshots
+    of every `models--*` directory in the same hub whose same-named file resolves to that blob. A blob
+    that two repos hold (a fine-tune keeps some of its base model's shards byte for byte) is read as
+    `prefer`'s when `prefer` holds it."""
     hop = str(path)
     for _ in range(MAX_LINK_HOPS):
         if not os.path.islink(hop):
@@ -333,11 +340,30 @@ def _weight_origin(path: Path) -> tuple[str, set[str]] | None:
         return f"{m['org']}/{m['name']}", {m["rev"]}
     m = HF_BLOB_PATH.match(real)
     if m is None:
-        return None
+        shared = HF_SHARED_BLOB_PATH.match(real)
+        return _shared_blob_origin(Path(shared["hub"]), path.name, real, prefer) if shared else None
     snaps = Path(m["root"]) / "snapshots"
     revs = {s.name for s in (sorted(snaps.iterdir()) if snaps.is_dir() else [])
             if REVISION.fullmatch(s.name) and os.path.realpath(s / path.name) == real}
     return (f"{m['org']}/{m['name']}", revs) if revs else None
+
+
+def _shared_blob_origin(hub: Path, name: str, real: str, prefer: str | None) -> tuple[str, set[str]] | None:
+    """The repo and revisions in `hub` that hold the file `name` as the shared-store blob `real`."""
+    found: dict[str, set[str]] = {}
+    for repo_dir in sorted(hub.glob("models--*--*")):
+        m = re.fullmatch(r"models--(?P<org>[^/]+?)--(?P<name>[^/]+)", repo_dir.name)
+        snaps = repo_dir / "snapshots"
+        if m is None or not snaps.is_dir():
+            continue
+        revs = {s.name for s in sorted(snaps.iterdir())
+                if REVISION.fullmatch(s.name) and os.path.realpath(s / name) == real}
+        if revs:
+            found[f"{m['org']}/{m['name']}"] = revs
+    if not found:
+        return None
+    repo = prefer if prefer in found else sorted(found)[0]
+    return repo, found[repo]
 
 
 def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
@@ -367,7 +393,7 @@ def served_weights_problems(stage0_model, label, model_dir) -> list[str]:
                 "cannot be checked"]
     origins = {}
     for w in weights:
-        origin = _weight_origin(w)
+        origin = _weight_origin(w, want_repo)
         if origin is None:
             return [f"{w} links into no Hugging Face snapshot, so its revision is unknown; stage 0 "
                     f"names {stage0_model}"]

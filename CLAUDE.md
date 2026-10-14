@@ -956,3 +956,14 @@ ready in 1,406 s (cold kernel cache). Results are in `~/orchard-runs/thakicloud-
   on this server (drafter off, sampling on the host). `prompt_logprobs` is refused. The stage 2 template's comment says the server
   rejects logprobs; that did not hold here. Not tested with the drafter on.
 - Not done: CPU agreement, 1-request latency, 4 chips. SFPI 7.87.0 is newer than the 7.83.0 the earlier runs used; this one run compiled with it.
+
+## 2026-10-14 (later): CPU agreement, and a harness bug in stage 7's weight check
+Prompt (operator): "cpu agreement -> v6 package -> boot check -> publish public card -> music model".
+- CPU agreement for RAG-Gate-27B: 25 of 25 labels equal between the chips and the CPU model (every 8th of the 200 prompts); see
+  `gate-check/RESULTS.md` in the run directory.
+- Bug found by running stage 7 by hand: `served_weights_problems` could not trace the served weights on this machine, because the HF
+  cache here is a shared blob store (`models--X/blobs/<hash>` links to `hub/blobs/<2 hex>/<hash>`), and the real path of a weight file
+  names no repo. It said "links into no Hugging Face snapshot". `_weight_origin` now looks the file up in every `models--*`
+  snapshot of the same hub, and reads a blob that two repos hold as the repo stage 0 names. 5 tests; mutations (no shared branch,
+  no revision filter, no preference for stage 0's repo) turned them red; the last one first survived and got its own test.
+  Clef's earlier stage 7 passed because its cache used the older layout.
