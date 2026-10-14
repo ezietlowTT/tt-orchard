@@ -149,7 +149,8 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
 
     candidates: dict[str, dict] = {}
     cfgs: dict[str, dict] = {}
-    for repo in _unique(stated + list(by_repo))[:MAX_CANDIDATES]:
+    # The model is never its own base, even when an installed bundle already serves it.
+    for repo in [r for r in _unique(stated + list(by_repo)) if r != model_id][:MAX_CANDIDATES]:
         cfg = _config(fetch, repo, res)
         no_match = {"confidence": None, "differing": {}}
         cmp = _guard(res, "config", lambda: arch_match.compare(new_cfg, cfg), no_match) \

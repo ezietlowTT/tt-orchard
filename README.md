@@ -417,6 +417,7 @@ tt-orchard bringup org/name --base <bundle or model id>       # base the run on 
 tt-orchard bringup org/name --offline                         # skip the base-model research (the hub lookup and downloads still run)
 tt-orchard bringup org/name --no-github                       # research without the GitHub issue and code searches
 tt-orchard bringup org/name --refresh-research                # ignore answers cached by an earlier attempt
+tt-orchard bringup org/name --accept-inferred-base            # use (and download) a base the research inferred
 tt-orchard watch org/name                                     # follow a run from another terminal
 tt-orchard ui                                                 # watch and control every run in a browser
 tt-orchard status org/name                                    # also pause, resume, abort
@@ -521,7 +522,7 @@ its reason; a `warn` is information.
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
-| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base, also a warning (see "How the base model is found") | `nearest-model-missing` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
@@ -559,7 +560,8 @@ anything large. It reads, with no Hugging Face token:
 The result is `<run dir>/research/base-candidates.md` and `.json`. Each row says where it came from and how
 sure it is: `stated` (the card or `--base` names it), `inferred` (same architecture family and the same
 decisive config values) or `weak` (same family only; a sibling fine-tune of the base is judged by its own config in the same way). Only a stated or inferred candidate with an installed v6
-bundle is chosen on its own. Stage 0 gets a shorter file, `base-candidates.stage0.json`, as the input
+bundle is chosen on its own, and an inferred one is used only after the operator confirms it (see the base row
+of the preflight table). The model itself is never its own candidate. Stage 0 gets a shorter file, `base-candidates.stage0.json`, as the input
 `base_candidates`. It lists each candidate's model id, confidence, group, estimated class and bundle names, and
 none of the text fetched from the internet; the full report stays in `base-candidates.json` for you. Stage 0
 measures the class and records in `delta.json` whether the estimate agreed. The estimate is recorded next to the

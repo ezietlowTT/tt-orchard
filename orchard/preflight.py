@@ -216,14 +216,31 @@ def _selection_basis(report) -> str:
     return "inferred from its architecture" if conf == "inferred" else conf
 
 
+def _confirm_inferred(base: str, serving, report) -> Check:
+    """An inferred base is a guess from the architecture. Using it means downloading its snapshot and basing the run
+    on it, so it waits for the operator: a block that offers its bundle first, like a missing bundle does."""
+    first = [{"name": b.name, "installed": True} for b in serving]
+    names = {c["name"] for c in first}
+    rest = [dict(c) for c in (report or {}).get("bundle_choices") or [] if c.get("name") not in names]
+    return Check("base", BLOCK, f"the card names no base model; research infers {base} ({_selection_basis(report)}), "
+                 f"served by the installed bundle {serving[0].name}. An inferred base is not downloaded or used "
+                 f"without a confirmation: pass --base {serving[0].name} to use it, --accept-inferred-base to take "
+                 "what research inferred, or --base <bundle or model id> to choose another" + _port_note(report),
+                 "inferred-base-unconfirmed",
+                 data={"base": base, "snapshot": None, "bundle": None, "needs_fetch": False, "inferred": True,
+                       "candidates": first + rest, "report": report})
+
+
 def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None, local_snapshot: Callable,
-               installed: list, search: Callable | None, report: dict | None = None) -> Check:
+               installed: list, search: Callable | None, report: dict | None = None,
+               accept_inferred: bool = False) -> Check:
     """The model this run is compared with and served through. It needs an installed bundle (stages 2 and
     4 serve the new weights with it) and a snapshot on disk (stage 0 compares tensors and configs). A missing
     snapshot is downloaded by the command. A missing bundle is a block that lists what `tt model search`
     found, so the operator can pick one with --base. `report` is the research report
     (orchard/research/report.py): it supplies an inferred base when the card names none, the expected
-    class, ranked bundle choices and existing ports. Without a report the behaviour is the earlier one."""
+    class, ranked bundle choices and existing ports. Without a report the behaviour is the earlier one. A base
+    research inferred (not stated by the card or its tags) blocks unless `accept_inferred` is set."""
     from orchard import nearest
     base = base_override or (hub.base_models[0] if hub and hub.base_models else None)
     inferred = False
@@ -235,6 +252,8 @@ def check_base(*, model_id: str, hub: HubInfo | None, base_override: str | None,
                      + _closest(report) + _port_note(report),
                      data={"base": None, "snapshot": None, "needs_fetch": False, "candidates": [], "report": report})
     serving = [b for b in installed if b.weights_repo == base]
+    if serving and inferred and report["selected"].get("confidence") != "stated" and not accept_inferred:
+        return _confirm_inferred(base, serving, report)
     if serving:
         snap = local_snapshot(base)
         data = {"base": base, "snapshot": snap, "bundle": serving[0].name, "needs_fetch": snap is None,
@@ -359,7 +378,8 @@ def cache_root_for(cfg) -> Path:
 
 
 def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Signals | None = None,
-                  resuming: bool = False, base_override: str | None = None) -> list[Check]:
+                  resuming: bool = False, base_override: str | None = None,
+                  accept_inferred_base: bool = False) -> list[Check]:
     s = signals or default_signals(cfg)
     out: list[Check] = []
 
@@ -388,7 +408,8 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
             except Exception as exc:                  # a failed research call leaves the earlier checks in force
                 report, failed = None, type(exc).__name__
         found = check_base(model_id=model_id, hub=hub, base_override=base_override,
-                           local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report)
+                           local_snapshot=s.local_snapshot, installed=inst, search=s.search_bundles, report=report,
+                           accept_inferred=accept_inferred_base)
         if failed:
             from orchard.research.types import clean
             found.detail += f" (research failed: {clean(failed)})"

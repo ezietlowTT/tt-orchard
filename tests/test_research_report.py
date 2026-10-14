@@ -549,3 +549,11 @@ def test_a_hostile_selection_is_dropped_or_reduced():
     for bad in ({"repo": HOSTILE, "bundle": "tt/b"}, {"repo": "g/base", "bundle": HOSTILE}):
         rep["selected"] = {**bad, "confidence": "stated", "class": None}
         assert report.stage0_view(rep)["selected"] is None
+
+
+def test_the_model_itself_is_never_a_candidate_even_when_an_installed_bundle_serves_it():
+    w = world({api("h/new"): hub_model("h/new")})
+    r = build(w, hub=new_hub(), installed=[Installed("tt/new-p150", "h/new", "6", 1),
+                                           Installed("tt/base-p150", "g/base", "6", 1)])
+    assert "h/new" not in [c["repo"] for c in r["candidates"]]
+    assert r["selected"]["repo"] == "g/base"

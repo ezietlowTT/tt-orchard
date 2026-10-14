@@ -95,6 +95,9 @@ def _parser() -> argparse.ArgumentParser:
                         "base-model research. tt-metal's model listings and README are still read")
     b.add_argument("--refresh-research", action="store_true",
                    help="ignore the cached answers from an earlier attempt of this run")
+    b.add_argument("--accept-inferred-base", action="store_true",
+                   help="when the card names no base model, use the one the research inferred from the "
+                        "architecture (and download its snapshot). Without it an inferred base blocks the run")
     b.add_argument("--mode", choices=bringup_config.MODES,
                    help="where the hardware tests run for this run: local (this box) or lab (the [lab] box). "
                         "Default: the config's mode")
@@ -168,9 +171,14 @@ def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) ->
     return None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
 
 
-def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input) -> str | None:
-    """Ask the operator which bundle to base the run on. Returns its name, or None for none."""
-    print(f"║  {model} is based on {base}, and no installed bundle serves it. Bundles found:", file=out)
+def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, inferred: bool = False) -> str | None:
+    """Ask the operator which bundle to base the run on. Returns its name, or None for none. For a base the
+    research inferred, the pick is the operator's confirmation."""
+    if inferred:
+        print(f"║  {model}'s card names no base; research inferred {base}. Confirm a bundle to base the run on:",
+              file=out)
+    else:
+        print(f"║  {model} is based on {base}, and no installed bundle serves it. Bundles found:", file=out)
     for i, c in enumerate(candidates, 1):
         tag = "installed" if c.get("installed") else "not installed (will be installed with tt-model pull)"
         print(f"║    {i}. {c['name']}  [{tag}]", file=out)
@@ -436,7 +444,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
 
     def preflight_page():
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
-                                      signals=sig, resuming=resuming, base_override=override)
+                                      signals=sig, resuming=resuming, base_override=override,
+                                      accept_inferred_base=args.accept_inferred_base)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -445,7 +454,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if (base_check.status == preflight.BLOCK and (base_check.data or {}).get("candidates") and not args.base
             and not args.dry_run):
         if chooser is None and sys.stdin.isatty() and ui.stream_is_tty(out):
-            chooser = lambda c, m, b: pick_base(c, m, b, out=out)   # noqa: E731
+            chooser = lambda c, m, b: pick_base(c, m, b, out=out,                    # noqa: E731
+                                                inferred=bool(base_check.data.get("inferred")))
         pick = chooser(base_check.data["candidates"], args.model, base_check.data["base"]) if chooser else None
         if pick:
             override, why = resolve_base(pick, sig, puller, out, style)
