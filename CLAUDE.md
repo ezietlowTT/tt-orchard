@@ -967,3 +967,17 @@ Prompt (operator): "cpu agreement -> v6 package -> boot check -> publish public 
   snapshot of the same hub, and reads a blob that two repos hold as the repo stage 0 names. 5 tests; mutations (no shared branch,
   no revision filter, no preference for stage 0's repo) turned them red; the last one first survived and got its own test.
   Clef's earlier stage 7 passed because its cache used the older layout.
+
+## 2026-10-14 (later still): `episod/rag-gate-27b-p300` is public
+Prompt (operator): "cpu agreement -> v6 package -> boot check -> publish public card -> music model". Stage 7 run by hand on the finished
+RAG-Gate-27B run (the ledger still records it as skipped): `stage_all` (needed the shared-blob-store fix above), boot check under
+`gozer run --chips 2 --exact 2` with the supervisor's environment (31 of 32 tokens, top-1 0.96875, ready in 1,546 s, fresh install, empty
+cache), `finish`, `gate_package` ok. Only the 2-chip profile was staged: the 1-chip profile was skipped because stage 4 had no passing
+1-chip configuration, and no 4-chip v6 bundle is installed.
+- The generated card was rewritten for a gate: intended use and a curl example with `logprobs`, five measured rows (gate accuracy
+  0.930, over-refusal 0.074, unsupported answers 0.062, 25 of 25 labels equal to the CPU's, median 2.5 s per request with 4 in flight),
+  a section on what was and was not measured, and a section saying the same author's 4B, 8B and 9B models score at least as well.
+  The evidence files (`evidence/gate-check/`) are redacted copies; the bundle's namespace in `RESULTS.md` became `<TT_MODEL_MODELS>`.
+  `gate_package` passed after the rewrite (the first try failed on that namespace, which the scrub refuses).
+- `hf upload --repo-type model --private`, then `tt-model publish episod/rag-gate-27b-p300` (public and listed in the community catalog),
+  on the operator's explicit instruction. Delist with `tt-model unpublish`. Not tested: `tt-model pull` and a boot from the Hub.
