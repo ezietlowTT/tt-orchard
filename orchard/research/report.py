@@ -39,7 +39,8 @@ def _unique(items) -> list[str]:
 
 
 def _empty(model_id: str, now: str, offline: bool, reason: str) -> dict:
-    return {"model": model_id, "generated_at": now, "offline": offline, "stated_bases": [], "candidates": [],
+    return {"model": model_id, "generated_at": now, "offline": offline, "new_model_gated": None,
+            "stated_bases": [], "candidates": [],
             "bundle_choices": [], "selected": None, "ports": [], "evidence": [],
             "unavailable": [Unavailable("research", reason).as_dict()]}
 
@@ -140,7 +141,12 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     lin = _guard(res, "lineage", lambda: lineage.chain(fetch, model_id), lambda: Result(data={"ancestors": [], "edges": []}))
     res.extend(lin)
     stated = _unique([base_override] + list(hub.base_models if hub else []) + lin.data["ancestors"])
+    before = len(res.unavailable)
     new_cfg = _config(fetch, model_id, res) or {}
+    # Research sends no token, so a gated or private model's config and headers answer 401 or 403. Say so, so an
+    # empty or weak candidate list is not read as "there is no base".
+    gated = bool(hub and (hub.gated or hub.private)) or any(
+        u.reason.startswith((f"{model_id}: HTTP 401", f"{model_id}: HTTP 403")) for u in res.unavailable[before:])
     letters = re.match(r"[a-z]+", str(new_cfg.get("model_type") or "").lower())
     family = nearest.family_query(stated[0]) if stated else (letters.group(0) if letters else "")
     sib = _guard(res, "siblings", lambda: lineage.siblings(fetch, stated[0], exclude={model_id}),
@@ -239,7 +245,7 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     port_res = _guard(res, "ports", lambda: ports.collect(fetch, new_cfg, family=family or "", run=run, which=which,
                                                           no_github=no_github), Result) if family else Result()
     res.extend(port_res)
-    return {"model": model_id, "generated_at": now, "offline": False, "stated_bases": stated,
+    return {"model": model_id, "generated_at": now, "offline": False, "new_model_gated": gated, "stated_bases": stated,
             "candidates": ordered, "bundle_choices": choices, "selected": selected,
             "ports": [e.as_dict() for e in port_res.evidence],
             "evidence": [e.as_dict() for e in res.evidence if e not in port_res.evidence],
@@ -252,6 +258,10 @@ def markdown(report: dict) -> str:
              "read is listed under Unavailable."]
     if report["offline"]:
         lines += ["", "Research was skipped (`--offline`)."]
+    if report.get("new_model_gated"):
+        lines += ["", "The new model is gated or private on the hub. Research sends no token, so it could not read the "
+                  "model's config.json or safetensors headers: no architecture comparison and no class estimate were "
+                  "made for it. A short or empty candidate list does not mean there is no base."]
     lines += ["", "## Candidates", ""]
     for c in report["candidates"]:
         est = c["class_estimate"]

@@ -883,6 +883,7 @@ function researchBlock(view, stage0) {
   }
   if (!view) return box;
   if (view.offline) box.append(h("p", { class: "muted" }, "Research was off for this run (no requests were made)."));
+  if (view.new_model_gated) box.append(h("p", { class: "muted" }, "The new model is gated or private: research sends no token, so it could not compare its config or estimate its class. Few or no candidates does not mean there is no base."));
   if (view.selected) {
     box.append(h("p", { class: "research-line" }, h("strong", {}, "Chosen: "),
       h("span", { class: "mono" }, view.selected.bundle || view.selected.repo || "–"),

@@ -244,3 +244,9 @@ def test_the_ui_shares_one_research_memo_across_requests_and_configs(monkeypatch
     for_cfg(object())("org/new", None)
     for_cfg(object())("org/new", None)                            # a second request, a second callable
     assert len(calls) == 1
+
+
+def test_the_view_says_when_the_new_model_was_gated(root):
+    assert make_app(root).research_view(dict(REPORT, new_model_gated=True))["new_model_gated"] is True
+    assert make_app(root).research_view(dict(REPORT))["new_model_gated"] is False
+    assert make_app(root).research_view(dict(REPORT, new_model_gated="yes"))["new_model_gated"] is False

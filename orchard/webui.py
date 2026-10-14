@@ -786,6 +786,7 @@ class WebApp:
         sel = report.get("selected")
         return {
             "generated_at": red(report.get("generated_at")), "offline": report.get("offline") is True,
+            "new_model_gated": report.get("new_model_gated") is True,
             "selected": {k: red(sel.get(k)) for k in ("repo", "bundle", "confidence", "class")}
             if isinstance(sel, dict) else None,
             "choices": [{"name": red(c.get("name")), "installed": c.get("installed") is True, "class": red(c.get("class")),

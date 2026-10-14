@@ -569,7 +569,9 @@ none of the text fetched from the internet; the full report stays in `base-candi
 measures the class and records in `delta.json` whether the estimate agreed. The estimate is recorded next to the
 measurement and changes neither the class nor the path.
 
-A source that cannot be reached is listed as unavailable in the report. After one connection failure to a host
+Research sends no token, so for a gated or private new model it cannot read the model's config or headers: the
+report says so (`new_model_gated` in the JSON, a line in the Markdown and in the UI), and its short candidate
+list is not evidence that there is no base. A source that cannot be reached is listed as unavailable in the report. After one connection failure to a host
 (no route, a timeout), the remaining requests to that host fail at once. One research run makes at most 600
 requests in at most 240 seconds (answers from the cache do not count); after that the remaining requests fail
 at once, are listed as unavailable, and an estimate that misses a header is `unknown`. `--offline` skips the research and makes
