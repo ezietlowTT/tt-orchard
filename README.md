@@ -828,7 +828,7 @@ does not change.
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
 
 A sidecar is found by name: the backbone is the shards the model's `model.safetensors.index.json` lists (or
-`model*.safetensors` without an index; an index that cannot be read is reported and the class estimate is `unknown`), and any other weights file the nearest model does not have is a
+`model*.safetensors` without an index; an index that cannot be read, or that lists a shard the repository does not have, is reported and the class estimate is `unknown`), and any other weights file the nearest model does not have is a
 sidecar. `delta.json` lists each sidecar with its size, sha256, tensor count and tensor names, and each
 top-level `.py` file in the repo with its sha256 (`code_files`). The triage script reads headers and
 hashes files. It never imports or runs a code file.

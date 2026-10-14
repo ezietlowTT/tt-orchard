@@ -238,3 +238,14 @@ def test_a_broken_index_makes_the_class_estimate_unknown():
                                ["model-00001-of-00001.safetensors"])
     est = headers.estimate_class({"model_type": "g"}, new.data, {"model_type": "g"}, other.data)
     assert est["class"] == "unknown"
+
+
+def test_an_index_that_lists_a_shard_the_repo_does_not_have_is_an_error_and_the_estimate_is_unknown():
+    """A partial tensor set would make the estimate a confident guess (missing tensors read as full-port)."""
+    f = RangeFetch({"model-00001-of-00002.safetensors": header_bytes(T)},
+                   indexes={"model.safetensors.index.json": {"weight_map": {
+                       "a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}})
+    new = headers.read_model(f, "g/it", ["model.safetensors.index.json", "model-00001-of-00002.safetensors"])
+    assert any("model-00002-of-00002.safetensors" in e for e in new.data["errors"])
+    other = headers.read_model(RangeFetch({"model.safetensors": header_bytes(T)}), "g/base", ["model.safetensors"])
+    assert headers.estimate_class(CFG, new.data, CFG, other.data)["class"] == "unknown"

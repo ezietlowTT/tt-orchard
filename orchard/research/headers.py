@@ -72,6 +72,11 @@ def read_model(fetch, repo: str, files: list[str]) -> Result:
                 shards = [n for n in safe if n in listed] or None
                 if shards is None:
                     res.data["errors"].append(f"{INDEX_NAME}: lists none of the repository's safetensors files")
+                missing = sorted(n for n in listed if n not in safe)
+                if shards is not None and missing:
+                    # The headers read would be a part of the backbone, so the estimate must not be a guess.
+                    res.data["errors"].append(f"{INDEX_NAME}: lists {len(missing)} shard(s) the repository does not "
+                                              f"have or that are not read: {', '.join(missing[:3])}")
             else:
                 res.unavailable.append(Unavailable("headers", f"{repo}: the index has no weight_map object"))
                 res.data["errors"].append(f"{INDEX_NAME}: no weight_map object")
