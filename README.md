@@ -558,7 +558,9 @@ anything large. It reads, with no Hugging Face token:
   `gh auth login`; without it that one search is skipped and the report says so.
 
 The result is `<run dir>/research/base-candidates.md` and `.json`. Each row says where it came from and how
-sure it is: `stated` (the card or `--base` names it), `inferred` (same architecture family and the same
+sure it is: `stated` (`--base` names it, or the card or the model's tags name it and its config does not
+disagree; a card base whose decisive config values differ is `weak`, and a base of the base is judged by its
+own config like any other candidate), `inferred` (same architecture family and the same
 decisive config values) or `weak` (same family only; a sibling fine-tune of the base is judged by its own config in the same way). Only a stated or inferred candidate with an installed v6
 bundle is chosen on its own, and an inferred one is used only after the operator confirms it (see the base row
 of the preflight table). The model itself is never its own candidate. Stage 0 gets a shorter file, `base-candidates.stage0.json`, as the input

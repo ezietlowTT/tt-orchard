@@ -117,6 +117,12 @@ def _config(fetch, repo: str, res: Result) -> dict | None:
     return cfg
 
 
+def _mismatch(cmp: dict) -> str:
+    if not cmp.get("same_family"):
+        return "another architecture family"
+    return "other decisive config values: " + ", ".join(cmp["differing"])
+
+
 def _group(bundles: list[dict]) -> int:
     if any(b["installed"] and b["schema"] == V6 for b in bundles):
         return 0
@@ -141,6 +147,11 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
                  lambda: Result(data={"siblings": []})) if stated else Result(data={"siblings": []})
     res.extend(sib)
     sibling_ids = set(sib.data["siblings"])
+    # The direct bases: --base, the card, and the tags of the model itself. A base further up the lineage (a base
+    # of the base) is a relation the card does not state for this model, so its own config decides its row.
+    direct = {base_override, *(hub.base_models if hub else []),
+              *(e["parent"] for e in lin.data["edges"] if e["child"] == model_id)}
+    parent_of = {e["parent"]: e["child"] for e in reversed(lin.data["edges"])}
     rows = _guard(res, "bundles", lambda: _bundles(installed, search, family, fetch, res), dict) if family else {}
     by_repo: dict[str, list[dict]] = {}
     for row in rows.values():
@@ -155,8 +166,17 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
         no_match = {"confidence": None, "differing": {}}
         cmp = _guard(res, "config", lambda: arch_match.compare(new_cfg, cfg), no_match) \
             if cfg is not None and new_cfg else no_match
-        if repo in stated:
-            confidence, why = STATED, ("named with --base" if repo == base_override else "named as the base model")
+        known = "same_family" in cmp                 # the comparison ran (both configs read, compare did not fail)
+        if repo == base_override:
+            confidence, why = STATED, "named with --base"
+        elif repo in direct:
+            # The card's word stands unless both configs are known and disagree.
+            confidence = STATED if not known or cmp["confidence"] == INFERRED else WEAK
+            why = "named as the base model" + ("" if confidence == STATED else ", but " + _mismatch(cmp))
+        elif repo in stated:
+            confidence = INFERRED if not known or cmp["confidence"] == INFERRED else WEAK
+            why = f"a base of {parent_of.get(repo, stated[0])} in the lineage" + (
+                "" if confidence == INFERRED else ", " + _mismatch(cmp))
         elif repo in sibling_ids and not cmp["confidence"] and cfg is not None and new_cfg:
             continue                          # a fine-tune of the base in another architecture family: not a candidate
         elif repo in sibling_ids:
