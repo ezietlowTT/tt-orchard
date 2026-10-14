@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import datetime
 import hashlib
+import http.client
 import json
 import time
 import urllib.error
@@ -25,6 +26,7 @@ MAX_BODY = 8 * 1024 * 1024
 TIMEOUT_S = 20
 # One research run's budget, counted from its first network request (answers from the cache are free). A run on a
 # slow or stalled network ends with "unavailable" rows and `unknown` estimates instead of hanging the preflight.
+TIMEOUTS_TO_GIVE_UP = 2     # connection timeouts to one host before the rest of the run stops asking it
 MAX_REQUESTS = 600
 DEADLINE_S = 240
 
@@ -83,6 +85,7 @@ class Fetcher:
         # Hosts that failed at the connection level (no route, DNS failure, timeout). Later requests to the
         # same host fail at once, so a machine with no network does not wait out the timeout once per request.
         self._unreachable: set[str] = set()
+        self._timeouts: dict[str, int] = {}
         self._now = now or (lambda: datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
 
     def now(self) -> str:
@@ -156,18 +159,36 @@ class Fetcher:
             raise FetchError(_http_reason(exc)) from None
         except FetchError:
             raise
-        except (OSError, ValueError) as exc:
-            if isinstance(exc, OSError):
-                self._unreachable.add(parts.hostname)
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            self._note_connection_failure(parts.hostname, exc)
             raise FetchError(f"{type(exc).__name__}: {exc}") from None
-        with closing(resp):
-            if byte_range is not None and getattr(resp, "status", None) != 206:
-                raise FetchError("the server ignored the byte range")
-            body = resp.read(limit + 1)
+        try:
+            with closing(resp):
+                if byte_range is not None and getattr(resp, "status", None) != 206:
+                    raise FetchError("the server ignored the byte range")
+                body = resp.read(limit + 1)
+        except FetchError:
+            raise
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            # The connection opened and then broke. That says nothing about whether the host can be reached.
+            raise FetchError(f"{type(exc).__name__}: {exc}") from None
         if len(body) > limit:
             raise FetchError(f"response larger than {limit} bytes")
         self._write_cache(url, byte_range, body)
         return body
+
+    def _note_connection_failure(self, host, exc) -> None:
+        """A failure to open a connection. Most of them (no route, DNS, refused) mean the host cannot be reached
+        and mark it. A timeout can be one slow answer, so it marks the host only on its TIMEOUTS_TO_GIVE_UP-th
+        occurrence."""
+        if not isinstance(exc, OSError):
+            return
+        reason = getattr(exc, "reason", exc)           # urllib wraps a connect timeout in a URLError
+        if isinstance(reason, TimeoutError):
+            self._timeouts[host] = self._timeouts.get(host, 0) + 1
+            if self._timeouts[host] < TIMEOUTS_TO_GIVE_UP:
+                return
+        self._unreachable.add(host)
 
     def json(self, url: str, **kw):
         try:

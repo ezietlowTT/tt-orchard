@@ -890,3 +890,13 @@ that failed first. Nothing was pushed or run on hardware.
 - The UI's research memo has a lock and keeps at most 32 answers. `arch_match.fetch_config` (only the tests called it) is gone.
 Not done: one connection failure still marks a host unreachable for the rest of the run (by design); two UI requests that miss
 the memo at the same moment both ask (no single-flight); `app.js` was not run in a browser here (no node on this box).
+
+## 2026-10-14: fetcher fixes found in the review of PR 7 (version 0.5.4)
+Prompt (operator): "merge #7. fix the fetcher bugs." Both bugs came in with PR 6 and were reproduced with a fake opener first.
+- A body that fails while being read (timeout, `IncompleteRead`, reset) and an `http.client.HTTPException` such as
+  `BadStatusLine` escaped `Fetcher.get` as raw exceptions, so one transient error dropped a whole collector. All of them are
+  `FetchError` now. A broken body does not mark the host unreachable.
+- One connect timeout marked the host unreachable for the rest of the run. A timeout now marks it on the second one
+  (`TIMEOUTS_TO_GIVE_UP`); a timeout wrapped in a `URLError` counts the same. No route, DNS failure and refusal still mark at once.
+- Five mutations (give up at one, each missing exception type, a read failure that marks the host, no `URLError` unwrap), all red.
+- Not fixed: the UI memo reuses a degraded report for 5 minutes; the research cache never expires on a retry.
