@@ -925,3 +925,23 @@ preflight blocks with `nearest-model-missing`, and the LoRA cannot apply to tt-a
   stated base; `--base jashansinghTT/minimax-music3-blackhole` installs it). Nothing started.
 - Open: the bundle's README was not read, so whether its server accepts swapped weights is unknown; the preflight warns stage 2
   expects a v6 thin bundle; the triage template was written for LLM tensors and has not seen this layout. Needs about 50 GB freed first.
+
+## 2026-10-14: RAG-Gate-27B gate and logprobs check did not run: the host kernel compiler changed
+Prompt (operator): "yes, run the gate check and the logprobs check" (to decide whether `ThakiCloud/RAG-Gate-27B` is worth a
+published card; see the review above in this session). Prepared: 200 gate prompts from ChainCheck `musique_test` (70 cell A, 65
+B, 65 D; at most 2,048 tokens; fixed hash order; expected Answer for A and B, Retrieve for D) in
+`~/orchard-runs/thakicloud--rag-gate-27b/gate-check/prompts.jsonl`, and a driver that serves the model with stage 2's `run.sh`,
+model directory and tensor cache, probes `logprobs`, then sends the prompts. Nothing was measured.
+- Three boots failed in 13 s each with `trisc1 build failed ... 'vLut8si' is not a member of 'sfpi'`, a kernel JIT compile
+  error: (1) default HOME and kernel cache, board 0; (2) the supervisor's kernel cache and a run-local HOME, board 0; (3) the same
+  on board 1, the board stage 2 used. So it is not the board or the cache path.
+- Cause found in `/var/log/dpkg.log.1`: `2026-10-13 10:45:43 upgrade sfpi 7.83.0 7.67.0`, a downgrade of the system SFPI compiler
+  after stage 2 had booted this bundle (Oct 13 06:24, on 7.83.0). The bundle's kernel headers use `sfpi::vLut8si`, which 7.67.0
+  does not define. Inferred, not tested: the kernel cache key includes the toolchain, so every kernel recompiles and the compile
+  fails. Not done: reinstalling 7.83.0, because it is a system package that another agent or the operator changed on purpose, and
+  it is the operator's call.
+- Consequences: any host-served boot of the Qwen3.8 bundles on this box fails until SFPI is fixed. The 4-chip stage 4 test runs in
+  a container and brings its own toolchain, so it is not affected. The preflight has no check that the box's SFPI can compile
+  the nearest bundle's kernels (`lab_setup` compares SFPI between a lab and this box only).
+- Side note: after each run, `gozer status` shows the idle board BUSY-UNTRACKED for about a minute, because the release's
+  `tt-smi -r` and `-s` open every device (pids named in the line are those two commands).
