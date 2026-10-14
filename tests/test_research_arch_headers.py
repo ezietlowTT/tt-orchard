@@ -141,6 +141,23 @@ def test_an_implausible_header_length_is_an_error_row_not_a_crash():
     assert r.data["errors"] and "not plausible" in r.data["errors"][0]
 
 
+def test_a_header_larger_than_the_research_reads_is_an_error_and_its_bytes_are_never_asked_for():
+    """The template accepts headers up to MAX_HEADER (100 MiB) from a local file. Over the network a repo
+    anyone can upload must not make the research read that much, so the claimed length is checked first."""
+    big = headers.MAX_HEADER_READ + 1
+    f = RangeFetch({"model.safetensors": struct.pack("<Q", big) + b"x" * 100})
+    r = headers.read_model(f, "g/it", ["model.safetensors"])
+    assert f.ranges == [("model.safetensors", (0, 7))]
+    assert r.data["errors"] and "larger than" in r.data["errors"][0]
+    other = headers.read_model(RangeFetch({"model.safetensors": header_bytes(T)}), "g/base", ["model.safetensors"])
+    assert headers.estimate_class(CFG, r.data, CFG, other.data)["class"] == "unknown"
+
+
+def test_the_research_header_cap_is_the_fetchers_body_cap_and_below_the_templates_limit():
+    from orchard.research import http, triage_rules
+    assert headers.MAX_HEADER_READ == http.MAX_BODY < triage_rules.load().MAX_HEADER
+
+
 def test_no_safetensors_is_unavailable_and_too_many_shards_is_refused():
     assert headers.read_model(RangeFetch({}), "g/it", ["config.json"]).unavailable[0].reason.endswith("no safetensors files")
     many = [f"model-{i:05d}-of-00100.safetensors" for i in range(100)]
