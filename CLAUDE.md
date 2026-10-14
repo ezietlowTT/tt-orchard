@@ -900,3 +900,16 @@ Prompt (operator): "merge #7. fix the fetcher bugs." Both bugs came in with PR 6
   (`TIMEOUTS_TO_GIVE_UP`); a timeout wrapped in a `URLError` counts the same. No route, DNS failure and refusal still mark at once.
 - Five mutations (give up at one, each missing exception type, a read failure that marks the host, no `URLError` unwrap), all red.
 - Not fixed: the UI memo reuses a degraded report for 5 minutes; the research cache never expires on a retry.
+
+## 2026-10-14: UI layout on narrow screens, and which run is selected first (version 0.5.5)
+Prompt (operator, watching the page in Firefox): the page makes you scroll a small column sideways; the running or most
+recent run should be selected first or be the most obvious.
+- Measured first (playwright, scrollable elements at 1440, 1024, 768 and 400 px): the left rail overflowed by 60 px (a state
+  badge with `white-space: nowrap` widened the run list), the nine-stage strip scrolled sideways below about 860 px, and the
+  tabs scrolled at 400 px. Now the rail's column is `minmax(0, 1fr)`, the stages wrap onto more rows, the tabs wrap, and
+  below 900 px the selected run comes before the run list. Only the ledger table still scrolls sideways at 400 px.
+- Run order (`webui.list_runs`): runs in progress (running, paused, or being launched) first, then every other run newest
+  first. The old order put blocked and crashed runs above everything, so a 7-day-old stopped run was selected ahead of the run
+  that had just finished. The state badge still says which runs need a person. The first row carries a `now` or `latest` tag.
+- Mutations: no recency sort and no live-first rule both turn a test red. The first draft of the recency test passed
+  without the sort, because the directory names were already in the right order; the names were changed.

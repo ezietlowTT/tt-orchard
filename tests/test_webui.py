@@ -126,15 +126,34 @@ def test_a_run_summary_comes_from_status_collect(root):
     assert row["hint"] == facts["hint"]
 
 
-def test_runs_that_need_attention_sort_first(root):
-    write_ledger(root / "org--ready", ("decision", None, {"decision": "ready for operator review",
-                                                           "bundle": "stages/8/bundle"}))
-    write_ledger(root / "org--blocked", ("stage_start", 1, {}),
+def test_a_live_run_is_listed_first_and_the_rest_newest_first(root, monkeypatch):
+    """The page selects the first row. A run in progress comes first, then the most recent attempt, whatever its
+    state: an old blocked run must not sit above the run the operator just finished."""
+    def at(ts):
+        monkeypatch.setattr("orchard.ledger.time.strftime", lambda fmt, t=None: ts)
+
+    at("2026-10-01T00:00:00Z")
+    write_ledger(root / "org--a-old-blocked", ("stage_start", 1, {}),
                  ("decision", 1, {"decision": "blocked", "code": "stage-failed", "reason": "stage 1 failed"}))
+    at("2026-10-13T00:00:00Z")
+    write_ledger(root / "org--b-new-ready", ("decision", None, {"decision": "ready for operator review",
+                                                              "bundle": "stages/8/bundle"}))
+    at("2026-10-02T00:00:00Z")
     run = write_ledger(root / "org--running", ("stage_start", 0, {}))
     with_supervisor(run, 7)
+    monkeypatch.undo()
     names = [r["name"] for r in make_app(root, alive={7}).list_runs()]
-    assert names.index("org--blocked") < names.index("org--running") < names.index("org--ready")
+    assert names == ["org--running", "org--b-new-ready", "org--a-old-blocked"]
+
+
+def test_a_run_that_is_starting_is_listed_before_a_newer_finished_run(root, monkeypatch):
+    write_ledger(root / "org--a-finished", ("decision", None, {"decision": "ready for operator review",
+                                                                "bundle": "stages/8/bundle"}))
+    write_ledger(root / "org--z-starting", ("stage_start", 0, {}))
+    app = make_app(root)
+    app._launches["org--z-starting"] = {"pid": 99, "started": 1.0}
+    app.pid_running = lambda pid: pid == 99
+    assert [r["name"] for r in app.list_runs()][0] == "org--z-starting"
 
 
 def test_a_corrupt_ledger_is_listed_as_unreadable_not_an_error(root):
