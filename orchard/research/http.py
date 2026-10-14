@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The research package's only network access.
 
-Rules (design section 4): https only; fixed hosts, with CDN redirects allowed on `.hf.co` and
+Rules (design section 4): https only; fixed hosts (the bare host: no user info or port), with CDN redirects allowed on `.hf.co` and
 `.huggingface.co` because that is where Hugging Face serves file bytes; no Authorization header, so the
 operator's token is never sent; a size cap on every body; a byte range must be answered with 206; successes
 are cached by URL and range so a resume reads the same answers; `offline` makes no request at all."""
@@ -41,13 +41,24 @@ def host_allowed(host) -> bool:
     return isinstance(host, str) and (host in ALLOWED_HOSTS or host.endswith(ALLOWED_SUFFIXES))
 
 
+def url_allowed(url) -> bool:
+    """https to an allowed host, and an authority that is that host alone: no user info, no port, no escape.
+    urlsplit and urllib.request read an authority such as `evil.com\\@huggingface.co` differently (urlsplit's
+    hostname is the allowed host; urllib connects to the whole string), so only a bare host is trusted."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = parts.hostname
+    return parts.scheme == "https" and host_allowed(host) and parts.netloc.lower() == host
+
+
 class _Redirects(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect only to an allowed host over https."""
+    """Follow a redirect only to an allowed host over https, checked again on every hop."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parts = urlsplit(newurl)
-        if parts.scheme != "https" or not host_allowed(parts.hostname):
-            raise FetchError(f"redirect to {parts.hostname} refused")
+        if not url_allowed(newurl):
+            raise FetchError(f"redirect to {urlsplit(newurl).netloc} refused")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -123,8 +134,8 @@ class Fetcher:
 
     def get(self, url: str, *, byte_range=None, max_bytes: int = MAX_BODY) -> bytes:
         parts = urlsplit(url)
-        if parts.scheme != "https" or not host_allowed(parts.hostname):
-            raise FetchError(f"{parts.scheme}://{parts.hostname} is not allowed")
+        if not url_allowed(url):
+            raise FetchError(f"{parts.scheme}://{parts.netloc} is not allowed")
         if self.offline:
             raise FetchError("offline")
         cached = self._read_cache(url, byte_range)

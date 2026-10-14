@@ -329,3 +329,32 @@ def test_a_spent_budget_makes_the_class_estimate_unknown_not_a_guess(tmp_path):
     assert any("budget" in e for e in new.data["errors"])
     cfg = {"model_type": "g", "num_hidden_layers": 1}
     assert headers.estimate_class(cfg, new.data, cfg, cand.data)["class"] == "unknown"
+
+
+# ---- the authority is the host and nothing else -------------------------------------------------------------
+# urlsplit and urllib.request read these differently: urlsplit's hostname is an allowed host, while urllib would
+# connect to the whole authority (for example "evil.com\\@huggingface.co"). Only a bare allowed host passes.
+
+ODD_AUTHORITIES = ["https://evil.com\\@huggingface.co/x", "https://evil.com%2f@huggingface.co/x",
+                   "https://user@huggingface.co/x", "https://user:pw@huggingface.co/x",
+                   "https://huggingface.co:9999/x", "https://huggingface.co:443/x",
+                   "https://cdn.hf.co:8443/x", "https://[::1]/x"]
+
+
+@pytest.mark.parametrize("url", ODD_AUTHORITIES)
+def test_a_url_whose_authority_is_more_than_an_allowed_host_is_not_fetched(tmp_path, url):
+    f = fetcher(tmp_path, {})
+    with pytest.raises(FetchError, match="not allowed"):
+        f.get(url)
+    assert f.opener.requests == []
+
+
+@pytest.mark.parametrize("url", ODD_AUTHORITIES)
+def test_a_redirect_whose_location_carries_more_than_an_allowed_host_is_refused(url):
+    with pytest.raises(FetchError, match="redirect"):
+        _Redirects().redirect_request(urllib.request.Request(HF), None, 302, "Found", Message(), url)
+
+
+def test_a_host_in_capitals_is_still_the_allowed_host():
+    from orchard.research.http import url_allowed
+    assert url_allowed("https://HuggingFace.co/api/models/a/b") and url_allowed("https://us.aws.cdn.hf.co/x?sig=1")
