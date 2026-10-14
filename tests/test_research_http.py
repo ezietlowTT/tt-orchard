@@ -261,3 +261,100 @@ def test_result_extend_merges_lists():
     a = types.Result(evidence=[1], unavailable=[2])
     a.extend(types.Result(evidence=[3], unavailable=[4]))
     assert a.evidence == [1, 3] and a.unavailable == [2, 4]
+
+
+# ---- the budget: a research run makes a bounded number of requests in a bounded time ------------------
+
+def test_after_the_request_budget_further_requests_fail_at_once_without_a_request(tmp_path):
+    routes = {f"{HF}{i}": Resp(b"{}") for i in range(4)}
+    f = fetcher(tmp_path, routes, max_requests=2)
+    f.json(HF + "0")
+    f.json(HF + "1")
+    with pytest.raises(FetchError, match="request budget"):
+        f.json(HF + "2")
+    assert len(f.opener.requests) == 2
+
+
+def test_after_the_deadline_further_requests_fail_at_once_without_a_request(tmp_path):
+    clock = iter([0.0, 10.0, 500.0]).__next__
+    f = fetcher(tmp_path, {HF + "0": Resp(b"{}"), HF + "1": Resp(b"{}"), HF + "2": Resp(b"{}")},
+                deadline_s=100, clock=clock)
+    f.json(HF + "0")
+    f.json(HF + "1")
+    with pytest.raises(FetchError, match="time budget"):
+        f.json(HF + "2")
+    assert len(f.opener.requests) == 2
+
+
+def test_cached_answers_do_not_spend_the_budget(tmp_path):
+    f = fetcher(tmp_path, {HF: Resp(b"{}")}, max_requests=1)
+    f.json(HF)
+    assert f.json(HF) == {} and len(f.opener.requests) == 1
+
+
+def test_a_spent_budget_does_not_mark_the_host_unreachable_or_get_cached(tmp_path):
+    f = fetcher(tmp_path, {HF + "0": Resp(b"{}"), HF + "1": Resp(b"{}")}, max_requests=1)
+    f.json(HF + "0")
+    with pytest.raises(FetchError):
+        f.json(HF + "1")
+    assert "huggingface.co" not in f._unreachable
+    assert fetcher(tmp_path, {HF + "1": Resp(b'{"a": 1}')}).json(HF + "1") == {"a": 1}
+
+
+def test_the_budget_has_named_defaults():
+    from orchard.research import http
+    f = Fetcher(None)
+    assert (f.max_requests, f.deadline_s) == (http.MAX_REQUESTS, http.DEADLINE_S)
+    assert 100 <= http.MAX_REQUESTS and 60 <= http.DEADLINE_S <= 600
+
+
+def test_a_spent_budget_makes_the_class_estimate_unknown_not_a_guess(tmp_path):
+    pytest.importorskip("tokenizers", reason="the class rules live in the delta-triage template")
+    import json as _json
+    import struct
+    from orchard.research import headers
+    blob = _json.dumps({"a.weight": {"dtype": "BF16", "shape": [2], "data_offsets": [0, 4]}}).encode()
+    data = struct.pack("<Q", len(blob)) + blob
+
+    class Ranged(FakeOpener):
+        def open(self, req, timeout=None):
+            self.requests.append(req)
+            start, end = (int(x) for x in req.headers["Range"].split("=")[1].split("-"))
+            return Resp(data[start:end + 1], status=206)
+    files = ["model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"]
+    full = Fetcher(None, opener=Ranged({}))
+    cand = headers.read_model(full, "g/base", files)
+    short = Fetcher(None, opener=Ranged({}), max_requests=2)          # one shard's two ranges, not the second's
+    new = headers.read_model(short, "g/new", files)
+    assert any("budget" in e for e in new.data["errors"])
+    cfg = {"model_type": "g", "num_hidden_layers": 1}
+    assert headers.estimate_class(cfg, new.data, cfg, cand.data)["class"] == "unknown"
+
+
+# ---- the authority is the host and nothing else -------------------------------------------------------------
+# urlsplit and urllib.request read these differently: urlsplit's hostname is an allowed host, while urllib would
+# connect to the whole authority (for example "evil.com\\@huggingface.co"). Only a bare allowed host passes.
+
+ODD_AUTHORITIES = ["https://evil.com\\@huggingface.co/x", "https://evil.com%2f@huggingface.co/x",
+                   "https://user@huggingface.co/x", "https://user:pw@huggingface.co/x",
+                   "https://huggingface.co:9999/x", "https://huggingface.co:443/x",
+                   "https://cdn.hf.co:8443/x", "https://[::1]/x"]
+
+
+@pytest.mark.parametrize("url", ODD_AUTHORITIES)
+def test_a_url_whose_authority_is_more_than_an_allowed_host_is_not_fetched(tmp_path, url):
+    f = fetcher(tmp_path, {})
+    with pytest.raises(FetchError, match="not allowed"):
+        f.get(url)
+    assert f.opener.requests == []
+
+
+@pytest.mark.parametrize("url", ODD_AUTHORITIES)
+def test_a_redirect_whose_location_carries_more_than_an_allowed_host_is_refused(url):
+    with pytest.raises(FetchError, match="redirect"):
+        _Redirects().redirect_request(urllib.request.Request(HF), None, 302, "Found", Message(), url)
+
+
+def test_a_host_in_capitals_is_still_the_allowed_host():
+    from orchard.research.http import url_allowed
+    assert url_allowed("https://HuggingFace.co/api/models/a/b") and url_allowed("https://us.aws.cdn.hf.co/x?sig=1")

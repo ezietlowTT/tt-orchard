@@ -244,3 +244,55 @@ def test_the_ui_shares_one_research_memo_across_requests_and_configs(monkeypatch
     for_cfg(object())("org/new", None)
     for_cfg(object())("org/new", None)                            # a second request, a second callable
     assert len(calls) == 1
+
+
+def test_the_view_says_when_the_new_model_was_gated(root):
+    assert make_app(root).research_view(dict(REPORT, new_model_gated=True))["new_model_gated"] is True
+    assert make_app(root).research_view(dict(REPORT))["new_model_gated"] is False
+    assert make_app(root).research_view(dict(REPORT, new_model_gated="yes"))["new_model_gated"] is False
+
+
+def test_the_ui_research_memo_is_bounded_and_keeps_the_newest(monkeypatch):
+    cli, calls, seen = _ui(monkeypatch)
+    memo = cli._ResearchMemo()
+    run = cli._ui_preflight(object(), memo)
+    for i in range(cli.UI_RESEARCH_MEMO_MAX + 10):
+        run(f"org/m{i}", None)
+    assert len(memo) == cli.UI_RESEARCH_MEMO_MAX
+    n = len(calls)
+    run(f"org/m{cli.UI_RESEARCH_MEMO_MAX + 9}", None)              # the newest is still remembered
+    assert len(calls) == n
+    run("org/m0", None)                                           # the oldest was dropped and is asked again
+    assert len(calls) == n + 1
+
+
+def test_the_ui_research_memo_drops_expired_answers_when_it_stores(monkeypatch):
+    from orchard import cli
+    clock = [0.0]
+    monkeypatch.setattr(cli.time, "monotonic", lambda: clock[0])
+    memo = cli._ResearchMemo()
+    memo.put(("a",), "r1")
+    clock[0] = cli.UI_RESEARCH_TTL_S + 1
+    assert memo.get(("a",)) is None
+    memo.put(("b",), "r2")
+    assert len(memo) == 1 and memo.get(("b",)) == "r2"
+
+
+def test_the_ui_research_memo_is_safe_across_request_threads():
+    import threading
+    from orchard import cli
+    memo, errors = cli._ResearchMemo(), []
+
+    def work(t):
+        try:
+            for i in range(300):
+                memo.put((t, i), i)
+                memo.get((t, i - 1))
+        except Exception as exc:                                  # a dict changed during iteration, say
+            errors.append(exc)
+    threads = [threading.Thread(target=work, args=(t,)) for t in range(8)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert errors == [] and len(memo) <= cli.UI_RESEARCH_MEMO_MAX

@@ -49,12 +49,18 @@ class FakeFetch:
         return "2026-10-12T00:00:00Z"
 
 
-def test_fetch_config_returns_the_config_or_none():
+def test_the_config_reader_keeps_the_reason_a_config_could_not_be_read():
+    """report._config is the one config reader (arch_match.fetch_config, which dropped the reason, is gone)."""
+    from orchard.research import report
+    from orchard.research.types import Result
     url = "https://huggingface.co/g/it/resolve/main/config.json"
-    assert arch_match.fetch_config(FakeFetch({url: CFG}), "g/it") == CFG
-    assert arch_match.fetch_config(FakeFetch({}), "g/it") is None
-    assert arch_match.fetch_config(FakeFetch({url: [1]}), "g/it") is None
-    assert arch_match.fetch_config(FakeFetch({}), "bad id") is None
+    assert not hasattr(arch_match, "fetch_config")
+    res = Result()
+    assert report._config(FakeFetch({url: CFG}), "g/it", res) == CFG and res.unavailable == []
+    assert report._config(FakeFetch({url: FetchError("HTTP 401 (needs a login)")}), "g/it", res) is None
+    assert report._config(FakeFetch({url: [1]}), "g/it", res) is None
+    assert report._config(FakeFetch({}), "bad id", res) is None
+    assert [u.reason for u in res.unavailable] == ["g/it: HTTP 401 (needs a login)", "g/it: config.json is not an object"]
 
 
 # ---- headers ---------------------------------------------------------------------------------------
@@ -141,6 +147,23 @@ def test_an_implausible_header_length_is_an_error_row_not_a_crash():
     assert r.data["errors"] and "not plausible" in r.data["errors"][0]
 
 
+def test_a_header_larger_than_the_research_reads_is_an_error_and_its_bytes_are_never_asked_for():
+    """The template accepts headers up to MAX_HEADER (100 MiB) from a local file. Over the network a repo
+    anyone can upload must not make the research read that much, so the claimed length is checked first."""
+    big = headers.MAX_HEADER_READ + 1
+    f = RangeFetch({"model.safetensors": struct.pack("<Q", big) + b"x" * 100})
+    r = headers.read_model(f, "g/it", ["model.safetensors"])
+    assert f.ranges == [("model.safetensors", (0, 7))]
+    assert r.data["errors"] and "larger than" in r.data["errors"][0]
+    other = headers.read_model(RangeFetch({"model.safetensors": header_bytes(T)}), "g/base", ["model.safetensors"])
+    assert headers.estimate_class(CFG, r.data, CFG, other.data)["class"] == "unknown"
+
+
+def test_the_research_header_cap_is_the_fetchers_body_cap_and_below_the_templates_limit():
+    from orchard.research import http, triage_rules
+    assert headers.MAX_HEADER_READ == http.MAX_BODY < triage_rules.load().MAX_HEADER
+
+
 def test_no_safetensors_is_unavailable_and_too_many_shards_is_refused():
     assert headers.read_model(RangeFetch({}), "g/it", ["config.json"]).unavailable[0].reason.endswith("no safetensors files")
     many = [f"model-{i:05d}-of-00100.safetensors" for i in range(100)]
@@ -221,3 +244,14 @@ def test_a_broken_index_makes_the_class_estimate_unknown():
                                ["model-00001-of-00001.safetensors"])
     est = headers.estimate_class({"model_type": "g"}, new.data, {"model_type": "g"}, other.data)
     assert est["class"] == "unknown"
+
+
+def test_an_index_that_lists_a_shard_the_repo_does_not_have_is_an_error_and_the_estimate_is_unknown():
+    """A partial tensor set would make the estimate a confident guess (missing tensors read as full-port)."""
+    f = RangeFetch({"model-00001-of-00002.safetensors": header_bytes(T)},
+                   indexes={"model.safetensors.index.json": {"weight_map": {
+                       "a": "model-00001-of-00002.safetensors", "b": "model-00002-of-00002.safetensors"}}})
+    new = headers.read_model(f, "g/it", ["model.safetensors.index.json", "model-00001-of-00002.safetensors"])
+    assert any("model-00002-of-00002.safetensors" in e for e in new.data["errors"])
+    other = headers.read_model(RangeFetch({"model.safetensors": header_bytes(T)}), "g/base", ["model.safetensors"])
+    assert headers.estimate_class(CFG, new.data, CFG, other.data)["class"] == "unknown"

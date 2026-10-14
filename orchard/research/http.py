@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
 """The research package's only network access.
 
-Rules (design section 4): https only; fixed hosts, with CDN redirects allowed on `.hf.co` and
+Rules (design section 4): https only; fixed hosts (the bare host: no user info or port), with CDN redirects allowed on `.hf.co` and
 `.huggingface.co` because that is where Hugging Face serves file bytes; no Authorization header, so the
 operator's token is never sent; a size cap on every body; a byte range must be answered with 206; successes
 are cached by URL and range so a resume reads the same answers; `offline` makes no request at all."""
@@ -12,6 +12,7 @@ import base64
 import datetime
 import hashlib
 import json
+import time
 import urllib.error
 import urllib.request
 from contextlib import closing
@@ -22,6 +23,10 @@ ALLOWED_HOSTS = ("huggingface.co", "api.github.com", "raw.githubusercontent.com"
 ALLOWED_SUFFIXES = (".hf.co", ".huggingface.co")
 MAX_BODY = 8 * 1024 * 1024
 TIMEOUT_S = 20
+# One research run's budget, counted from its first network request (answers from the cache are free). A run on a
+# slow or stalled network ends with "unavailable" rows and `unknown` estimates instead of hanging the preflight.
+MAX_REQUESTS = 600
+DEADLINE_S = 240
 
 
 class FetchError(Exception):
@@ -36,13 +41,24 @@ def host_allowed(host) -> bool:
     return isinstance(host, str) and (host in ALLOWED_HOSTS or host.endswith(ALLOWED_SUFFIXES))
 
 
+def url_allowed(url) -> bool:
+    """https to an allowed host, and an authority that is that host alone: no user info, no port, no escape.
+    urlsplit and urllib.request read an authority such as `evil.com\\@huggingface.co` differently (urlsplit's
+    hostname is the allowed host; urllib connects to the whole string), so only a bare host is trusted."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return False
+    host = parts.hostname
+    return parts.scheme == "https" and host_allowed(host) and parts.netloc.lower() == host
+
+
 class _Redirects(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect only to an allowed host over https."""
+    """Follow a redirect only to an allowed host over https, checked again on every hop."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        parts = urlsplit(newurl)
-        if parts.scheme != "https" or not host_allowed(parts.hostname):
-            raise FetchError(f"redirect to {parts.hostname} refused")
+        if not url_allowed(newurl):
+            raise FetchError(f"redirect to {urlsplit(newurl).netloc} refused")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
@@ -57,10 +73,13 @@ def _http_reason(exc: urllib.error.HTTPError) -> str:
 
 class Fetcher:
     def __init__(self, cache_dir, *, opener=None, offline: bool = False, refresh: bool = False,
-                 now=None, timeout: int = TIMEOUT_S):
+                 now=None, timeout: int = TIMEOUT_S, max_requests: int = MAX_REQUESTS, deadline_s: float = DEADLINE_S,
+                 clock=time.monotonic):
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.opener = opener or urllib.request.build_opener(_Redirects)
         self.offline, self.refresh, self.timeout = offline, refresh, timeout
+        self.max_requests, self.deadline_s, self._clock = max_requests, deadline_s, clock
+        self._requests, self._started = 0, None
         # Hosts that failed at the connection level (no route, DNS failure, timeout). Later requests to the
         # same host fail at once, so a machine with no network does not wait out the timeout once per request.
         self._unreachable: set[str] = set()
@@ -99,10 +118,24 @@ class Fetcher:
 
     # ---- requests --------------------------------------------------------------------------------
 
+    def _spend(self) -> float:
+        """Count one network request against the budget and return its timeout, which never runs past the
+        deadline. A spent budget is a FetchError; it is not cached and does not mark the host unreachable."""
+        now = self._clock()
+        if self._started is None:
+            self._started = now
+        left = self.deadline_s - (now - self._started)
+        if self._requests >= self.max_requests:
+            raise FetchError(f"the research's request budget is spent ({self.max_requests} requests)")
+        if left <= 0:
+            raise FetchError(f"the research's time budget is spent ({self.deadline_s:g} s)")
+        self._requests += 1
+        return max(1.0, min(self.timeout, left))
+
     def get(self, url: str, *, byte_range=None, max_bytes: int = MAX_BODY) -> bytes:
         parts = urlsplit(url)
-        if parts.scheme != "https" or not host_allowed(parts.hostname):
-            raise FetchError(f"{parts.scheme}://{parts.hostname} is not allowed")
+        if not url_allowed(url):
+            raise FetchError(f"{parts.scheme}://{parts.netloc} is not allowed")
         if self.offline:
             raise FetchError("offline")
         cached = self._read_cache(url, byte_range)
@@ -110,6 +143,7 @@ class Fetcher:
             return cached
         if parts.hostname in self._unreachable:
             raise FetchError(f"network unreachable: {parts.hostname}")
+        timeout = self._spend()
         headers = {"User-Agent": "tt-orchard", "Accept": "*/*"}      # no Authorization, ever
         limit = max_bytes
         if byte_range is not None:
@@ -117,7 +151,7 @@ class Fetcher:
             headers["Range"] = f"bytes={start}-{end}"
             limit = min(max_bytes, end - start + 1)
         try:
-            resp = self.opener.open(urllib.request.Request(url, headers=headers), timeout=self.timeout)
+            resp = self.opener.open(urllib.request.Request(url, headers=headers), timeout=timeout)
         except urllib.error.HTTPError as exc:
             raise FetchError(_http_reason(exc)) from None
         except FetchError:

@@ -30,9 +30,10 @@ def port(claim, url="https://huggingface.co/x/y"):
     return {"claim": claim, "url": url, "confidence": "inferred", "source": "bundle", "fetched_at": "t"}
 
 
-def check(rep, *, h=None, override=None, installed=(), snapshot=None):
+def check(rep, *, h=None, override=None, installed=(), snapshot=None, accept_inferred=False):
     return pf.check_base(model_id="x/humanizer", hub=h if h is not None else hub(), base_override=override,
-                         local_snapshot=lambda m: snapshot, installed=list(installed), search=lambda q: [], report=rep)
+                         local_snapshot=lambda m: snapshot, installed=list(installed), search=lambda q: [], report=rep,
+                         accept_inferred=accept_inferred)
 
 
 def test_without_a_report_the_messages_are_the_earlier_ones():
@@ -46,7 +47,7 @@ def test_without_a_report_the_messages_are_the_earlier_ones():
 def test_a_card_with_no_base_and_an_inferred_installed_bundle_warns_and_names_the_inference():
     sel = {"repo": "g/base", "bundle": "tt/base-p150", "confidence": "inferred", "class": "weights-only"}
     rep = report(selected=sel, candidates=[{"repo": "g/base", "class_estimate": {"class": "weights-only"}}])
-    c = check(rep, installed=[Installed("tt/base-p150", "g/base", "6", 1)])
+    c = check(rep, installed=[Installed("tt/base-p150", "g/base", "6", 1)], accept_inferred=True)
     assert c.status == pf.WARN
     assert "inferred from its architecture" in c.detail and "g/base" in c.detail
     assert "research expects class weights-only" in c.detail
@@ -57,7 +58,7 @@ def test_the_inferred_text_names_the_row_why_and_a_stated_selection_says_stated(
     sel = {"repo": "g/base", "bundle": "tt/base-p150", "confidence": "inferred", "class": None}
     cand = {"repo": "g/base", "class_estimate": None, "why": "another fine-tune of g/root"}
     inst = [Installed("tt/base-p150", "g/base", "6", 1)]
-    c = check(report(selected=sel, candidates=[cand]), installed=inst)
+    c = check(report(selected=sel, candidates=[cand]), installed=inst, accept_inferred=True)
     assert "inferred (another fine-tune of g/root)" in c.detail and "inferred from its architecture" not in c.detail
     stated = check(report(selected={**sel, "confidence": "stated"},
                           candidates=[{**cand, "why": "named as the base model"}]), installed=inst)
@@ -252,3 +253,60 @@ def test_without_no_github_the_issue_and_code_searches_are_made(tmp_path, monkey
     assert any("search/issues" in u for u in fetcher.urls)
     assert github_code_calls == [1]
     assert fetcher.kw.get("refresh") is False
+
+
+# ---- an inferred base is used only when the operator says so ---------------------------------------
+
+INFERRED_SEL = {"repo": "g/base", "bundle": "tt/base-p150", "confidence": "inferred", "class": "weights-only"}
+INST = [Installed("tt/base-p150", "g/base", "6", 1)]
+
+
+def test_an_inferred_base_without_the_opt_in_blocks_downloads_nothing_and_offers_its_bundle_first():
+    rep = report(selected=INFERRED_SEL, candidates=[{"repo": "g/base", "class_estimate": {"class": "weights-only"}}],
+                 bundle_choices=[choice("o/other", "g/other", False, None, "weak", 3),
+                                 choice("tt/base-p150", "g/base", True, "weights-only", "inferred", 0, "6")])
+    c = check(rep, installed=INST)
+    assert c.status == pf.BLOCK and c.reason == "inferred-base-unconfirmed"
+    assert c.data["needs_fetch"] is False and c.data["snapshot"] is None and c.data["bundle"] is None
+    assert c.data["base"] == "g/base" and c.data["inferred"] is True
+    assert [x["name"] for x in c.data["candidates"]] == ["tt/base-p150", "o/other"]
+    assert "--accept-inferred-base" in c.detail and "--base tt/base-p150" in c.detail
+    assert "card names no base" in c.detail
+
+
+def test_with_the_opt_in_an_inferred_base_is_the_earlier_warning():
+    c = check(report(selected=INFERRED_SEL), installed=INST, accept_inferred=True)
+    assert c.status == pf.WARN and c.data["needs_fetch"] is True and c.data["base"] == "g/base"
+
+
+def test_a_stated_selection_needs_no_opt_in():
+    c = check(report(selected={**INFERRED_SEL, "confidence": "stated"}), installed=INST)
+    assert c.status == pf.WARN and c.data["base"] == "g/base" and c.data["needs_fetch"] is True
+
+
+def test_a_card_base_needs_no_opt_in():
+    c = check(report(selected=INFERRED_SEL), h=hub(base_model="g/base"), installed=INST)
+    assert c.status == pf.OK and c.data["base"] == "g/base"
+
+
+def test_run_preflight_passes_the_opt_in_through():
+    seen = {}
+    real = pf.check_base
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+    import pytest
+    mp = pytest.MonkeyPatch()
+    mp.setattr(pf, "check_base", spy)
+    try:
+        sig = pf.Signals(hub_info=lambda m: (hub(), None), local_snapshot=lambda m: None, free_gb=lambda p: 1000.0,
+                         same_device=lambda a, b: False, credentials=lambda: [], port_in_use=lambda port: False,
+                         gozer_status=lambda: "", load_tiers=lambda p: None)
+        try:
+            pf.run_preflight(None, "x/humanizer", accept_credentials=True, signals=sig, accept_inferred_base=True)
+        except Exception:
+            pass                                    # only the base check's arguments matter here
+    finally:
+        mp.undo()
+    assert seen.get("accept_inferred") is True

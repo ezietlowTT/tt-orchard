@@ -109,3 +109,59 @@ def test_the_readme_says_what_offline_and_no_github_cover():
     assert "`--offline` skips the research and makes no request for it" in text
     assert "still read" in text and "`--dry-run` does the same lookups as a real run (unless `--offline`)" in text
     assert "can leave that directory behind" in text
+
+
+INFERRED = {**REPORT, "selected": {"repo": "g/base", "bundle": "tt/base-p150", "confidence": "inferred",
+                                   "class": "weights-only"},
+            "candidates": [{"repo": "g/base", "confidence": "inferred", "why": "same architecture family",
+                            "differing": {}, "download_gb": 1.0,
+                            "class_estimate": {"class": "weights-only", "sidecar_possible": False},
+                            "group": 0, "bundles": [{"name": "tt/base-p150", "installed": True, "schema": "6"}]}],
+            "bundle_choices": [{"name": "tt/base-p150", "installed": True, "repo": "g/base", "schema": "6",
+                                "class": "weights-only", "confidence": "inferred", "group": 0}]}
+
+
+def inferred_signals():
+    from orchard.nearest import Installed
+    return signals(research=lambda model_id, hub, override, inst: INFERRED,
+                   installed_bundles=lambda: [Installed("tt/base-p150", "g/base", "6", 1)],
+                   hub_info=lambda m: (preflight.parse_hub({"id": m, "sha": "b" * 40, "cardData": {"license": "mit"},
+                                                            "siblings": [{"rfilename": "LICENSE", "size": 1},
+                                                                         {"rfilename": "config.json", "size": 1}]}),
+                                       None))
+
+
+def test_an_inferred_base_is_not_downloaded_or_started_without_the_opt_in(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"], sig=inferred_signals())
+    assert code == 2 and rec.argv is None and rec.fetched == []
+    assert "inferred-base-unconfirmed" in out and "--base tt/base-p150" in out
+
+
+def test_with_accept_inferred_base_the_inferred_base_is_downloaded_and_the_run_starts(conf):
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef", "--accept-inferred-base"], sig=inferred_signals())
+    assert code == 0 and rec.argv is not None
+    assert "g/base" in [m for m, *_ in rec.fetched]
+
+
+def test_the_accept_inferred_base_flag_defaults_off():
+    assert cli._parser().parse_args(["bringup", "a/b"]).accept_inferred_base is False
+
+
+def test_at_a_terminal_the_chooser_says_the_base_was_inferred_and_a_pick_is_the_confirmation(conf):
+    seen = {}
+
+    def chooser(cands, model, base):
+        seen["args"] = (cands[0]["name"], base)
+        return "tt/base-p150"
+    rec = Recorder()
+    code = cli.main(["--config", str(conf), "bringup", "Cloudflare/clef"], env={}, stdout=Pipe(),
+                    signals=inferred_signals(), supervisor_main=rec.supervisor, fetcher=rec.fetcher, chooser=chooser)
+    assert seen["args"] == ("tt/base-p150", "g/base") and code == 0 and rec.argv is not None
+
+
+def test_the_chooser_text_for_an_inferred_base_does_not_say_no_bundle_serves_it():
+    out = Pipe()
+    cli.pick_base([{"name": "tt/base-p150", "installed": True}], "a/new", "g/base", out=out, ask=lambda p: "0",
+                  inferred=True)
+    text = out.getvalue()
+    assert "inferred" in text and "no installed bundle serves it" not in text

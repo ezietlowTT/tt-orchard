@@ -39,7 +39,8 @@ def _unique(items) -> list[str]:
 
 
 def _empty(model_id: str, now: str, offline: bool, reason: str) -> dict:
-    return {"model": model_id, "generated_at": now, "offline": offline, "stated_bases": [], "candidates": [],
+    return {"model": model_id, "generated_at": now, "offline": offline, "new_model_gated": None,
+            "stated_bases": [], "candidates": [],
             "bundle_choices": [], "selected": None, "ports": [], "evidence": [],
             "unavailable": [Unavailable("research", reason).as_dict()]}
 
@@ -117,6 +118,12 @@ def _config(fetch, repo: str, res: Result) -> dict | None:
     return cfg
 
 
+def _mismatch(cmp: dict) -> str:
+    if not cmp.get("same_family"):
+        return "another architecture family"
+    return "other decisive config values: " + ", ".join(cmp["differing"])
+
+
 def _group(bundles: list[dict]) -> int:
     if any(b["installed"] and b["schema"] == V6 for b in bundles):
         return 0
@@ -134,13 +141,23 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     lin = _guard(res, "lineage", lambda: lineage.chain(fetch, model_id), lambda: Result(data={"ancestors": [], "edges": []}))
     res.extend(lin)
     stated = _unique([base_override] + list(hub.base_models if hub else []) + lin.data["ancestors"])
+    before = len(res.unavailable)
     new_cfg = _config(fetch, model_id, res) or {}
+    # Research sends no token, so a gated or private model's config and headers answer 401 or 403. Say so, so an
+    # empty or weak candidate list is not read as "there is no base".
+    gated = bool(hub and (hub.gated or hub.private)) or any(
+        u.reason.startswith((f"{model_id}: HTTP 401", f"{model_id}: HTTP 403")) for u in res.unavailable[before:])
     letters = re.match(r"[a-z]+", str(new_cfg.get("model_type") or "").lower())
     family = nearest.family_query(stated[0]) if stated else (letters.group(0) if letters else "")
     sib = _guard(res, "siblings", lambda: lineage.siblings(fetch, stated[0], exclude={model_id}),
                  lambda: Result(data={"siblings": []})) if stated else Result(data={"siblings": []})
     res.extend(sib)
     sibling_ids = set(sib.data["siblings"])
+    # The direct bases: --base, the card, and the tags of the model itself. A base further up the lineage (a base
+    # of the base) is a relation the card does not state for this model, so its own config decides its row.
+    direct = {base_override, *(hub.base_models if hub else []),
+              *(e["parent"] for e in lin.data["edges"] if e["child"] == model_id)}
+    parent_of = {e["parent"]: e["child"] for e in reversed(lin.data["edges"])}
     rows = _guard(res, "bundles", lambda: _bundles(installed, search, family, fetch, res), dict) if family else {}
     by_repo: dict[str, list[dict]] = {}
     for row in rows.values():
@@ -149,13 +166,23 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
 
     candidates: dict[str, dict] = {}
     cfgs: dict[str, dict] = {}
-    for repo in _unique(stated + list(by_repo))[:MAX_CANDIDATES]:
+    # The model is never its own base, even when an installed bundle already serves it.
+    for repo in [r for r in _unique(stated + list(by_repo)) if r != model_id][:MAX_CANDIDATES]:
         cfg = _config(fetch, repo, res)
         no_match = {"confidence": None, "differing": {}}
         cmp = _guard(res, "config", lambda: arch_match.compare(new_cfg, cfg), no_match) \
             if cfg is not None and new_cfg else no_match
-        if repo in stated:
-            confidence, why = STATED, ("named with --base" if repo == base_override else "named as the base model")
+        known = "same_family" in cmp                 # the comparison ran (both configs read, compare did not fail)
+        if repo == base_override:
+            confidence, why = STATED, "named with --base"
+        elif repo in direct:
+            # The card's word stands unless both configs are known and disagree.
+            confidence = STATED if not known or cmp["confidence"] == INFERRED else WEAK
+            why = "named as the base model" + ("" if confidence == STATED else ", but " + _mismatch(cmp))
+        elif repo in stated:
+            confidence = INFERRED if not known or cmp["confidence"] == INFERRED else WEAK
+            why = f"a base of {parent_of.get(repo, stated[0])} in the lineage" + (
+                "" if confidence == INFERRED else ", " + _mismatch(cmp))
         elif repo in sibling_ids and not cmp["confidence"] and cfg is not None and new_cfg:
             continue                          # a fine-tune of the base in another architecture family: not a candidate
         elif repo in sibling_ids:
@@ -218,7 +245,7 @@ def build(*, model_id, hub, base_override, installed, search, hub_info, fetch, r
     port_res = _guard(res, "ports", lambda: ports.collect(fetch, new_cfg, family=family or "", run=run, which=which,
                                                           no_github=no_github), Result) if family else Result()
     res.extend(port_res)
-    return {"model": model_id, "generated_at": now, "offline": False, "stated_bases": stated,
+    return {"model": model_id, "generated_at": now, "offline": False, "new_model_gated": gated, "stated_bases": stated,
             "candidates": ordered, "bundle_choices": choices, "selected": selected,
             "ports": [e.as_dict() for e in port_res.evidence],
             "evidence": [e.as_dict() for e in res.evidence if e not in port_res.evidence],
@@ -231,6 +258,10 @@ def markdown(report: dict) -> str:
              "read is listed under Unavailable."]
     if report["offline"]:
         lines += ["", "Research was skipped (`--offline`)."]
+    if report.get("new_model_gated"):
+        lines += ["", "The new model is gated or private on the hub. Research sends no token, so it could not read the "
+                  "model's config.json or safetensors headers: no architecture comparison and no class estimate were "
+                  "made for it. A short or empty candidate list does not mean there is no base."]
     lines += ["", "## Candidates", ""]
     for c in report["candidates"]:
         est = c["class_estimate"]

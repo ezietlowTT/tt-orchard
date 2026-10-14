@@ -549,3 +549,89 @@ def test_a_hostile_selection_is_dropped_or_reduced():
     for bad in ({"repo": HOSTILE, "bundle": "tt/b"}, {"repo": "g/base", "bundle": HOSTILE}):
         rep["selected"] = {**bad, "confidence": "stated", "class": None}
         assert report.stage0_view(rep)["selected"] is None
+
+
+def test_the_model_itself_is_never_a_candidate_even_when_an_installed_bundle_serves_it():
+    w = world({api("h/new"): hub_model("h/new")})
+    r = build(w, hub=new_hub(), installed=[Installed("tt/new-p150", "h/new", "6", 1),
+                                           Installed("tt/base-p150", "g/base", "6", 1)])
+    assert "h/new" not in [c["repo"] for c in r["candidates"]]
+    assert r["selected"]["repo"] == "g/base"
+
+
+# ---- a stated row is the direct, matching base; anything further up the lineage is judged by its config --------
+
+def lineage_world(root_cfg=CFG):
+    return world({api("h/new"): hub_model("h/new", "base_model:finetune:g/base"),
+                  api("g/base"): hub_model("g/base", "base_model:finetune:g/root"),
+                  api("g/root"): hub_model("g/root"), cfg_url("g/root"): root_cfg})
+
+
+def test_a_base_of_the_base_is_inferred_not_stated_and_is_not_selected_as_stated():
+    r = build(lineage_world(), hub=new_hub(), installed=[Installed("tt/root-p150", "g/root", "6", 1)])
+    root = next(c for c in r["candidates"] if c["repo"] == "g/root")
+    assert root["confidence"] == "inferred" and "g/base" in root["why"]
+    assert r["selected"]["repo"] == "g/root" and r["selected"]["confidence"] == "inferred"
+    direct = next(c for c in r["candidates"] if c["repo"] == "g/base")
+    assert direct["confidence"] == "stated"
+
+
+def test_a_base_of_the_base_with_other_decisive_values_is_weak_and_keeps_the_keys():
+    r = build(lineage_world({**CFG, "num_hidden_layers": 48}), hub=new_hub(),
+              installed=[Installed("tt/root-p150", "g/root", "6", 1)])
+    root = next(c for c in r["candidates"] if c["repo"] == "g/root")
+    assert root["confidence"] == "weak" and "num_hidden_layers" in root["differing"]
+    assert "num_hidden_layers" in root["why"] and r["selected"] is None
+
+
+def test_a_card_base_whose_decisive_values_differ_is_weak_and_says_why():
+    w = world({cfg_url("g/base"): {**CFG, "hidden_size": 4096}})
+    r = build(w)
+    top = next(c for c in r["candidates"] if c["repo"] == "g/base")
+    assert top["confidence"] == "weak" and "hidden_size" in top["differing"] and "hidden_size" in top["why"]
+    assert "named as the base model" in top["why"] and r["selected"] is None
+
+
+def test_a_card_base_of_another_family_is_weak():
+    w = world({cfg_url("g/base"): {**CFG, "model_type": "qwen3"}})
+    top = next(c for c in build(w)["candidates"] if c["repo"] == "g/base")
+    assert top["confidence"] == "weak" and "another architecture family" in top["why"]
+
+
+def test_a_base_named_with_dash_dash_base_stays_stated_whatever_its_config():
+    w = world({cfg_url("g/other"): {**CFG, "hidden_size": 4096}})
+    r = build(w, base_override="g/other")
+    row = next(c for c in r["candidates"] if c["repo"] == "g/other")
+    assert row["confidence"] == "stated" and row["why"] == "named with --base"
+
+
+def test_a_card_base_whose_config_cannot_be_read_stays_stated():
+    w = world({cfg_url("g/base"): FetchError("HTTP 401 (needs a login)")})
+    top = next(c for c in build(w)["candidates"] if c["repo"] == "g/base")
+    assert top["confidence"] == "stated"
+
+
+# ---- a gated or private new model: research cannot read it, and the report says so ------------------------
+
+def test_a_new_model_whose_config_answers_401_is_reported_as_gated_in_the_json_and_the_markdown():
+    w = world({cfg_url("h/new"): FetchError("HTTP 401 (needs a login)")})
+    r = build(w)
+    assert r["new_model_gated"] is True
+    md = report.markdown(r)
+    assert "gated or private" in md and "no token" in md and "does not mean" in md
+
+
+def test_a_hub_that_says_gated_is_reported_even_before_a_read_fails():
+    h = pf.parse_hub({"id": "h/new", "gated": "manual", "cardData": {"base_model": "g/base"},
+                      "siblings": [{"rfilename": n, "size": 1} for n in FILES]})
+    assert build(world(), hub=h)["new_model_gated"] is True
+
+
+def test_an_open_model_is_not_gated_and_the_markdown_has_no_gated_line():
+    r = build(world())
+    assert r["new_model_gated"] is False and "gated" not in report.markdown(r)
+
+
+def test_an_offline_report_does_not_know_whether_the_model_is_gated():
+    assert report.build(model_id="h/new", hub=None, base_override=None, installed=[], search=NO_SEARCH,
+                        hub_info=HUBINFO, fetch=World(offline=True), run=RUN, which=lambda n: None)["new_model_gated"] is None

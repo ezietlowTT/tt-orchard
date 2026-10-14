@@ -33,6 +33,7 @@ import json
 import os
 import shlex
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -95,6 +96,9 @@ def _parser() -> argparse.ArgumentParser:
                         "base-model research. tt-metal's model listings and README are still read")
     b.add_argument("--refresh-research", action="store_true",
                    help="ignore the cached answers from an earlier attempt of this run")
+    b.add_argument("--accept-inferred-base", action="store_true",
+                   help="when the card names no base model, use the one the research inferred from the "
+                        "architecture (and download its snapshot). Without it an inferred base blocks the run")
     b.add_argument("--mode", choices=bringup_config.MODES,
                    help="where the hardware tests run for this run: local (this box) or lab (the [lab] box). "
                         "Default: the config's mode")
@@ -168,9 +172,14 @@ def resolve_base(arg: str, sig, puller, out, style, *, dry_run: bool = False) ->
     return None, f"{arg} was pulled but is not among the installed bundles tt-orchard looks at"
 
 
-def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input) -> str | None:
-    """Ask the operator which bundle to base the run on. Returns its name, or None for none."""
-    print(f"║  {model} is based on {base}, and no installed bundle serves it. Bundles found:", file=out)
+def pick_base(candidates: list[dict], model: str, base: str, *, out, ask=input, inferred: bool = False) -> str | None:
+    """Ask the operator which bundle to base the run on. Returns its name, or None for none. For a base the
+    research inferred, the pick is the operator's confirmation."""
+    if inferred:
+        print(f"║  {model}'s card names no base; research inferred {base}. Confirm a bundle to base the run on:",
+              file=out)
+    else:
+        print(f"║  {model} is based on {base}, and no installed bundle serves it. Bundles found:", file=out)
     for i, c in enumerate(candidates, 1):
         tag = "installed" if c.get("installed") else "not installed (will be installed with tt-model pull)"
         print(f"║    {i}. {c['name']}  [{tag}]", file=out)
@@ -229,12 +238,43 @@ def _watch(run_dir: Path, args, style, out) -> int:
 
 
 UI_RESEARCH_TTL_S = 300
+UI_RESEARCH_MEMO_MAX = 32       # research answers the UI keeps (one per model, base and research setting)
+
+
+class _ResearchMemo:
+    """The UI's research answers, each kept for UI_RESEARCH_TTL_S. The server answers requests on threads, so
+    every read and write holds the lock; storing drops expired answers and then the oldest beyond
+    UI_RESEARCH_MEMO_MAX. Two requests that miss at the same moment may both ask; that costs a repeat, not an
+    error."""
+
+    def __init__(self):
+        self._items: dict = {}          # key -> (stored at, report), oldest first
+        self._lock = threading.Lock()
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._items)
+
+    def get(self, key):
+        with self._lock:
+            hit = self._items.get(key)
+            return hit[1] if hit and time.monotonic() - hit[0] < UI_RESEARCH_TTL_S else None
+
+    def put(self, key, report) -> None:
+        now = time.monotonic()
+        with self._lock:
+            self._items.pop(key, None)
+            self._items[key] = (now, report)
+            for old in [k for k, (at, _) in self._items.items() if now - at >= UI_RESEARCH_TTL_S]:
+                del self._items[old]
+            while len(self._items) > UI_RESEARCH_MEMO_MAX:
+                del self._items[next(iter(self._items))]
 
 
 def _ui_preflight_for():
     """The `preflight_for` the UI server uses. The server builds the preflight callable again for every request
     (and for every mode), so the research memo is made once here and handed to each callable."""
-    memo: dict = {}
+    memo = _ResearchMemo()
     return lambda cfg: _ui_preflight(cfg, memo)
 
 
@@ -245,7 +285,7 @@ def _ui_preflight(cfg, memo=None):
     form, so one answer is kept for UI_RESEARCH_TTL_S per model, base and option; GitHub allows 60
     unauthenticated requests an hour and one research run makes about 6."""
     from orchard.research import Options
-    memo = {} if memo is None else memo
+    memo = _ResearchMemo() if memo is None else memo
 
     def run(model, base, research=None):
         options = Options(cache_dir=None, offline=research == "offline",
@@ -257,10 +297,10 @@ def _ui_preflight(cfg, memo=None):
             def remembered(model_id, hub, override, inst):
                 key = (model_id, override, research)
                 hit = memo.get(key)
-                if hit and time.monotonic() - hit[0] < UI_RESEARCH_TTL_S:
-                    return hit[1]
+                if hit is not None:
+                    return hit
                 report = fresh(model_id, hub, override, inst)
-                memo[key] = (time.monotonic(), report)
+                memo.put(key, report)
                 return report
             sig = dataclasses.replace(sig, research=remembered)
         override = None
@@ -436,7 +476,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
 
     def preflight_page():
         got = preflight.run_preflight(cfg, args.model, accept_credentials=not args.refuse_credentials_visible,
-                                      signals=sig, resuming=resuming, base_override=override)
+                                      signals=sig, resuming=resuming, base_override=override,
+                                      accept_inferred_base=args.accept_inferred_base)
         print(orchard_view.render_preflight(args.model, run_dir, resuming, cfg_path, got, style), file=out)
         return got
 
@@ -445,7 +486,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if (base_check.status == preflight.BLOCK and (base_check.data or {}).get("candidates") and not args.base
             and not args.dry_run):
         if chooser is None and sys.stdin.isatty() and ui.stream_is_tty(out):
-            chooser = lambda c, m, b: pick_base(c, m, b, out=out)   # noqa: E731
+            chooser = lambda c, m, b: pick_base(c, m, b, out=out,                    # noqa: E731
+                                                inferred=bool(base_check.data.get("inferred")))
         pick = chooser(base_check.data["candidates"], args.model, base_check.data["base"]) if chooser else None
         if pick:
             override, why = resolve_base(pick, sig, puller, out, style)

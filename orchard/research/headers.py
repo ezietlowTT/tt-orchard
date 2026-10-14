@@ -14,7 +14,7 @@ import re
 import struct
 
 from orchard.research import triage_rules
-from orchard.research.http import FetchError
+from orchard.research.http import MAX_BODY, FetchError
 from orchard.research.types import Result, Unavailable, clean, valid_id
 
 RAW_URL = "https://huggingface.co/{repo}/resolve/main/{name}"
@@ -22,6 +22,9 @@ INDEX_NAME = "model.safetensors.index.json"
 SAFE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,120}")
 MAX_SHARDS = 64
 MAX_REASONS = 5
+# The template accepts a header up to MAX_HEADER (100 MiB) in a local file. Over the network, from a repo anyone can
+# upload, the research reads no more than the fetcher's body cap; real headers are a few MB at most.
+MAX_HEADER_READ = MAX_BODY
 
 
 def shard_header(fetch, repo: str, name: str) -> dict:
@@ -33,6 +36,8 @@ def shard_header(fetch, repo: str, name: str) -> dict:
     (n,) = struct.unpack("<Q", first)
     if n <= 0 or n > triage_rules.load().MAX_HEADER:
         raise ValueError(f"header length {n} is not plausible")
+    if n > MAX_HEADER_READ:
+        raise ValueError(f"header length {n} is larger than the research reads ({MAX_HEADER_READ} bytes)")
     blob = fetch.get(url, byte_range=(8, 8 + n - 1), max_bytes=n)
     if len(blob) != n:
         raise ValueError(f"header is cut short ({len(blob)} of {n} bytes)")
@@ -67,6 +72,11 @@ def read_model(fetch, repo: str, files: list[str]) -> Result:
                 shards = [n for n in safe if n in listed] or None
                 if shards is None:
                     res.data["errors"].append(f"{INDEX_NAME}: lists none of the repository's safetensors files")
+                missing = sorted(n for n in listed if n not in safe)
+                if shards is not None and missing:
+                    # The headers read would be a part of the backbone, so the estimate must not be a guess.
+                    res.data["errors"].append(f"{INDEX_NAME}: lists {len(missing)} shard(s) the repository does not "
+                                              f"have or that are not read: {', '.join(missing[:3])}")
             else:
                 res.unavailable.append(Unavailable("headers", f"{repo}: the index has no weight_map object"))
                 res.data["errors"].append(f"{INDEX_NAME}: no weight_map object")

@@ -417,6 +417,7 @@ tt-orchard bringup org/name --base <bundle or model id>       # base the run on 
 tt-orchard bringup org/name --offline                         # skip the base-model research (the hub lookup and downloads still run)
 tt-orchard bringup org/name --no-github                       # research without the GitHub issue and code searches
 tt-orchard bringup org/name --refresh-research                # ignore answers cached by an earlier attempt
+tt-orchard bringup org/name --accept-inferred-base            # use (and download) a base the research inferred
 tt-orchard watch org/name                                     # follow a run from another terminal
 tt-orchard ui                                                 # watch and control every run in a browser
 tt-orchard status org/name                                    # also pause, resume, abort
@@ -455,7 +456,8 @@ until it ends, and `--once` prints the recent history and stops.
 every run under `runs_root` (runs that need you first), and for the run you pick an animated orchard, its stages,
 the same live lines as `watch`, the ledger, its files (gate results, evidence, the operator bundle,
 `BLOCKED.md`, the coder log) and what to do next. The new-run dialog runs the base-model research with the
-preflight (read-only requests, no cache, no file; one answer is kept for five minutes) and lists the ranked
+preflight (read-only requests, no cache, no file; one answer per model, base and setting is kept for five
+minutes, at most 32 of them) and lists the ranked
 bundles, the existing work and anything that could not be read; its research setting maps to `--no-github` and
 `--offline`. A run's Details tab shows the report that run wrote and how stage 0's measured class compared with
 the estimate. The Hardware view shows
@@ -521,7 +523,7 @@ its reason; a `warn` is information.
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
-| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base, also a warning (see "How the base model is found") | `nearest-model-missing` |
+| base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
@@ -548,8 +550,8 @@ anything large. It reads, with no Hugging Face token:
   chain of bases above it, and other fine-tunes of the same base;
 - each candidate's `config.json`, to compare the architecture (model type and the layer, width, head and
   vocabulary sizes);
-- the safetensors headers of the new model and a candidate, by two byte-range requests per file, to
-  estimate the class (`weights-only`, `full-port` or `unknown`) and the download size. A sidecar's
+- the safetensors headers of the new model and a candidate, by two byte-range requests per file (a
+  header larger than 8 MiB is not read, and the estimate is then `unknown`), to estimate the class (`weights-only`, `full-port` or `unknown`) and the download size. A sidecar's
   tensors would need a download, so the estimate only says one is possible;
 - the tt-model community catalog, published bundles (their manifest says which model they serve, and a
   container bundle may ship its own port under `code/models/`), tt-metal's `models/` directories and
@@ -557,16 +559,23 @@ anything large. It reads, with no Hugging Face token:
   `gh auth login`; without it that one search is skipped and the report says so.
 
 The result is `<run dir>/research/base-candidates.md` and `.json`. Each row says where it came from and how
-sure it is: `stated` (the card or `--base` names it), `inferred` (same architecture family and the same
+sure it is: `stated` (`--base` names it, or the card or the model's tags name it and its config does not
+disagree; a card base whose decisive config values differ is `weak`, and a base of the base is judged by its
+own config like any other candidate), `inferred` (same architecture family and the same
 decisive config values) or `weak` (same family only; a sibling fine-tune of the base is judged by its own config in the same way). Only a stated or inferred candidate with an installed v6
-bundle is chosen on its own. Stage 0 gets a shorter file, `base-candidates.stage0.json`, as the input
+bundle is chosen on its own, and an inferred one is used only after the operator confirms it (see the base row
+of the preflight table). The model itself is never its own candidate. Stage 0 gets a shorter file, `base-candidates.stage0.json`, as the input
 `base_candidates`. It lists each candidate's model id, confidence, group, estimated class and bundle names, and
 none of the text fetched from the internet; the full report stays in `base-candidates.json` for you. Stage 0
 measures the class and records in `delta.json` whether the estimate agreed. The estimate is recorded next to the
 measurement and changes neither the class nor the path.
 
-A source that cannot be reached is listed as unavailable in the report. After one connection failure to a host
-(no route, a timeout), the remaining requests to that host fail at once. `--offline` skips the research and makes
+Research sends no token, so for a gated or private new model it cannot read the model's config or headers: the
+report says so (`new_model_gated` in the JSON, a line in the Markdown and in the UI), and its short candidate
+list is not evidence that there is no base. A source that cannot be reached is listed as unavailable in the report. After one connection failure to a host
+(no route, a timeout), the remaining requests to that host fail at once. One research run makes at most 600
+requests in at most 240 seconds (answers from the cache do not count); after that the remaining requests fail
+at once, are listed as unavailable, and an estimate that misses a header is `unknown`. `--offline` skips the research and makes
 no request for it. The preflight's own hub lookup, `tt model search` and the download still run.
 `--no-github` skips the GitHub issue and pull request search and the GitHub code search. The listings of tt-metal's
 `models/` directories and its models README are still read. `--refresh-research` ignores answers cached by an
@@ -824,7 +833,7 @@ does not change.
 | `unknown` | Stage 0 could not decide: an unreadable or overlapping sidecar, or headers that would not parse | `full-port` | Nothing unproven runs as weights-only |
 
 A sidecar is found by name: the backbone is the shards the model's `model.safetensors.index.json` lists (or
-`model*.safetensors` without an index; an index that cannot be read is reported and the class estimate is `unknown`), and any other weights file the nearest model does not have is a
+`model*.safetensors` without an index; an index that cannot be read, or that lists a shard the repository does not have, is reported and the class estimate is `unknown`), and any other weights file the nearest model does not have is a
 sidecar. `delta.json` lists each sidecar with its size, sha256, tensor count and tensor names, and each
 top-level `.py` file in the repo with its sha256 (`code_files`). The triage script reads headers and
 hashes files. It never imports or runs a code file.
