@@ -981,3 +981,20 @@ cache), `finish`, `gate_package` ok. Only the 2-chip profile was staged: the 1-c
   `gate_package` passed after the rewrite (the first try failed on that namespace, which the scrub refuses).
 - `hf upload --repo-type model --private`, then `tt-model publish episod/rag-gate-27b-p300` (public and listed in the community catalog),
   on the operator's explicit instruction. Delist with `tt-model unpublish`. Not tested: `tt-model pull` and a boot from the Hub.
+
+## 2026-10-14 (later still): the Sonexa music run stopped at the base step; the only MiniMax-Music3 bundle is a container package
+Prompt (operator): "ok go ahead and remove the caches and then go on." Deleted (operator-approved, all regenerable): the RAG-Gate-27B
+tensor caches (`cache/thakicloud--rag-gate-27b`, 116 GB) and the four tensor caches of Clef's abandoned stage 2 attempts
+(`stages/2.partial-2` and `2.partial-3`, 127 GB). 22 GB free became 259 GB. Kept: Clef's stage 2 cache, its stage 7 install, the shared
+kernel cache. Machine config (uncommitted): the coder port moved from 8001 to 8011 (another agent's `tt-local-generator` prompt server holds
+8001), and `ollama serve` with `OLLAMA_MODELS=/mnt/bonus/models/ollama` was started for the CPU stand-in. The stale lease on board 0 that
+another agent's `animatediff-iguazu` left cleared on its own; nothing of theirs was touched.
+- `tt-orchard bringup SonexaAI/Sonexa-Music-v0.1-Beta --base jashansinghTT/minimax-music3-blackhole` ran the preflight clean, then
+  `tt-model pull` installed the base as a container package (4.1 GB image, profile p150, a `tt-dit-server`), and the command refused:
+  "was pulled but is not among the installed bundles tt-orchard looks at". No run directory was created and no hardware was touched.
+- Cause: orchard lists v6 thin bundles (a manifest that names the weights repo). Stages 2 and 4 swap new weights into such a bundle. A
+  container package has no such manifest, so there is nothing to swap into. The refusal is the designed behaviour, and it names the
+  problem. The preflight already warns about container bases for a model found by research; it does not say, before the pull, that a
+  `--base` pointing at a published container bundle cannot be used.
+- Not done: any bring-up of a non-LLM model. Options: pick a model whose base has a v6 thin bundle; add a container-package path to
+  stage 2 (stage 4 already runs a container for its 4-chip test); or accept the blocked outcome as the documented result.
