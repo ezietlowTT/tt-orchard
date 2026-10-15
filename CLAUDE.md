@@ -998,3 +998,12 @@ another agent's `animatediff-iguazu` left cleared on its own; nothing of theirs 
   `--base` pointing at a published container bundle cannot be used.
 - Not done: any bring-up of a non-LLM model. Options: pick a model whose base has a v6 thin bundle; add a container-package path to
   stage 2 (stage 4 already runs a container for its 4-chip test); or accept the blocked outcome as the documented result.
+
+## 2026-10-14 (later still): `SonexaAI/Sonexa-Music-v0.1-Beta` is a copy of the base, not a fine-tune
+Prompt (operator): "continue with #1. our goal here is to make music happen from a specialized model." Before building the audio check I
+read the music container (`tt-model/minimax-music3`, from the pulled manifest) and compared the two Hub repos by file hash.
+- The server reads `MUSIC3_SNAPSHOT`, or a directory in `HF_MODEL`, before the Hub (`config.resolve_snapshot`), so swapped weights can be
+  injected. The base ignores `flowmatching_vae.pth`, `dav.pth` and `qwen_7B/*`, so a model directory needs those from somewhere else.
+- Hub tree comparison (LFS sha256, or git oid for small files): both repos have the same 88 paths. 87 files are identical, including every
+  safetensors shard and the LICENSE. Only `README.md` differs (11.7 KB in the base, 213 bytes in Sonexa). Sonexa is a re-upload of MiniMax-Music3.
+- Consequence: a bring-up of Sonexa would measure the base. Nothing was started, downloaded or run on hardware, and no audio check was built.
