@@ -1051,3 +1051,21 @@ With a local workaround for the cache-load hang (a patched `ttnn/operations/core
   container-package base. The workaround patches vendor code in a mount; it is a local experiment, not something to ship.
 - Leftover on disk: the 4.1 GB image, the base weights in the HF cache (27 GB), `fiona-merged` (27 GB), `tensors.*`/`weights.*` scratch
   caches in `~/.cache/tt-model/minimax-music3/`. Nothing published or uploaded.
+
+## 2026-10-15 (later still): multi-seed clips, and the audio bring-up spec
+Prompt (operator): "proceed! this is progress. I have confirmed these clips have MUSIC!", then option 1 (a real orchard path for audio).
+- Multi-seed set (`~/orchard-runs/music/set1/`, `features.json` there): 5 seeds x 2 captions x 2 models, 20 clips, 20 s each, same
+  seeds and captions for base and merged. Coarse spectral features (centroid, share of spectrum above 4 kHz, onsets per second), merged
+  minus base per seed. With the trigger caption the share above 4 kHz is higher in 5 of 5 seeds (mean +0.138, sd 0.054) and the centroid
+  in 4 of 5; with the synth-pop caption there is no consistent shift (high share 2 up, 3 down; onsets up in 5 of 5 by a mean 0.35).
+  So the merge changes the sound when the trigger is present and little when it is absent. That fits an adapter that acts on its
+  trigger; it does not show cafe-jazz style, and n = 5 with crude features cannot. Listening is still the test.
+- Clip checks measured on 24 clips (these set the bars in the spec): duration 20.02 s for 20 s asked, 32 kHz stereo, at most 0.019%
+  of samples at full scale, at least 59% of 100 ms windows above -40 dBFS.
+- Brainstorming for the audio path: classified architectural; understanding note and design agreed in chat (facts `form`, `serving`,
+  `modality` on the weights-only path, no new class; stage 1 materializes the merge; stage 2 boots base and new model in a container and
+  generates clips; the harness probes for the cache-load hang and selects the workaround itself, the operator's ruling). The written spec is
+  `docs/superpowers/specs/2026-10-15-audio-bringup-design.md`; it waits for the operator's review before a plan is written.
+- Slips while running the set (all fixed in `run_clip.sh`): a slash in the clip label broke the log file names, so the first launch
+  never started a container and my waiter did not notice for 30 minutes; the device node in `tt-model serve --print` depends on which
+  chips are free, so a guard that expected node 0 failed once; two of my waiters exited on stale text in old logs.
