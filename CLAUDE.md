@@ -1113,3 +1113,21 @@ was created remotely, pushed or uploaded; each needs the operator's explicit go-
 - PR 8 (the review comments the operator mentioned) is handled in the entry above.
 - Not done: a GitHub repo, any Hugging Face upload, the full container package (needs the image build and the tt-metal tree the base was built from),
   a quality evaluation, a browser run of the Gradio page (it was driven through `gradio_client` only).
+
+## 2026-10-15 (evening, later): published on the operator's explicit instruction
+Prompt (operator): "publish the model public and the GH repo public", after "works great!" and "those screenshots should go in the readme and model card".
+- GitHub: https://github.com/tsingletaryTT/tt-minimax-music-blackhole, public, `main`, topics tenstorrent, blackhole, music-generation, gradio
+  (`gh repo create ... --public --source . --push`).
+- Hugging Face, public: `episod/minimax-music3-fiona-crapple-blackhole` (the companion: a `git archive` of the repo with the generated card as `README.md`,
+  `hf/` dropped; 27 files, docs/ screenshots included).
+- Hugging Face weights `episod/minimax-music3-fiona-crapple`: `hf upload` of the merged model directory (excluding its README and MERGE.json) is
+  running at about 5 MB/s (Xet deduplicates the unchanged base files; the new data is mostly the 17 GB of rewritten language-model shards). The repo was
+  made private while it fills, and `~/orchard-runs/music/finish_weights.sh` waits for the upload, adds the card and merge record, checks the four rewritten
+  shards' sha256 against the local files and every other large file against the base repo, and only then makes the repo public. If it fails it leaves the repo
+  private (`finish-weights.log`). Nothing was added to the tt-model catalog (no tt-model tags; it is a companion, not a package).
+- The license (MiniMax-Music3 Community License) allows redistribution with the notice kept (the weights repo carries the LICENSE file) and asks commercial products
+  to display "MiniMax-Music3" (the page title does). The screenshots were cropped to remove the browser's tab bar and address bar.
+- Found from the operator's screenshots, the first browser run of the page: a 20 s request with two short sentences of lyrics gave 5.2 s of audio (the server ends a
+  song when its lyrics are finished) and the page printed "5.18966 s" with no explanation. The page now rounds to one decimal and says why the song ended early
+  (5 tests, 2 mutants added after the first mutation run). The published screenshots predate that wording and the running page still has the old code until its next
+  restart, so the card and README make no claim about the note; a retake would show it.
