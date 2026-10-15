@@ -90,8 +90,18 @@ Template `serve_and_generate.py` (container), run by the supervisor's single-tes
   `--device` argument (lesson from 2026-10-15);
 - creates the cache directories before `docker run` (a missing mount source is created by Docker as root);
 - mounts the model directory, and every directory its links point into, read-only at their own paths, and sets `HF_MODEL`;
-- has a boot deadline and a stall rule (no new container log line for a set time), saves the container log before removal, and always
-  stops the container, with `docker kill` after `docker stop` fails.
+- has a boot deadline and a stall rule (no new container log line for a set time) and saves the container log before it removes
+  the container. This cleanup is best effort only. On a timeout or an abort the supervisor kills the test's process group with
+  SIGKILL (`orchard.agent._kill_session`), which skips a `finally`, and killing the Docker client does not stop its container
+  (an 8-hour hang on 2026-10-15 left one running). The guarantee is the supervisor's, next paragraph;
+- starts every container it makes, the probe's and the server's, with `--label <run label>`, the label the supervisor passes to
+  hardware tests (stage 4's container template does the same).
+
+Supervisor-owned cleanup (a finding of the PR 8 review). Stage 2's single-test hardware phase (`_hardware_phase`) has no container
+sweep today; only the listed-tests path calls `_sweep`. The change for this design: after every stage 2 hardware test, whatever its
+outcome (passed, failed, timed out, aborted), and again at resume when recovery finds a test in progress, the supervisor lists
+containers by the run label and stops and removes each one. If any is still listed afterwards the stage blocks, as `_sweep`
+does now, and no lease is released or reset and the coder is not restored until a person looks. The sweep also runs before the coder is restored.
 
 Hang probe and the workaround (the operator's ruling: the harness self-selects it). Before the first boot the template runs a probe
 in the same image on the leased chip: `ttnn.as_tensor` twice with one `cache_file_name` for a (2, 8, 16384, 128) bf16 tile tensor, a
@@ -124,8 +134,8 @@ failed stage with the failing check named.
 ## 7. Failure and resume
 
 The stage uses the single-test hardware phase and its `test-result.json` resume marker. A failed test gets no gate feedback (existing rule).
-A hang ends the test at the deadline with `timed_out`; the supervisor kills the process group, and the template's own `finally` stops
-the container. A stale cache from an earlier attempt is moved aside by the existing rule. New block codes: `container-cache-hang` and
+A hang ends the test at the deadline with `timed_out`; the supervisor kills the process group and then sweeps by label (section 6),
+so cleanup does not depend on the template's own `finally`. A stale cache from an earlier attempt is moved aside by the existing rule. New block codes: `container-cache-hang` and
 `adapter-alpha-unknown`, each with a "how to unblock" text and a test that ties them to `blocked.REASONS` and `narrate.UNBLOCK`.
 
 ## 8. Bundle and UI
@@ -146,7 +156,8 @@ synthetic audio (a tone with a controlled loudness and clipping), so no test nee
 thin-bundle run is unchanged; triage on a synthetic adapter (rank mismatch, a missing base tensor, alpha unknown, wrong component);
 materialize refuses a count mismatch; the template rewrites the device argument and refuses two; the probe hang selects the workaround and a passing probe does not; the work-around edit is asserted exactly once; each audio check fails when its input is wrong;
 a repeat that differs fails; the gate re-derives from files; the run is killed and resumed at stage 2 boundaries (the existing
-kill-point test pattern); the UI serves a FLAC only from the allowed paths. Then a real run under the supervisor on
+kill-point test pattern); a fake containers adapter shows the label sweep after a timeout, after an abort and after a kill and resume of
+a stage 2 test, and that a surviving container blocks before any release, reset or coder restore; the UI serves a FLAC only from the allowed paths. Then a real run under the supervisor on
 `fiona-crapple`, killed once and resumed. The existing suite must stay green.
 
 ## 10. Open points

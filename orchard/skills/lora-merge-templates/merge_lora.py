@@ -10,13 +10,15 @@ It refuses (exit 2) when the merge would be a guess:
   * an adapter module has no matching base tensor;
   * a shape does not fit (A is rank x in, B is out x rank, W is out x in);
   * an A without a B, or the adapter holds a tensor the script does not understand;
-  * the output directory exists and is not empty.
+  * the output directory exists and is not empty;
+  * --component leaves the base, or the weight index names a shard outside the component;
+  * a shard's destination is a link (it would be the base model's own file).
 
 Usage:
   merge_lora.py --base SNAPSHOT_DIR --lora FILE.safetensors --out DIR \
       [--component language_model] [--prefix language_model.] [--alpha 64] [--strength 1.0]
 
---component is the sub-directory of the base that holds the adapted weights and its
+--component is a path inside the base ("." for weights at the root) that holds the adapted weights and its
 model.safetensors.index.json (or a single model.safetensors). --prefix is what the adapter's keys
 start with before the base tensor name; --alpha defaults to the rank (scale 1.0), and
 the adapter's author states it, so pass it when known.
@@ -80,10 +82,34 @@ def link_tree(base, out, skip):
         rel = Path(root).relative_to(base)
         (out / rel).mkdir(parents=True, exist_ok=True)
         for name in files:
-            r = (rel / name).as_posix()
-            if r in skip:
+            if (rel / name).as_posix() in skip:          # skip holds normalized paths (see main)
                 continue
             os.symlink(os.path.realpath(Path(root) / name), out / rel / name)
+
+
+def normalize_component(raw: str) -> str:
+    """The component as a clean path inside the base ("." for root-level weights). Refuses a path that leaves the base."""
+    if os.path.isabs(raw):
+        fail(f"--component {raw!r} must be a path inside the base, not an absolute path")
+    rel = os.path.normpath(raw or ".")
+    if rel == ".." or rel.startswith(".." + os.sep):
+        fail(f"--component {raw!r} must be a path inside the base")
+    return rel
+
+
+def check_shard_name(shard: str, component: str) -> None:
+    """A shard named by the weight index must be a plain relative path inside the component."""
+    norm = os.path.normpath(shard)
+    if os.path.isabs(shard) or norm == ".." or norm.startswith(".." + os.sep):
+        fail(f"the weight index names {shard!r}, which is outside {component}")
+
+
+def write_shard(dest: Path, tensors: dict) -> None:
+    """Write one shard. Never through a link: a link here would be the base model's own file."""
+    from safetensors.torch import save_file
+    if dest.is_symlink():
+        fail(f"{dest} is a link; refusing to write through it to the base weights")
+    save_file(tensors, str(dest), metadata={"format": "pt"})
 
 
 def main(argv=None):
@@ -98,10 +124,11 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     import torch
-    from safetensors.torch import load_file, save_file
+    from safetensors.torch import load_file
 
     base, out = Path(args.base), Path(args.out)
-    comp = base / args.component
+    component = normalize_component(args.component)
+    comp = base / component
     if not comp.is_dir():
         fail(f"{comp} is not a directory")
     if out.exists() and any(out.iterdir()):
@@ -113,11 +140,12 @@ def main(argv=None):
     for mod in adapter:
         name = mod + ".weight"
         if name not in wmap:
-            fail(f"adapter module {mod!r} has no base tensor {name!r} in {args.component}")
+            fail(f"adapter module {mod!r} has no base tensor {name!r} in {component}")
+        check_shard_name(wmap[name], component)
         targets[mod] = name
         by_shard.setdefault(wmap[name], []).append(mod)
 
-    rewritten = {f"{args.component}/{s}" for s in by_shard}
+    rewritten = {os.path.normpath(os.path.join(component, s)) for s in by_shard}
     link_tree(base, out, skip=rewritten)
     # the component directory is real in out (link_tree made it); shards below are written, not linked
     worst = 0.0
@@ -135,11 +163,11 @@ def main(argv=None):
             merged = w.float() + delta
             worst = max(worst, float(delta.norm() / (w.float().norm() + 1e-12)))
             tensors[name] = merged.to(w.dtype)
-        save_file(tensors, str(out / args.component / shard), metadata={"format": "pt"})
-        print(f"merged {len(mods)} matrices into {args.component}/{shard}", flush=True)
+        write_shard(out / component / shard, tensors)
+        print(f"merged {len(mods)} matrices into {os.path.normpath(os.path.join(component, shard))}", flush=True)
 
     (out / "MERGE.json").write_text(json.dumps({
-        "base": str(base), "lora": str(args.lora), "component": args.component, "strength": args.strength,
+        "base": str(base), "lora": str(args.lora), "component": component, "strength": args.strength,
         "alpha": args.alpha, "modules_merged": len(adapter), "shards_rewritten": sorted(by_shard),
         "max_relative_change": worst,
     }, indent=2))

@@ -1069,3 +1069,18 @@ Prompt (operator): "proceed! this is progress. I have confirmed these clips have
 - Slips while running the set (all fixed in `run_clip.sh`): a slash in the clip label broke the log file names, so the first launch
   never started a container and my waiter did not notice for 30 minutes; the device node in `tt-model serve --print` depends on which
   chips are free, so a guard that expected node 0 failed once; two of my waiters exited on stale text in old logs.
+
+## 2026-10-15 (later): PR 8 review (version 0.5.6)
+Prompt (operator): "some comments on PR 8". Copilot's review left two findings on `fetcher-fixes`; each was checked against the code.
+- `merge_lora.py`, component paths. A `--component` spelled `./language_model`, `language_model/` or `.` did not match the normalized
+  paths `link_tree` compares, so the adapted shard was symlinked to the base first and then written. With safetensors 0.8.0 `save_file`
+  replaces a link by rename, so I could not make the base change on this box (checked with real files). The mismatch was still real: a
+  `save_file` that writes through a link overwrites the base weights, and the tests now use such a shim, which turns 9 of the new cases
+  red on the old code. Fixed: the component is normalized (`.` for root-level weights, absolute paths and `..` refused), the
+  skip set is normalized, a weight index that names a shard outside the component is refused, and `write_shard` refuses a destination that
+  is a link. 24 tests; 8 mutations red, 1 equivalent (a second normalization in `link_tree`, removed).
+- The audio spec relied on the template's `finally` to stop containers. Correct: on a timeout or an abort `orchard.agent._kill_session`
+  sends SIGKILL to the process group, which skips cleanup, killing the Docker client does not stop its container, and `_hardware_phase`
+  (the single-test path stage 2 would use) has no sweep; only the listed-tests path calls `_sweep`. The spec now requires labelled
+  containers and a supervisor sweep after every stage 2 test, at resume, and before the coder is restored, with a block when one survives.
+  This is design only; no supervisor code changed.

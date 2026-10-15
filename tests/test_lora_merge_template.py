@@ -152,3 +152,107 @@ def test_non_empty_output_is_refused(setup):
     r = merge(tmp)
     assert r.returncode == 2 and "not empty" in r.stderr
     assert (tmp / "out/keep.txt").read_text() == "x"
+
+
+# ---- component path spellings, and never writing through a link to the base (PR 8 review) ----------------------------
+
+import hashlib       # noqa: E402
+import importlib.util  # noqa: E402
+
+
+def load_script():
+    spec = importlib.util.spec_from_file_location("merge_lora_under_test", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def write_through_save_file(monkeypatch):
+    """A save_file that opens the destination and writes into it, as a library that does not replace the file would.
+    With a link at the destination this overwrites the link's target."""
+    def save(tensors, path, metadata=None):
+        data = st.save(tensors, metadata=metadata)
+        with open(path, "wb") as f:
+            f.write(data)
+    monkeypatch.setattr(st, "save_file", save)
+
+
+def tree_hash(root):
+    return {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in sorted(Path(root).rglob("*")) if p.is_file() and not p.is_symlink()}
+
+
+@pytest.mark.parametrize("spelling", ["language_model", "./language_model", "language_model/", "./language_model/",
+                                      "language_model//", "./x/../language_model"])
+def test_every_spelling_of_the_component_merges_into_new_files_and_leaves_the_base_alone(setup, monkeypatch, spelling):
+    tmp, base, w0, _, a, b = setup
+    write_through_save_file(monkeypatch)
+    before = tree_hash(base)
+    load_script().main(["--base", str(base), "--lora", str(tmp / "lora.safetensors"), "--out", str(tmp / "out"),
+                        "--component", spelling])
+    assert tree_hash(base) == before                                         # the base weights are byte-identical
+    shard = tmp / "out/language_model/a.safetensors"
+    assert shard.exists() and not shard.is_symlink()
+    got = st.load_file(str(shard))["model.layers.0.mlp.up_proj.weight"]
+    assert flat(got.tolist()) == pytest.approx(flat(expected(w0.tolist(), a.tolist(), b.tolist(), 1.0)), abs=0.1)
+    assert (tmp / "out/language_model/b.safetensors").is_symlink()           # an untouched shard is still a link
+    assert json.loads((tmp / "out/MERGE.json").read_text())["component"] == "language_model"
+
+
+def build_root_level_base(root):
+    root.mkdir(parents=True)
+    w = torch.arange(OUT_F * IN_F, dtype=torch.float32).reshape(OUT_F, IN_F).to(torch.bfloat16)
+    st.save_file({"model.layers.0.mlp.up_proj.weight": w}, str(root / "a.safetensors"))
+    (root / "model.safetensors.index.json").write_text(json.dumps(
+        {"weight_map": {"model.layers.0.mlp.up_proj.weight": "a.safetensors"}}))
+    (root / "config.json").write_text("{}")
+    return w
+
+
+@pytest.mark.parametrize("spelling", [".", "./", ""])
+def test_a_root_level_component_merges_without_touching_the_base(tmp_path, monkeypatch, spelling):
+    write_through_save_file(monkeypatch)
+    base = tmp_path / "base"
+    w = build_root_level_base(base)
+    st.save_file({"model.layers.0.mlp.up_proj.lora_A.weight": torch.tensor([[1.0, 0.0, 2.0], [0.0, 1.0, 0.0]]),
+                  "model.layers.0.mlp.up_proj.lora_B.weight": torch.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0], [0.5, 0.0]])},
+                 str(tmp_path / "lora.safetensors"))
+    before = tree_hash(base)
+    load_script().main(["--base", str(base), "--lora", str(tmp_path / "lora.safetensors"), "--out", str(tmp_path / "out"),
+                        "--component", spelling, "--prefix", ""])
+    assert tree_hash(base) == before
+    shard = tmp_path / "out/a.safetensors"
+    assert shard.exists() and not shard.is_symlink()
+    assert (tmp_path / "out/config.json").is_symlink()
+    got = st.load_file(str(shard))["model.layers.0.mlp.up_proj.weight"]
+    assert not torch.equal(got, w)
+
+
+@pytest.mark.parametrize("component", ["..", "../base", "/etc", "language_model/../.."])
+def test_a_component_outside_the_base_is_refused(setup, component):
+    tmp, *_ = setup
+    r = merge(tmp, "--component", component)
+    assert r.returncode == 2 and "inside the base" in r.stderr
+    assert not (tmp / "out").exists() or not any((tmp / "out").iterdir())
+
+
+def test_an_index_that_names_a_shard_outside_the_component_is_refused(setup):
+    tmp, base, *_ = setup
+    idx = base / "language_model/model.safetensors.index.json"
+    m = json.loads(idx.read_text())
+    m["weight_map"]["model.layers.0.mlp.up_proj.weight"] = "../config.json"
+    idx.write_text(json.dumps(m))
+    r = merge(tmp)
+    assert r.returncode == 2 and "outside" in r.stderr
+    assert (base / "config.json").read_text() == "{}"
+
+
+def test_write_shard_refuses_a_destination_that_is_a_link(tmp_path):
+    target = tmp_path / "base.safetensors"
+    st.save_file({"x": torch.zeros(2)}, str(target))
+    link = tmp_path / "out.safetensors"
+    os.symlink(target, link)
+    with pytest.raises(SystemExit) as e:
+        load_script().write_shard(link, {"x": torch.ones(2)})
+    assert e.value.code == 2
+    assert st.load_file(str(target))["x"].tolist() == [0.0, 0.0]
