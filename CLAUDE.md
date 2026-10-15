@@ -1131,3 +1131,15 @@ Prompt (operator): "publish the model public and the GH repo public", after "wor
   song when its lyrics are finished) and the page printed "5.18966 s" with no explanation. The page now rounds to one decimal and says why the song ended early
   (5 tests, 2 mutants added after the first mutation run). The published screenshots predate that wording and the running page still has the old code until its next
   restart, so the card and README make no claim about the note; a retake would show it.
+
+## 2026-10-15 (evening, later still): new screenshots, and a bug the browser found
+Prompt (operator): "get the new screenshot". No browser tool was available in the session, so I drove headless Chrome (`/usr/bin/google-chrome`) with the official
+`playwright` package in a scratch venv (`executable_path`, no browser download), against a temporary copy of the page on port 7872 pointed at the server on 20000.
+- Bug found by the first scripted run, missed by 23 tests: after the "More" panel was touched, a blank steps box reached Gradio as 0, and the component's own
+  `minimum=1` failed the request ("Value 0 is less than minimum value 1") before `run_generation` could treat 0 as "server default". Fixed by removing the bounds on the
+  component (the client still refuses steps outside 1 to 100 with a plain message); two new tests (the real app via `gradio_client` with steps 0, and steps 101 and 500),
+  mutation (bounds put back) red. The tests had driven the app through `gradio_client` with None, never with 0.
+- Screenshots: same inputs as the operator's own run (the two-sentence lyric, "acid jazz", seed 57393907). The seed gave 5.2 s again, so the early end repeats for a seed.
+  Page text now reads "The song ended at 5.2 s, before the 20 s asked for: the lyrics were finished." The README and the card say the page explains an early end again.
+- Pushed to GitHub (`2f8c3d5`) and re-uploaded to the Hugging Face companion repo. The page running under tt-disco on 7871 still has the old code, so it has the blank-steps
+  bug until it is restarted from the catalog. The weights upload was at 7.6 GB; `finish_weights.sh` has not run yet.
