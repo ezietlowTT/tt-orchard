@@ -890,3 +890,256 @@ that failed first. Nothing was pushed or run on hardware.
 - The UI's research memo has a lock and keeps at most 32 answers. `arch_match.fetch_config` (only the tests called it) is gone.
 Not done: one connection failure still marks a host unreachable for the rest of the run (by design); two UI requests that miss
 the memo at the same moment both ask (no single-flight); `app.js` was not run in a browser here (no node on this box).
+
+## 2026-10-14: fetcher fixes found in the review of PR 7 (version 0.5.4)
+Prompt (operator): "merge #7. fix the fetcher bugs." Both bugs came in with PR 6 and were reproduced with a fake opener first.
+- A body that fails while being read (timeout, `IncompleteRead`, reset) and an `http.client.HTTPException` such as
+  `BadStatusLine` escaped `Fetcher.get` as raw exceptions, so one transient error dropped a whole collector. All of them are
+  `FetchError` now. A broken body does not mark the host unreachable.
+- One connect timeout marked the host unreachable for the rest of the run. A timeout now marks it on the second one
+  (`TIMEOUTS_TO_GIVE_UP`); a timeout wrapped in a `URLError` counts the same. No route, DNS failure and refusal still mark at once.
+- Five mutations (give up at one, each missing exception type, a read failure that marks the host, no `URLError` unwrap), all red.
+- Not fixed: the UI memo reuses a degraded report for 5 minutes; the research cache never expires on a retry.
+
+## 2026-10-14: UI layout on narrow screens, and which run is selected first (version 0.5.5)
+Prompt (operator, watching the page in Firefox): the page makes you scroll a small column sideways; the running or most
+recent run should be selected first or be the most obvious.
+- Measured first (playwright, scrollable elements at 1440, 1024, 768 and 400 px): the left rail overflowed by 60 px (a state
+  badge with `white-space: nowrap` widened the run list), the nine-stage strip scrolled sideways below about 860 px, and the
+  tabs scrolled at 400 px. Now the rail's column is `minmax(0, 1fr)`, the stages wrap onto more rows, the tabs wrap, and
+  below 900 px the selected run comes before the run list. Only the ledger table still scrolls sideways at 400 px.
+- Run order (`webui.list_runs`): runs in progress (running, paused, or being launched) first, then every other run newest
+  first. The old order put blocked and crashed runs above everything, so a 7-day-old stopped run was selected ahead of the run
+  that had just finished. The state badge still says which runs need a person. The first row carries a `now` or `latest` tag.
+- Mutations: no recency sort and no live-first rule both turn a test red. The first draft of the recency test passed
+  without the sort, because the directory names were already in the right order; the names were changed.
+
+## 2026-10-14: potential next choice, a music model (not run)
+Prompt (operator): "is there music generation model we could try instead?" of `CiroN2022/ascii-art` (an SDXL LoRA; the
+preflight blocks with `nearest-model-missing`, and the LoRA cannot apply to tt-animatediff, which serves SD 1.4).
+- Base found: `MiniMaxAI/MiniMax-Music3` has a Tenstorrent bundle, `jashansinghTT/minimax-music3-blackhole` (`p150`,
+  `tt-dit-server`, 0 downloads, not installed), and tt-metal has `models/demos/minimax_m3`. MusicGen and Stable Audio 3 have no bundle.
+- Most MiniMax-Music3 fine-tunes are LoRA adapters (orchard has no merge step). `SonexaAI/Sonexa-Music-v0.1-Beta` ships full
+  weights (57.4 GB, no license metadata, 213-byte README, 6 downloads) and its weights were not compared with the base.
+- Dry run for Sonexa: blocks on `disk-full` (needs 137 GB, 89 GB free) and `nearest-model-missing` (ranks the bundle above as the
+  stated base; `--base jashansinghTT/minimax-music3-blackhole` installs it). Nothing started.
+- Open: the bundle's README was not read, so whether its server accepts swapped weights is unknown; the preflight warns stage 2
+  expects a v6 thin bundle; the triage template was written for LLM tensors and has not seen this layout. Needs about 50 GB freed first.
+
+## 2026-10-14: RAG-Gate-27B gate and logprobs check did not run: the host kernel compiler changed
+Prompt (operator): "yes, run the gate check and the logprobs check" (to decide whether `ThakiCloud/RAG-Gate-27B` is worth a
+published card; see the review above in this session). Prepared: 200 gate prompts from ChainCheck `musique_test` (70 cell A, 65
+B, 65 D; at most 2,048 tokens; fixed hash order; expected Answer for A and B, Retrieve for D) in
+`~/orchard-runs/thakicloud--rag-gate-27b/gate-check/prompts.jsonl`, and a driver that serves the model with stage 2's `run.sh`,
+model directory and tensor cache, probes `logprobs`, then sends the prompts. Nothing was measured.
+- Three boots failed in 13 s each with `trisc1 build failed ... 'vLut8si' is not a member of 'sfpi'`, a kernel JIT compile
+  error: (1) default HOME and kernel cache, board 0; (2) the supervisor's kernel cache and a run-local HOME, board 0; (3) the same
+  on board 1, the board stage 2 used. So it is not the board or the cache path.
+- Cause found in `/var/log/dpkg.log.1`: `2026-10-13 10:45:43 upgrade sfpi 7.83.0 7.67.0`, a downgrade of the system SFPI compiler
+  after stage 2 had booted this bundle (Oct 13 06:24, on 7.83.0). The bundle's kernel headers use `sfpi::vLut8si`, which 7.67.0
+  does not define. Inferred, not tested: the kernel cache key includes the toolchain, so every kernel recompiles and the compile
+  fails. Not done: reinstalling 7.83.0, because it is a system package that another agent or the operator changed on purpose, and
+  it is the operator's call.
+- Consequences: any host-served boot of the Qwen3.8 bundles on this box fails until SFPI is fixed. The 4-chip stage 4 test runs in
+  a container and brings its own toolchain, so it is not affected. The preflight has no check that the box's SFPI can compile
+  the nearest bundle's kernels (`lab_setup` compares SFPI between a lab and this box only).
+- Side note: after each run, `gozer status` shows the idle board BUSY-UNTRACKED for about a minute, because the release's
+  `tt-smi -r` and `-s` open every device (pids named in the line are those two commands).
+
+## 2026-10-14 (later): RAG-Gate-27B gate and logprobs check ran after the SFPI upgrade
+Prompt (operator): "Upgrade to latest SFPI". Installed `sfpi_7.87.0_x86_64_debian.deb` from the tenstorrent/sfpi release marked
+Latest (sha256 matched the release digest and `sfpi-version`) with `sudo dpkg -i`, over 7.67.0. The bundle's kernels compiled; the server was
+ready in 1,406 s (cold kernel cache). Results are in `~/orchard-runs/thakicloud--rag-gate-27b/gate-check/RESULTS.md`:
+- Gate: 186 of 200 (0.930, interval [0.886, 0.958]) on ChainCheck items; over-refusal 0.074, unsupported answers 0.062; the card's own
+  numbers on another set are .938, .071 and .055. Median 2.5 s per request with 4 in flight.
+- Logprobs: `/v1/completions` `logprobs` works and returns the top 5 first-token logprobs, so the card's "threshold P(Answer)" use is possible
+  on this server (drafter off, sampling on the host). `prompt_logprobs` is refused. The stage 2 template's comment says the server
+  rejects logprobs; that did not hold here. Not tested with the drafter on.
+- Not done: CPU agreement, 1-request latency, 4 chips. SFPI 7.87.0 is newer than the 7.83.0 the earlier runs used; this one run compiled with it.
+
+## 2026-10-14 (later): CPU agreement, and a harness bug in stage 7's weight check
+Prompt (operator): "cpu agreement -> v6 package -> boot check -> publish public card -> music model".
+- CPU agreement for RAG-Gate-27B: 25 of 25 labels equal between the chips and the CPU model (every 8th of the 200 prompts); see
+  `gate-check/RESULTS.md` in the run directory.
+- Bug found by running stage 7 by hand: `served_weights_problems` could not trace the served weights on this machine, because the HF
+  cache here is a shared blob store (`models--X/blobs/<hash>` links to `hub/blobs/<2 hex>/<hash>`), and the real path of a weight file
+  names no repo. It said "links into no Hugging Face snapshot". `_weight_origin` now looks the file up in every `models--*`
+  snapshot of the same hub, and reads a blob that two repos hold as the repo stage 0 names. 5 tests; mutations (no shared branch,
+  no revision filter, no preference for stage 0's repo) turned them red; the last one first survived and got its own test.
+  Clef's earlier stage 7 passed because its cache used the older layout.
+
+## 2026-10-14 (later still): `episod/rag-gate-27b-p300` is public
+Prompt (operator): "cpu agreement -> v6 package -> boot check -> publish public card -> music model". Stage 7 run by hand on the finished
+RAG-Gate-27B run (the ledger still records it as skipped): `stage_all` (needed the shared-blob-store fix above), boot check under
+`gozer run --chips 2 --exact 2` with the supervisor's environment (31 of 32 tokens, top-1 0.96875, ready in 1,546 s, fresh install, empty
+cache), `finish`, `gate_package` ok. Only the 2-chip profile was staged: the 1-chip profile was skipped because stage 4 had no passing
+1-chip configuration, and no 4-chip v6 bundle is installed.
+- The generated card was rewritten for a gate: intended use and a curl example with `logprobs`, five measured rows (gate accuracy
+  0.930, over-refusal 0.074, unsupported answers 0.062, 25 of 25 labels equal to the CPU's, median 2.5 s per request with 4 in flight),
+  a section on what was and was not measured, and a section saying the same author's 4B, 8B and 9B models score at least as well.
+  The evidence files (`evidence/gate-check/`) are redacted copies; the bundle's namespace in `RESULTS.md` became `<TT_MODEL_MODELS>`.
+  `gate_package` passed after the rewrite (the first try failed on that namespace, which the scrub refuses).
+- `hf upload --repo-type model --private`, then `tt-model publish episod/rag-gate-27b-p300` (public and listed in the community catalog),
+  on the operator's explicit instruction. Delist with `tt-model unpublish`. Not tested: `tt-model pull` and a boot from the Hub.
+
+## 2026-10-14 (later still): the Sonexa music run stopped at the base step; the only MiniMax-Music3 bundle is a container package
+Prompt (operator): "ok go ahead and remove the caches and then go on." Deleted (operator-approved, all regenerable): the RAG-Gate-27B
+tensor caches (`cache/thakicloud--rag-gate-27b`, 116 GB) and the four tensor caches of Clef's abandoned stage 2 attempts
+(`stages/2.partial-2` and `2.partial-3`, 127 GB). 22 GB free became 259 GB. Kept: Clef's stage 2 cache, its stage 7 install, the shared
+kernel cache. Machine config (uncommitted): the coder port moved from 8001 to 8011 (another agent's `tt-local-generator` prompt server holds
+8001), and `ollama serve` with `OLLAMA_MODELS=/mnt/bonus/models/ollama` was started for the CPU stand-in. The stale lease on board 0 that
+another agent's `animatediff-iguazu` left cleared on its own; nothing of theirs was touched.
+- `tt-orchard bringup SonexaAI/Sonexa-Music-v0.1-Beta --base jashansinghTT/minimax-music3-blackhole` ran the preflight clean, then
+  `tt-model pull` installed the base as a container package (4.1 GB image, profile p150, a `tt-dit-server`), and the command refused:
+  "was pulled but is not among the installed bundles tt-orchard looks at". No run directory was created and no hardware was touched.
+- Cause: orchard lists v6 thin bundles (a manifest that names the weights repo). Stages 2 and 4 swap new weights into such a bundle. A
+  container package has no such manifest, so there is nothing to swap into. The refusal is the designed behaviour, and it names the
+  problem. The preflight already warns about container bases for a model found by research; it does not say, before the pull, that a
+  `--base` pointing at a published container bundle cannot be used.
+- Not done: any bring-up of a non-LLM model. Options: pick a model whose base has a v6 thin bundle; add a container-package path to
+  stage 2 (stage 4 already runs a container for its 4-chip test); or accept the blocked outcome as the documented result.
+
+## 2026-10-14 (later still): `SonexaAI/Sonexa-Music-v0.1-Beta` is a copy of the base, not a fine-tune
+Prompt (operator): "continue with #1. our goal here is to make music happen from a specialized model." Before building the audio check I
+read the music container (`tt-model/minimax-music3`, from the pulled manifest) and compared the two Hub repos by file hash.
+- The server reads `MUSIC3_SNAPSHOT`, or a directory in `HF_MODEL`, before the Hub (`config.resolve_snapshot`), so swapped weights can be
+  injected. The base ignores `flowmatching_vae.pth`, `dav.pth` and `qwen_7B/*`, so a model directory needs those from somewhere else.
+- Hub tree comparison (LFS sha256, or git oid for small files): both repos have the same 88 paths. 87 files are identical, including every
+  safetensors shard and the LICENSE. Only `README.md` differs (11.7 KB in the base, 213 bytes in Sonexa). Sonexa is a re-upload of MiniMax-Music3.
+- Consequence: a bring-up of Sonexa would measure the base. Nothing was started, downloaded or run on hardware, and no audio check was built.
+
+## 2026-10-15: the MiniMax-Music3 container hangs on this box when it loads a cached tensor over about 32 MiB
+Prompt (operator): "continue on" with option 3 (serve the base once for a clip, search for a real fine-tune). Done by hand, outside
+the supervisor, with `~/orchard-runs/music/run_clip.sh` under `gozer run`. Nine boot attempts; none reached a healthy server.
+- Cause found (attempt 7 and 9, then a small repro): the thread that builds the layer-0 KV cache spins in `ttnn.as_tensor` at
+  `core.py:817`, `load_tensor_flatbuffer(cache_file_name, device=...)`. It runs at 100% system time, about 2.1 million page faults a
+  second, on a `rw-p` mapping of the file; gdb and `py-spy` (blocking mode) cannot stop it, and `docker stop` needs its SIGKILL
+  step. Repro (`kv_probe.py`, one chip, mesh 1x1): `as_tensor` of a zero tensor with a `cache_file_name` dumps in 0.1 s, and the
+  load back hangs at (2,8,12288,128) bf16 TILE (50 MB) and (2,8,16384,128) (67 MB). It loads in 0.01 s at 6144 and 8192 (33.5 MB =
+  2^25 bytes) and below. The same file written by an earlier boot also hangs (attempt 2 stalled loading the cached 134 MB embedding).
+  The device and a plain `from_torch` of the same shape are fine (0.04 s). Serving the weights from tmpfs did not help. Host: Linux
+  7.0.0-38, KMD 2.11.0, firmware 19.16.0, image tt-metal `v0.79.0-dev20260907`. Not known: whether this is the image, the kernel
+  or both; other agents' LLM containers load large cached tensors here without trouble, and I did not find out why this one differs.
+- Mistakes of mine, each cost a boot: (1) I started `tt-model serve` with no timeout, so a hung container held a lease for 8 hours;
+  (2) `tt-model serve` pins `/dev/tenstorrent/0`, and gozer granted board 1, so the container opened a chip outside the lease
+  (board 0 was free; no harm seen). The script now maps each leased chip to its device node; (3) I moved the tensor cache aside, and
+  docker created the missing mount source as root, so the next boot failed with `Permission denied` and then sat idle until the stall
+  check; (4) a launch while the chips still showed BUSY-UNTRACKED was queued and exited, and I read that as running for 15 minutes;
+  (5) my cleanup removed the container before saving its log.
+- For orchard (not built): a supervised hardware test has `deadline_s` (2,400 s stage 2, 3,600 s stage 4), so this would have ended
+  in under an hour with `timed_out`. It has no stall detector, and 40 to 60 minutes is long for a log that stopped. A stall rule
+  needs the longest silent stretch in healthy cold boots, which I have not measured.
+- Findings about the models: `SonexaAI/Sonexa-Music-v0.1-Beta` is a copy of the base (see above). The real MiniMax-Music3 fine-tunes
+  on the Hub are LoRA adapters (SimpleTuner `pytorch_lora_weights.safetensors`). The best one found is
+  `terminusresearch/minimax-music3-lm-lora-fiona-crapple` (Apache-2.0, rank 64, alpha 64, language model only, trigger word
+  `fiona crapple`; `regularised/checkpoint-750` is the author's pick). The reggae LoRA by bghira describes itself as a failed experiment.
+  `orchard/skills/lora-merge-templates/merge_lora.py` merges an adapter into one component's shards (9 tests, 8 mutations red; the 9th
+  was an equivalent mutant and the code was simplified). It has not been run on the real adapter.
+- Not done: a clip from the base, the merge, a clip from the merged model, the audio check for stage 2.
+
+## 2026-10-15 (later): MiniMax-Music3 base and a LoRA-merged copy both made music on one chip
+With a local workaround for the cache-load hang (a patched `ttnn/operations/core.py` mounted read-only over the image's file, so
+`as_tensor` never loads the flatbuffer cache), the container booted healthy in 76 to 165 s. Results in `~/orchard-runs/music/RESULTS.md`:
+- Base clip, 20 s stereo 32 kHz, seed 42: peak 0.98, 84.5% of 100 ms windows above silence; 65 s of compute (denoise 23.9 s, depth
+  decoder 19.1 s, language model 18.0 s, vocoder 14.6 s, VAE decode 3.5 s).
+- `merge_lora.py` merged `fiona-crapple` `regularised/checkpoint-750` (252 matrices, largest relative change 4.8%) in 27 s. The container
+  served the merged directory (`HF_MODEL` = the directory, mounted with the blob directories its links point to) and made clips.
+  A repeated request gave a bit-identical file, so a seed is deterministic.
+- Not shown: that the LoRA's style transferred. One seed per cell, no listening test; a tiny weight change alone changes an
+  autoregressive sample. Nobody has listened to the clips (`~/orchard-runs/music/*.flac`).
+- Still outside orchard: all of this ran by hand with `run_clip.sh`. No stage 2 audio check exists, and `bringup` still refuses a
+  container-package base. The workaround patches vendor code in a mount; it is a local experiment, not something to ship.
+- Leftover on disk: the 4.1 GB image, the base weights in the HF cache (27 GB), `fiona-merged` (27 GB), `tensors.*`/`weights.*` scratch
+  caches in `~/.cache/tt-model/minimax-music3/`. Nothing published or uploaded.
+
+## 2026-10-15 (later still): multi-seed clips, and the audio bring-up spec
+Prompt (operator): "proceed! this is progress. I have confirmed these clips have MUSIC!", then option 1 (a real orchard path for audio).
+- Multi-seed set (`~/orchard-runs/music/set1/`, `features.json` there): 5 seeds x 2 captions x 2 models, 20 clips, 20 s each, same
+  seeds and captions for base and merged. Coarse spectral features (centroid, share of spectrum above 4 kHz, onsets per second), merged
+  minus base per seed. With the trigger caption the share above 4 kHz is higher in 5 of 5 seeds (mean +0.138, sd 0.054) and the centroid
+  in 4 of 5; with the synth-pop caption there is no consistent shift (high share 2 up, 3 down; onsets up in 5 of 5 by a mean 0.35).
+  So the merge changes the sound when the trigger is present and little when it is absent. That fits an adapter that acts on its
+  trigger; it does not show cafe-jazz style, and n = 5 with crude features cannot. Listening is still the test.
+- Clip checks measured on 24 clips (these set the bars in the spec): duration 20.02 s for 20 s asked, 32 kHz stereo, at most 0.019%
+  of samples at full scale, at least 59% of 100 ms windows above -40 dBFS.
+- Brainstorming for the audio path: classified architectural; understanding note and design agreed in chat (facts `form`, `serving`,
+  `modality` on the weights-only path, no new class; stage 1 materializes the merge; stage 2 boots base and new model in a container and
+  generates clips; the harness probes for the cache-load hang and selects the workaround itself, the operator's ruling). The written spec is
+  `docs/superpowers/specs/2026-10-15-audio-bringup-design.md`; it waits for the operator's review before a plan is written.
+- Slips while running the set (all fixed in `run_clip.sh`): a slash in the clip label broke the log file names, so the first launch
+  never started a container and my waiter did not notice for 30 minutes; the device node in `tt-model serve --print` depends on which
+  chips are free, so a guard that expected node 0 failed once; two of my waiters exited on stale text in old logs.
+
+## 2026-10-15 (later): PR 8 review (version 0.5.6)
+Prompt (operator): "some comments on PR 8". Copilot's review left two findings on `fetcher-fixes`; each was checked against the code.
+- `merge_lora.py`, component paths. A `--component` spelled `./language_model`, `language_model/` or `.` did not match the normalized
+  paths `link_tree` compares, so the adapted shard was symlinked to the base first and then written. With safetensors 0.8.0 `save_file`
+  replaces a link by rename, so I could not make the base change on this box (checked with real files). The mismatch was still real: a
+  `save_file` that writes through a link overwrites the base weights, and the tests now use such a shim, which turns 9 of the new cases
+  red on the old code. Fixed: the component is normalized (`.` for root-level weights, absolute paths and `..` refused), the
+  skip set is normalized, a weight index that names a shard outside the component is refused, and `write_shard` refuses a destination that
+  is a link. 24 tests; 8 mutations red, 1 equivalent (a second normalization in `link_tree`, removed).
+- The audio spec relied on the template's `finally` to stop containers. Correct: on a timeout or an abort `orchard.agent._kill_session`
+  sends SIGKILL to the process group, which skips cleanup, killing the Docker client does not stop its container, and `_hardware_phase`
+  (the single-test path stage 2 would use) has no sweep; only the listed-tests path calls `_sweep`. The spec now requires labelled
+  containers and a supervisor sweep after every stage 2 test, at resume, and before the coder is restored, with a block when one survives.
+  This is design only; no supervisor code changed.
+
+## 2026-10-15 (evening): the merged model served again, a Gradio demo, a tt-disco entry, and a card (repo `~/code/tt-minimax-music-blackhole`)
+Prompt (operator): "load the model back up for me to utilize. add a gradio app and a tt-disco entry. make a model card according to
+standards" (tt-model-manager's latest), then "does the gradio travel with the model repo itself" and "companion repo it is. episod for the
+HF namespace". Built outside tt-orchard, in a new local git repo with no remote (planned `tsingletaryTT/tt-minimax-music-blackhole` on GitHub and
+`episod/minimax-music3-fiona-crapple-blackhole` plus the weights repo `episod/minimax-music3-fiona-crapple` on Hugging Face). Nothing
+was created remotely, pushed or uploaded; each needs the operator's explicit go-ahead.
+- Serving: the merged model has run on port 20000 (hand-run under `claude:music-serve` on board 0) since about 08:25 PDT; stop it by
+  killing the `run_clip.sh` pid in `~/orchard-runs/music/run-serve.log`. A second copy runs from the tt-disco entry on board 1 (server on 20001, page on 7871).
+- Batch: 10 requests at once. The server accepts 9 jobs (one running, eight waiting) and answers the tenth with HTTP 429; all 10 finished
+  in 641 s. One clip ended early (16.6 s of 20 s, `ended: true`), so the audio spec's duration check now allows that case.
+- Repo contents: `demo/` (Gradio page and a stdlib client for the job API), `serve/serve_music.py` (launcher), `serve/kv_probe.py`, `serve/merge_lora.py`
+  (a copy of orchard's, with its tests), `.disco/app.yaml`, `package/tt-model.yaml` (an unbuilt draft whose `card:` block is the card source),
+  `package/render_preview.py` and `package/build_card.py`, `hf/README.md`, `weights/`. 111 tests, none needs a chip. Mutations: client 10 of 10 red, launcher 24 of 24
+  after two added tests, app 14 of 14 after three added tests, card builder 5 of 6 (the title replacement had no test; added).
+- Found by running it for real under tt-disco: (1) a systemd user unit has no `tt-model` on PATH, and the launcher died with a raw
+  traceback (now a PATH fix and a clear error); (2) two containers on different boards blocked each other at "Waiting for lock
+  'CHIP_IN_USE_0_PCIe'". The lock is a file in `/dev/shm`, which `--ipc host` shares, and its name uses the chip's number inside the
+  container. The launcher had renumbered every chip to 0. `tt-model` and orchard's stage 4 template keep each node under its own number, and the
+  launcher now does too (both containers then ran at once). The audio spec says so. (3) The probe on this host does hang, so `--workaround auto`
+  selected the patched `core.py` on its own; a killed probe did not block the next boot (the earlier worry); the lock was the cause.
+- The same seed, lyrics and caption gave a bit-identical file on the board-0 server and the board-1 server (one pair), and on repeat on one server.
+- The card: the generator (`render_model_card`) accepts the `card:` block and renders the standard layout. A companion repository is not a package, so
+  `build_card.py` changes the tags (no `tt-model-catalog` or `tt-model-container`), title, quickstart and provenance and leaves every other section as
+  generated. Numbers are the server's own timings for 20 requests (median 65.6 s of compute for 20 s of audio; 3.3 s per second). Performance says no quality
+  evaluation has been run; that is a fact, and the card carries no claim about how the clips sound.
+- PR 8 (the review comments the operator mentioned) is handled in the entry above.
+- Not done: a GitHub repo, any Hugging Face upload, the full container package (needs the image build and the tt-metal tree the base was built from),
+  a quality evaluation, a browser run of the Gradio page (it was driven through `gradio_client` only).
+
+## 2026-10-15 (evening, later): published on the operator's explicit instruction
+Prompt (operator): "publish the model public and the GH repo public", after "works great!" and "those screenshots should go in the readme and model card".
+- GitHub: https://github.com/tsingletaryTT/tt-minimax-music-blackhole, public, `main`, topics tenstorrent, blackhole, music-generation, gradio
+  (`gh repo create ... --public --source . --push`).
+- Hugging Face, public: `episod/minimax-music3-fiona-crapple-blackhole` (the companion: a `git archive` of the repo with the generated card as `README.md`,
+  `hf/` dropped; 27 files, docs/ screenshots included).
+- Hugging Face weights `episod/minimax-music3-fiona-crapple`: `hf upload` of the merged model directory (excluding its README and MERGE.json) is
+  running at about 5 MB/s (Xet deduplicates the unchanged base files; the new data is mostly the 17 GB of rewritten language-model shards). The repo was
+  made private while it fills, and `~/orchard-runs/music/finish_weights.sh` waits for the upload, adds the card and merge record, checks the four rewritten
+  shards' sha256 against the local files and every other large file against the base repo, and only then makes the repo public. If it fails it leaves the repo
+  private (`finish-weights.log`). Nothing was added to the tt-model catalog (no tt-model tags; it is a companion, not a package).
+- The license (MiniMax-Music3 Community License) allows redistribution with the notice kept (the weights repo carries the LICENSE file) and asks commercial products
+  to display "MiniMax-Music3" (the page title does). The screenshots were cropped to remove the browser's tab bar and address bar.
+- Found from the operator's screenshots, the first browser run of the page: a 20 s request with two short sentences of lyrics gave 5.2 s of audio (the server ends a
+  song when its lyrics are finished) and the page printed "5.18966 s" with no explanation. The page now rounds to one decimal and says why the song ended early
+  (5 tests, 2 mutants added after the first mutation run). The published screenshots predate that wording and the running page still has the old code until its next
+  restart, so the card and README make no claim about the note; a retake would show it.
+
+## 2026-10-15 (evening, later still): new screenshots, and a bug the browser found
+Prompt (operator): "get the new screenshot". No browser tool was available in the session, so I drove headless Chrome (`/usr/bin/google-chrome`) with the official
+`playwright` package in a scratch venv (`executable_path`, no browser download), against a temporary copy of the page on port 7872 pointed at the server on 20000.
+- Bug found by the first scripted run, missed by 23 tests: after the "More" panel was touched, a blank steps box reached Gradio as 0, and the component's own
+  `minimum=1` failed the request ("Value 0 is less than minimum value 1") before `run_generation` could treat 0 as "server default". Fixed by removing the bounds on the
+  component (the client still refuses steps outside 1 to 100 with a plain message); two new tests (the real app via `gradio_client` with steps 0, and steps 101 and 500),
+  mutation (bounds put back) red. The tests had driven the app through `gradio_client` with None, never with 0.
+- Screenshots: same inputs as the operator's own run (the two-sentence lyric, "acid jazz", seed 57393907). The seed gave 5.2 s again, so the early end repeats for a seed.
+  Page text now reads "The song ended at 5.2 s, before the 20 s asked for: the lyrics were finished." The README and the card say the page explains an early end again.
+- Pushed to GitHub (`2f8c3d5`) and re-uploaded to the Hugging Face companion repo. The page running under tt-disco on 7871 still has the old code, so it has the blank-steps
+  bug until it is restarted from the catalog. The weights upload was at 7.6 GB; `finish_weights.sh` has not run yet.

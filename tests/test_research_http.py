@@ -4,6 +4,7 @@
 
 Every guard here is a rule from the design: no token, fixed hosts, a size cap, byte ranges answered with
 206, a cache a resume reads, and no network at all when offline."""
+import http.client
 import urllib.error
 import urllib.request
 from email.message import Message
@@ -216,6 +217,65 @@ def test_a_network_error_is_a_reason(tmp_path):
     f = fetcher(tmp_path, {HF: OSError("timed out")})
     with pytest.raises(FetchError, match="timed out"):
         f.get(HF)
+
+
+class BrokenBody(Resp):
+    """An answer whose body fails part way: the connection opened, then the read raised."""
+    def __init__(self, exc):
+        super().__init__()
+        self.exc = exc
+
+    def read(self, n=-1):
+        raise self.exc
+
+
+@pytest.mark.parametrize("exc", [TimeoutError("read timed out"), http.client.IncompleteRead(b"ab"),
+                                 ConnectionResetError("reset by peer")])
+def test_a_body_that_fails_while_reading_is_a_fetch_error(tmp_path, exc):
+    f = fetcher(tmp_path, {HF: BrokenBody(exc)})
+    with pytest.raises(FetchError):
+        f.get(HF)
+
+
+def test_a_malformed_status_line_is_a_fetch_error(tmp_path):
+    f = fetcher(tmp_path, {HF: http.client.BadStatusLine("x")})
+    with pytest.raises(FetchError):
+        f.get(HF)
+
+
+def test_a_failed_body_read_does_not_mark_the_host_unreachable(tmp_path):
+    other = "https://huggingface.co/api/models/c/d"
+    f = fetcher(tmp_path, {HF: BrokenBody(TimeoutError("read timed out")), other: Resp(b"{}")})
+    with pytest.raises(FetchError):
+        f.get(HF)
+    assert f.get(other) == b"{}"
+
+
+def test_one_timeout_does_not_mark_the_host_unreachable(tmp_path):
+    other = "https://huggingface.co/api/models/c/d"
+    f = fetcher(tmp_path, {HF: TimeoutError("timed out"), other: Resp(b"{}")})
+    with pytest.raises(FetchError):
+        f.get(HF)
+    assert f.get(other) == b"{}"
+
+
+def test_repeated_timeouts_mark_the_host_unreachable(tmp_path):
+    urls = [f"https://huggingface.co/api/models/t/{i}" for i in range(3)]
+    f = fetcher(tmp_path, {u: TimeoutError("timed out") for u in urls})
+    for u in urls[:2]:
+        with pytest.raises(FetchError, match="timed out"):
+            f.get(u)
+    with pytest.raises(FetchError, match="network unreachable"):
+        f.get(urls[2])
+    assert len(f.opener.requests) == 2
+
+
+def test_a_timeout_wrapped_in_a_url_error_counts_as_a_timeout(tmp_path):
+    other = "https://huggingface.co/api/models/c/d"
+    f = fetcher(tmp_path, {HF: urllib.error.URLError(TimeoutError("timed out")), other: Resp(b"{}")})
+    with pytest.raises(FetchError):
+        f.get(HF)
+    assert f.get(other) == b"{}"
 
 
 # ---- types ---------------------------------------------------------------------------------------

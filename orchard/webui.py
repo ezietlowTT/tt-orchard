@@ -115,8 +115,7 @@ LISTED = ("BLOCKED.md", "blocked.json", "coder.log", "stages/*/*.json", "stages/
           "stages/4/configs/*/swap_config.json", "stages/4/configs/*/evidence/*", "evidence/*",
           "stages/8/bundle/*", "research/base-candidates.*")
 # Runs that need a person first, then the ones still going, then the finished ones.
-ATTENTION = {"blocked": 0, "stopped-or-crashed": 0, "unreadable": 0, "paused": 1, "running": 2,
-             "not-started": 3, "ready-for-operator-review": 4, "aborted": 5}
+LIVE_STATES = ("running", "paused")      # listed before everything else; the rest follow newest first
 RETRYABLE = ("blocked", "stopped-or-crashed")
 # tt-toplike's own views (`--mode`), plus its kiosk rotation (`--rotate`). `hivemind`, its opt-in sniffer of other
 # processes' activity, is left out: an open page should not start it.
@@ -567,7 +566,9 @@ class WebApp:
                              "last_ts": f["last_events"][-1]["ts"] if f["last_events"] else None,
                              "launching": self._launch_alive(run.name) is not None, "error": None})
         rows.sort(key=lambda r: r["last_ts"] or "", reverse=True)
-        rows.sort(key=lambda r: ATTENTION.get(r["state"], 9))
+        # The page opens the first row. That is the run in progress, or failing that the most recent attempt;
+        # a run that needs a person says so with its state badge, not by sitting above a newer run.
+        rows.sort(key=lambda r: 0 if r["state"] in LIVE_STATES or r.get("launching") else 1)
         return rows
 
     def run_detail(self, name: str) -> dict:

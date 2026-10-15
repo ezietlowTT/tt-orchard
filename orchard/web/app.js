@@ -87,7 +87,7 @@ function stateBadge(state) {
   if (!st) return h("span", { class: "badge", dataset: { tone: state === "unreadable" ? "alarm" : "dim" } },
     state === "unreadable" ? "⚠ unreadable" : state);
   return h("span", { class: "badge", dataset: { tone: TONE[st.role] || "dim" }, title: `${st.word} (${state})` },
-    h("span", { "aria-hidden": "true" }, st.emoji), st.word, h("span", { class: "real" }, `· ${state}`));
+    h("span", { "aria-hidden": "true", class: "emoji" }, st.emoji), h("span", { class: "word" }, st.word), h("span", { class: "real" }, `· ${state}`));
 }
 
 function stageText(stage) {
@@ -271,7 +271,9 @@ function renderRuns() {
       onclick: () => select(r.name),
     }, stateBadge(r.state),
       h("span", { class: "model" }, r.model || r.name,
-        (r.mode || "").startsWith("lab") ? h("span", { class: "mode-tag", title: `hardware tests ran on ${r.mode.slice(5, -1)}` }, "lab") : null),
+        (r.mode || "").startsWith("lab") ? h("span", { class: "mode-tag", title: `hardware tests ran on ${r.mode.slice(5, -1)}` }, "lab") : null,
+        r === S.runs[0] ? h("span", { class: "mode-tag", title: "the page opens this run first: the one in progress, or the most recent" },
+          r.state === "running" || r.state === "paused" || r.launching ? "now" : "latest") : null),
       h("span", { class: "meta mono" }, r.name),
       h("span", { class: "meta" },
         h("span", {}, r.stage && r.stage.current !== null ? `stage ${r.stage.current}` : ""),
