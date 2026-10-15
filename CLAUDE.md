@@ -1084,3 +1084,32 @@ Prompt (operator): "some comments on PR 8". Copilot's review left two findings o
   (the single-test path stage 2 would use) has no sweep; only the listed-tests path calls `_sweep`. The spec now requires labelled
   containers and a supervisor sweep after every stage 2 test, at resume, and before the coder is restored, with a block when one survives.
   This is design only; no supervisor code changed.
+
+## 2026-10-15 (evening): the merged model served again, a Gradio demo, a tt-disco entry, and a card (repo `~/code/tt-minimax-music-blackhole`)
+Prompt (operator): "load the model back up for me to utilize. add a gradio app and a tt-disco entry. make a model card according to
+standards" (tt-model-manager's latest), then "does the gradio travel with the model repo itself" and "companion repo it is. episod for the
+HF namespace". Built outside tt-orchard, in a new local git repo with no remote (planned `tsingletaryTT/tt-minimax-music-blackhole` on GitHub and
+`episod/minimax-music3-fiona-crapple-blackhole` plus the weights repo `episod/minimax-music3-fiona-crapple` on Hugging Face). Nothing
+was created remotely, pushed or uploaded; each needs the operator's explicit go-ahead.
+- Serving: the merged model has run on port 20000 (hand-run under `claude:music-serve` on board 0) since about 08:25 PDT; stop it by
+  killing the `run_clip.sh` pid in `~/orchard-runs/music/run-serve.log`. A second copy runs from the tt-disco entry on board 1 (server on 20001, page on 7871).
+- Batch: 10 requests at once. The server accepts 9 jobs (one running, eight waiting) and answers the tenth with HTTP 429; all 10 finished
+  in 641 s. One clip ended early (16.6 s of 20 s, `ended: true`), so the audio spec's duration check now allows that case.
+- Repo contents: `demo/` (Gradio page and a stdlib client for the job API), `serve/serve_music.py` (launcher), `serve/kv_probe.py`, `serve/merge_lora.py`
+  (a copy of orchard's, with its tests), `.disco/app.yaml`, `package/tt-model.yaml` (an unbuilt draft whose `card:` block is the card source),
+  `package/render_preview.py` and `package/build_card.py`, `hf/README.md`, `weights/`. 111 tests, none needs a chip. Mutations: client 10 of 10 red, launcher 24 of 24
+  after two added tests, app 14 of 14 after three added tests, card builder 5 of 6 (the title replacement had no test; added).
+- Found by running it for real under tt-disco: (1) a systemd user unit has no `tt-model` on PATH, and the launcher died with a raw
+  traceback (now a PATH fix and a clear error); (2) two containers on different boards blocked each other at "Waiting for lock
+  'CHIP_IN_USE_0_PCIe'". The lock is a file in `/dev/shm`, which `--ipc host` shares, and its name uses the chip's number inside the
+  container. The launcher had renumbered every chip to 0. `tt-model` and orchard's stage 4 template keep each node under its own number, and the
+  launcher now does too (both containers then ran at once). The audio spec says so. (3) The probe on this host does hang, so `--workaround auto`
+  selected the patched `core.py` on its own; a killed probe did not block the next boot (the earlier worry); the lock was the cause.
+- The same seed, lyrics and caption gave a bit-identical file on the board-0 server and the board-1 server (one pair), and on repeat on one server.
+- The card: the generator (`render_model_card`) accepts the `card:` block and renders the standard layout. A companion repository is not a package, so
+  `build_card.py` changes the tags (no `tt-model-catalog` or `tt-model-container`), title, quickstart and provenance and leaves every other section as
+  generated. Numbers are the server's own timings for 20 requests (median 65.6 s of compute for 20 s of audio; 3.3 s per second). Performance says no quality
+  evaluation has been run; that is a fact, and the card carries no claim about how the clips sound.
+- PR 8 (the review comments the operator mentioned) is handled in the entry above.
+- Not done: a GitHub repo, any Hugging Face upload, the full container package (needs the image build and the tt-metal tree the base was built from),
+  a quality evaluation, a browser run of the Gradio page (it was driven through `gradio_client` only).
