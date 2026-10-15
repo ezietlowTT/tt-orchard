@@ -1036,3 +1036,18 @@ the supervisor, with `~/orchard-runs/music/run_clip.sh` under `gozer run`. Nine 
   `orchard/skills/lora-merge-templates/merge_lora.py` merges an adapter into one component's shards (9 tests, 8 mutations red; the 9th
   was an equivalent mutant and the code was simplified). It has not been run on the real adapter.
 - Not done: a clip from the base, the merge, a clip from the merged model, the audio check for stage 2.
+
+## 2026-10-15 (later): MiniMax-Music3 base and a LoRA-merged copy both made music on one chip
+With a local workaround for the cache-load hang (a patched `ttnn/operations/core.py` mounted read-only over the image's file, so
+`as_tensor` never loads the flatbuffer cache), the container booted healthy in 76 to 165 s. Results in `~/orchard-runs/music/RESULTS.md`:
+- Base clip, 20 s stereo 32 kHz, seed 42: peak 0.98, 84.5% of 100 ms windows above silence; 65 s of compute (denoise 23.9 s, depth
+  decoder 19.1 s, language model 18.0 s, vocoder 14.6 s, VAE decode 3.5 s).
+- `merge_lora.py` merged `fiona-crapple` `regularised/checkpoint-750` (252 matrices, largest relative change 4.8%) in 27 s. The container
+  served the merged directory (`HF_MODEL` = the directory, mounted with the blob directories its links point to) and made clips.
+  A repeated request gave a bit-identical file, so a seed is deterministic.
+- Not shown: that the LoRA's style transferred. One seed per cell, no listening test; a tiny weight change alone changes an
+  autoregressive sample. Nobody has listened to the clips (`~/orchard-runs/music/*.flac`).
+- Still outside orchard: all of this ran by hand with `run_clip.sh`. No stage 2 audio check exists, and `bringup` still refuses a
+  container-package base. The workaround patches vendor code in a mount; it is a local experiment, not something to ship.
+- Leftover on disk: the 4.1 GB image, the base weights in the HF cache (27 GB), `fiona-merged` (27 GB), `tensors.*`/`weights.*` scratch
+  caches in `~/.cache/tt-model/minimax-music3/`. Nothing published or uploaded.
