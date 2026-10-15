@@ -38,3 +38,12 @@ Written 2026-10-14 during the Sonexa music run. The first part comes from readin
 - The speed number is real-time factor (seconds of audio per second of compute), not tokens per second.
 - The minimum check is boot, request a clip, and get a non-silent FLAC of the expected length. A seeded latent comparison is the
   next step up.
+
+## Result of the hand run (2026-10-15)
+
+Measured results and the limits of the comparison are in `~/orchard-runs/music/RESULTS.md` (not committed: it names clips that live in the
+run directory). Short version: the base and a LoRA-merged copy of MiniMax-Music3 each booted and made a 20 s clip on one chip, at
+about 3.2 s of compute per second of audio, once a host problem was worked around (the image's tensor-cache load hangs above
+about 32 MiB on this box). Two numbers from the clips bear on the design section above: the language model took 36 ms per frame and
+the depth decoder 38 ms per frame, almost equal, so point 4 (fewer sequential codebook steps) matters as much as faster LLM decode;
+and the vocoder took 14.6 s of 65 s, which makes it the third-largest stage and supports point 5. These are one run each.
