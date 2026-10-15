@@ -85,9 +85,12 @@ differs from the adapter's module count. An agent writes the config and runs the
 ## 6. Stage 2: boot and generate
 
 Template `serve_and_generate.py` (container), run by the supervisor's single-test hardware phase under its lease. It:
-- maps each leased chip to its device node (`/sys/bus/pci/devices/<bdf>/tenstorrent/`) and passes only those nodes, as devices 0, 1
-  inside the container. `tt-model serve --print` pins whichever node it likes, so the template rewrites it and requires exactly one
-  `--device` argument (lesson from 2026-10-15);
+- maps each leased chip to its device node (`/sys/bus/pci/devices/<bdf>/tenstorrent/`) and passes only those nodes, each under its
+  own number (`/dev/tenstorrent/2:/dev/tenstorrent/2`). Renumbering a chip to 0 is wrong: UMD's `CHIP_IN_USE_<n>_PCIe` lock is a file in
+  `/dev/shm`, which `--ipc host` shares between containers, so two containers on different boards that both call their chip 0 wait
+  on one lock (measured 2026-10-15: a second container blocked at "Waiting for lock 'CHIP_IN_USE_0_PCIe'"; with the nodes kept under their
+  own numbers both ran at once). `tt-model serve --print` pins whichever node it likes, so the template rewrites it and requires exactly one
+  `--device` argument;
 - creates the cache directories before `docker run` (a missing mount source is created by Docker as root);
 - mounts the model directory, and every directory its links point into, read-only at their own paths, and sets `HF_MODEL`;
 - has a boot deadline and a stall rule (no new container log line for a set time) and saves the container log before it removes
