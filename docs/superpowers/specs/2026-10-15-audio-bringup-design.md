@@ -128,7 +128,8 @@ the job's stage times and the real-time factor. The base boots first.
 
 Checks (function only; the bars are choices, set from 24 real clips measured on 2026-10-15: duration 20.02 s for 20 s asked, 32 kHz
 stereo, at most 0.019% of samples at full scale, at least 59% of 100 ms windows above -40 dBFS):
-- duration within 5% of the request, sample rate and channel count equal to the base's;
+- duration within 5% of the request, or, when the server reports `ended: true` (the song finished before the requested length;
+  1 of 20 real clips did, 16.6 s of 20 s), at least 50% of the request; sample rate and channel count equal to the base's;
 - at least 40% of 100 ms windows above -40 dBFS, and at most 1% of samples at full scale;
 - a repeated request on the new model is bit-identical;
 - for each caption and seed, the new model's file differs from the base's.
