@@ -1007,3 +1007,32 @@ read the music container (`tt-model/minimax-music3`, from the pulled manifest) a
 - Hub tree comparison (LFS sha256, or git oid for small files): both repos have the same 88 paths. 87 files are identical, including every
   safetensors shard and the LICENSE. Only `README.md` differs (11.7 KB in the base, 213 bytes in Sonexa). Sonexa is a re-upload of MiniMax-Music3.
 - Consequence: a bring-up of Sonexa would measure the base. Nothing was started, downloaded or run on hardware, and no audio check was built.
+
+## 2026-10-15: the MiniMax-Music3 container hangs on this box when it loads a cached tensor over about 32 MiB
+Prompt (operator): "continue on" with option 3 (serve the base once for a clip, search for a real fine-tune). Done by hand, outside
+the supervisor, with `~/orchard-runs/music/run_clip.sh` under `gozer run`. Nine boot attempts; none reached a healthy server.
+- Cause found (attempt 7 and 9, then a small repro): the thread that builds the layer-0 KV cache spins in `ttnn.as_tensor` at
+  `core.py:817`, `load_tensor_flatbuffer(cache_file_name, device=...)`. It runs at 100% system time, about 2.1 million page faults a
+  second, on a `rw-p` mapping of the file; gdb and `py-spy` (blocking mode) cannot stop it, and `docker stop` needs its SIGKILL
+  step. Repro (`kv_probe.py`, one chip, mesh 1x1): `as_tensor` of a zero tensor with a `cache_file_name` dumps in 0.1 s, and the
+  load back hangs at (2,8,12288,128) bf16 TILE (50 MB) and (2,8,16384,128) (67 MB). It loads in 0.01 s at 6144 and 8192 (33.5 MB =
+  2^25 bytes) and below. The same file written by an earlier boot also hangs (attempt 2 stalled loading the cached 134 MB embedding).
+  The device and a plain `from_torch` of the same shape are fine (0.04 s). Serving the weights from tmpfs did not help. Host: Linux
+  7.0.0-38, KMD 2.11.0, firmware 19.16.0, image tt-metal `v0.79.0-dev20260907`. Not known: whether this is the image, the kernel
+  or both; other agents' LLM containers load large cached tensors here without trouble, and I did not find out why this one differs.
+- Mistakes of mine, each cost a boot: (1) I started `tt-model serve` with no timeout, so a hung container held a lease for 8 hours;
+  (2) `tt-model serve` pins `/dev/tenstorrent/0`, and gozer granted board 1, so the container opened a chip outside the lease
+  (board 0 was free; no harm seen). The script now maps each leased chip to its device node; (3) I moved the tensor cache aside, and
+  docker created the missing mount source as root, so the next boot failed with `Permission denied` and then sat idle until the stall
+  check; (4) a launch while the chips still showed BUSY-UNTRACKED was queued and exited, and I read that as running for 15 minutes;
+  (5) my cleanup removed the container before saving its log.
+- For orchard (not built): a supervised hardware test has `deadline_s` (2,400 s stage 2, 3,600 s stage 4), so this would have ended
+  in under an hour with `timed_out`. It has no stall detector, and 40 to 60 minutes is long for a log that stopped. A stall rule
+  needs the longest silent stretch in healthy cold boots, which I have not measured.
+- Findings about the models: `SonexaAI/Sonexa-Music-v0.1-Beta` is a copy of the base (see above). The real MiniMax-Music3 fine-tunes
+  on the Hub are LoRA adapters (SimpleTuner `pytorch_lora_weights.safetensors`). The best one found is
+  `terminusresearch/minimax-music3-lm-lora-fiona-crapple` (Apache-2.0, rank 64, alpha 64, language model only, trigger word
+  `fiona crapple`; `regularised/checkpoint-750` is the author's pick). The reggae LoRA by bghira describes itself as a failed experiment.
+  `orchard/skills/lora-merge-templates/merge_lora.py` merges an adapter into one component's shards (9 tests, 8 mutations red; the 9th
+  was an equivalent mutant and the code was simplified). It has not been run on the real adapter.
+- Not done: a clip from the base, the merge, a clip from the merged model, the audio check for stage 2.
