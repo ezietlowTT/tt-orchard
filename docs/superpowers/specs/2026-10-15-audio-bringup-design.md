@@ -97,8 +97,9 @@ Template `serve_and_generate.py` (container), run by the supervisor's single-tes
   the container. This cleanup is best effort only. On a timeout or an abort the supervisor kills the test's process group with
   SIGKILL (`orchard.agent._kill_session`), which skips a `finally`, and killing the Docker client does not stop its container
   (an 8-hour hang on 2026-10-15 left one running). The guarantee is the supervisor's, next paragraph;
-- starts every container it makes, the probe's and the server's, with `--label <run label>`, the label the supervisor passes to
-  hardware tests (stage 4's container template does the same).
+- starts every container it makes, the probe's and the server's, with the run label the supervisor passes to hardware tests
+  (`ORCHARD_TEST_LABEL`), and drops the tt-model labels, as stage 4's container template does: those labels make a container look
+  like a tt-model server to `tt-model stop` and to tt-model's free-chip scan.
 
 Supervisor-owned cleanup (a finding of the PR 8 review). Stage 2's single-test hardware phase (`_hardware_phase`) has no container
 sweep today; only the listed-tests path calls `_sweep`. The change for this design: after every stage 2 hardware test, whatever its
