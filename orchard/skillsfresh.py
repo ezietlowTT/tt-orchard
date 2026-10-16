@@ -182,7 +182,7 @@ class Cache:
             if not stat.S_ISREG(st.st_mode) or st.st_size > FILE_MAX_BYTES:
                 return {}
             data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):      # RecursionError: a deeply nested file
             return {}
         return data if isinstance(data, dict) else {}
 

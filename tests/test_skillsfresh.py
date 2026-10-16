@@ -593,3 +593,13 @@ def test_a_behind_tt_lang_result_names_upstream_mains_sha_in_its_update(tmp_path
     fake = FakeSys({src: {"head": HEAD, "origin": TTLANG_URL}}, {TTLANG_URL: MAIN}, gh)
     got = sf.check_ttlang_source(src, run=fake, cache=sf.Cache(tmp_path / "c.json"))
     assert MAIN in got.update
+
+
+@pytest.mark.parametrize("raw", [b"[" * 100_000, b"\xff\xfe not utf-8", b'{"k": ' * 50_000],
+                         ids=["deep-list", "not-utf-8", "deep-dict"])
+def test_a_cache_file_that_cannot_be_decoded_is_ignored(tmp_path, raw):
+    """Review M1: deep nesting raises RecursionError in json, which is not a ValueError."""
+    path = tmp_path / "c.json"
+    path.write_bytes(raw)
+    cache = sf.Cache(path)
+    assert cache.get("k") is None and cache.data == {}
