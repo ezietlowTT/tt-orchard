@@ -1404,7 +1404,7 @@ def test_credentials_in_the_endpoint_are_never_printed(tmp_path, fake_kenv, env_
 #
 # Every process these tests signal is a child the test started itself, with start_new_session=True and an
 # ORCHARD_RUN_DIR under the test's own tmp directory. The sweep's kill functions are wrapped so that a signal to any
-# other pid fails the test before it is sent, and every child is killed by pid in a finally.
+# other pid is recorded and never sent (each test asserts there was none), and every child is stopped in a finally.
 
 import signal as _signal
 import subprocess as _subprocess
@@ -1436,18 +1436,43 @@ def _wait_for_env(pid, value, timeout=10.0):
     raise AssertionError(f"child {pid} never showed ORCHARD_RUN_DIR={value}")
 
 
-def _guarded_kills(allowed: set, sent: list):
-    """kill and killpg stand-ins that pass a signal on only to a pid (or a group led by a pid) in `allowed`."""
+def _guarded_kills(allowed, sent: list, violations: list):
+    """kill and killpg stand-ins that pass a signal on only to a pid (or a group led by a pid) that `allowed` accepts
+    (a set of pids, or a predicate). Any other call is recorded in `violations` and NOT sent. The sweep catches
+    exceptions, so a raising guard would be swallowed; each test asserts `violations == []` at its end instead."""
+    ok = allowed if callable(allowed) else (lambda pid: pid in allowed)
+
     def kill(pid, sig):
         sent.append(("kill", pid, sig))
-        assert pid in allowed, f"the sweep tried to signal pid {pid}, which this test did not start"
+        if not ok(pid):
+            violations.append(("kill", pid, sig))
+            return
         os.kill(pid, sig)
 
     def killpg(pgid, sig):
         sent.append(("killpg", pgid, sig))
-        assert pgid in allowed, f"the sweep tried to signal group {pgid}, which this test did not start"
+        if not ok(pgid):
+            violations.append(("killpg", pgid, sig))
+            return
         os.killpg(pgid, sig)
     return kill, killpg
+
+
+def test_the_guard_records_a_signal_the_sweep_would_swallow(tmp_path):
+    """S3. A stray this test did not allow: the sweep swallows exceptions, so the guard must record the call (and not
+    send it) for the test to see it."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    stray = _child(adir)
+    sent, violations = [], []
+    try:
+        _wait_for_env(stray.pid, str(adir.resolve()))
+        kill, killpg = _guarded_kills(set(), sent, violations)
+        kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.1)
+        assert violations and all(pid == stray.pid for _, pid, _ in violations)
+        assert stray.poll() is None                               # nothing was sent
+    finally:
+        _stop(stray)
 
 
 def _stop(*procs):
@@ -1474,12 +1499,13 @@ def test_the_sweep_stops_a_process_with_this_attempt_directory_and_leaves_a_neig
     try:
         _wait_for_env(stray.pid, str(adir.resolve()))
         _wait_for_env(neighbour.pid, str(other.resolve()))
-        kill, killpg = _guarded_kills({stray.pid}, sent)
+        violations = []
+        kill, killpg = _guarded_kills({stray.pid}, sent, violations)
         swept = kp.sweep_strays(adir, kill=kill, killpg=killpg)
         assert [s["pid"] for s in swept] == [stray.pid] and "time.sleep" in swept[0]["cmdline"]
         assert stray.wait(timeout=5) == -_signal.SIGTERM
         assert neighbour.poll() is None
-        assert all(pid == stray.pid for _, pid, _ in sent)
+        assert all(pid == stray.pid for _, pid, _ in sent) and violations == []
     finally:
         _stop(stray, neighbour)
 
@@ -1495,11 +1521,12 @@ def test_the_sweep_kills_a_process_that_ignores_sigterm(tmp_path):
     sent = []
     try:
         assert stubborn.stdout.readline().strip() == b"ready"
-        kill, killpg = _guarded_kills({stubborn.pid}, sent)
+        violations = []
+        kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
         swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.5)
         assert [s["pid"] for s in swept] == [stubborn.pid]
         assert stubborn.wait(timeout=5) == -_signal.SIGKILL
-        assert [sig for _, _, sig in sent] == [_signal.SIGTERM, _signal.SIGKILL]
+        assert [sig for _, _, sig in sent] == [_signal.SIGTERM, _signal.SIGKILL] and violations == []
     finally:
         _stop(stubborn)
 
@@ -1562,13 +1589,13 @@ class _BackgroundingStep:
 def test_run_attempt_stops_agent_processes_that_outlive_the_step_before_the_verdict(tmp_path, fake_kenv, monkeypatch):
     _BackgroundingStep.started, _BackgroundingStep.raise_after = [], False
     monkeypatch.setattr(kp, "AgentStep", _BackgroundingStep)
-    order = []
+    order, violations = [], []
     real_sweep = kp.sweep_strays
 
     def sweep(run_dir, **kw):
         order.append("sweep")
         allowed = {p.pid for p in _BackgroundingStep.started}
-        kill, killpg = _guarded_kills(allowed, [])
+        kill, killpg = _guarded_kills(allowed, [], violations)
         return real_sweep(run_dir, kill=kill, killpg=killpg)
     monkeypatch.setattr(kp, "sweep_strays", sweep)
     writer = check_writer(NO_KERNEL)
@@ -1587,6 +1614,7 @@ def test_run_attempt_stops_agent_processes_that_outlive_the_step_before_the_verd
         assert on_disk["swept"] == attempt["swept"]
         kp.write_report(tmp_path, [attempt], {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"]})
         assert "1 stray agent process stopped" in (tmp_path / "kernel-probe-report.md").read_text()
+        assert violations == []
     finally:
         _stop(*_BackgroundingStep.started)
 
@@ -1595,9 +1623,10 @@ def test_a_crashed_agent_step_still_has_its_strays_stopped(tmp_path, fake_kenv, 
     _BackgroundingStep.started, _BackgroundingStep.raise_after = [], True
     monkeypatch.setattr(kp, "AgentStep", _BackgroundingStep)
     real_sweep = kp.sweep_strays
+    violations = []
 
     def sweep(run_dir, **kw):
-        kill, killpg = _guarded_kills({p.pid for p in _BackgroundingStep.started}, [])
+        kill, killpg = _guarded_kills({p.pid for p in _BackgroundingStep.started}, [], violations)
         return real_sweep(run_dir, kill=kill, killpg=killpg)
     monkeypatch.setattr(kp, "sweep_strays", sweep)
     try:
@@ -1606,7 +1635,7 @@ def test_a_crashed_agent_step_still_has_its_strays_stopped(tmp_path, fake_kenv, 
                            model="m", coder_model="m", probe_id="t", run_watched=check_writer(NO_KERNEL),
                            tt_lang=FACTS)
         (p,) = _BackgroundingStep.started
-        assert p.wait(timeout=5) == -_signal.SIGTERM
+        assert p.wait(timeout=5) == -_signal.SIGTERM and violations == []
     finally:
         _stop(*_BackgroundingStep.started)
         _BackgroundingStep.raise_after = False
