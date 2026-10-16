@@ -1167,3 +1167,63 @@ the operator's review, then a plan.
   with the source `python/` directory on the path, failed all 25 identically because it shadowed the wheel's `ttl` with an
   uncompiled one. Neither result was evidence about the simulator. The third run (helper package only) gave 12 of 25, and the
   causes of the 13 failures are listed in the memory note, partly unverified.
+
+## 2026-10-16: the kernel attempt, implemented (branch `kernel-attempt`, version 0.6.0)
+Prompt (operator): "approve and continue with subagent development. CONTINUE UNTIL IT WORKS OR I SAY OTHERWISE. Stop looping and
+watch for bad behavior. Instead of pure timers, we need watchers." Spec `docs/superpowers/specs/2026-10-15-kernel-attempt-design.md`
+(section 11 lists every change from the approved design), plan `docs/superpowers/plans/2026-10-15-kernel-attempt.md`, ledger
+`.superpowers/sdd/2026-10-15-kernel-attempt/progress.md` with a report per task. The goal is a measurement: can the local coder write a
+working tt-lang kernel for an op, and how many ops of a new model have no ttnn equivalent.
+Built, by task:
+- Task 1, `tt-orchard kernel-env`: a tt-lang checkout and a simulator venv, with the diagnostics patch. It completes an interrupted clone
+  and never resets one at another commit (the plan's code deleted it, which blocked every retry after one failed fetch).
+- Task 2, the command wiring in `orchard/cli.py` and the README section.
+- Task 3 and 3b, `orchard/stallwatch.py`: every long child runs under a watcher that stops it on a stall (no output and no CPU) or a
+  repeating output line. The stop sends SIGTERM to the process group first and SIGKILL after a grace period, so `gozer run` can release
+  its lease. Signal guards never signal pgid 1 or lower, the caller's own group, or a non-leader.
+- Tasks 4 and 4b, the op inventory template: traces a model on the meta device with `torch.export`, counts ops per static node, scales
+  in-layer counts, follows higher-order bodies and keeps python-level nodes out of the op list.
+- Tasks 5 and 6, `orchard/opinventory.py` and `inventory refresh-ttnn`: statuses mapped, composable, unmapped, ignored and unchecked; a
+  committed ttnn dump.
+- Task 7, the stage 0 hook (step 9 of the delta-triage skill, after `delta.json` is final) and Task 11, the bundle section.
+- Tasks 8, 9 and 10, the kernel loop templates, `orchard/kernelprobe.py` and `tt-orchard kernel-probe`, with four ops (`add` as a
+  calibration op, `silu_mul`, `rmsnorm`, `linear_scan`).
+Review findings that changed the design:
+- A PCC-only check passes a kernel whose output is scaled, because PCC ignores scale. The check now also needs relative L2 error, slope
+  and max-abs-error bars (provisional, in the op specs). A best-effort `ast` gate stops a kernel that computes with torch and calls
+  that a pass; it reports every violation with a remedy and adds the category `forbidden_code`.
+- Trust boundary: the probe first read its verdict from a directory the agent could write and followed links. Now the probe re-runs the
+  shipped check on its own copy under `.verdict/<op>-<n>/` (regular file, at most 256 KiB, `O_NOFOLLOW`), re-checks the sha256 before
+  the gozer call and caps every read of an agent-writable file. It is best effort against shortcuts and accidents.
+- A device-open failure was blamed on the kernel. The harness `setup` phase and the category `harness_error` fix that.
+- The ttnn dump script was fragile: classes were listed as ops, and one failing attribute ended the script before its marker. It now
+  skips classes and records names that raised under `skipped`.
+- The first inventory missed ops inside higher-order bodies (the rotary embedding's cos, sin and to.device). Task 4b traverses them.
+- A crash or interrupt lost the whole probe report. The report is now written from the records so far (exit 3 crash, 4 interrupt, 5
+  hardware hang).
+Live results:
+- L1: `kernel-env --check` passed all six steps (exit 0).
+- L2 and L3: the inventory ran on default configs of Qwen3, RWKV, Mamba2 and Moshi's text model. The first `inventory refresh-ttnn`
+  ran under `gozer run --chips 1 --exact 1` and wrote the dump for ttnn 0.65.1rc17.dev6200: 821 names, none skipped, lease released,
+  all four chips free afterwards. With that dump (before the higher-order fix): qwen3 mapped 24, unmapped 7, ignored 3; rwkv mapped 16,
+  composable 1, unmapped 4, ignored 2; mamba2 mapped 29, composable 1, unmapped 6, ignored 3; moshi-lm mapped 24, composable 1,
+  unmapped 8, ignored 3. Real gaps: rwkv `copy_` (256 scaled) and `rsub.Scalar` (160); mamba2 `einsum`, `bitwise_not`, `masked_fill`,
+  `split_with_sizes` and `conv1d`; moshi `type_as`. Task 4b then mapped `rsub` and `conv1d` (name match only).
+- L4 and L5 (the probe against the live coder, and the hardware phase) are run by the controller and added by the controller.
+Notable moments and mistakes:
+- The terminal died on 2026-10-16. Cause: a new test fed a symlink to `/dev/zero` to an uncapped `read_text()`, and the kernel OOM
+  killer stopped it (exit 137). My first theory, `os.killpg(0, ...)` in the stallwatch tests, was wrong; the guards stay as hardening.
+  That test now runs in a child process limited to 2 GiB with a 60 s timeout. Tests that spawn or kill processes run under `setsid -w`.
+- I ran a stray `gozer run` while a suite was running. Nothing was hurt, and the chips were free afterwards.
+- The first parse of the ttnn dump listed classes as ops, which led to the `callable()` fix above.
+- Nothing ran both prepare steps in one directory before, and nothing fed the real simulator a scaled kernel; each gap was found by a
+  reviewer, not by the author's tests.
+Process: two parallel worktree streams (`ka-inventory`: tasks 4 to 7 and 11; `ka-probe`: tasks 8 to 10) merged into `kernel-attempt`;
+more than 20 review rounds; every task had a mutation table checked by running the mutations; the ledger is the record. Full suite after
+the merge: 3,860 passed, 2 skipped.
+Not done:
+- The hardware phase has not run. L4 and L5 results come from the controller.
+- Stage wiring (option C in the spec) is the operator's decision from the probe's table.
+- The `generic_op` export route is not built. The full-port stages are untouched.
+- The tt-lang diagnostics patch is local and has not been reported upstream, by decision.
+- Deferred minors for each task are in the ledger.
