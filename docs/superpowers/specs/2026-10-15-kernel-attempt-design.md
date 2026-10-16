@@ -263,3 +263,53 @@ Read from `docs/thin_packages.md` on `origin/docs/v6-canonical-thin-path` (unmer
   found no mention of tt-lang.
 - Unmerged branches seen on 2026-10-15 that touch this: `docs/v6-canonical-thin-path`, `feat/v6-extra-code-127`,
   `fix/v6-reproducible-install`, `feat/auxiliary-weights`, `raahem/renumber-scoped-devices`.
+
+## 11. Amendments (2026-10-15 and 2026-10-16, during implementation)
+
+Each item changes or adds to the approved design above. Reasons come from the implementation ledger and the task reviews.
+
+1. **A fourth probe op, `add`.** It is a calibration op. Its working kernel is upstream's example, so a fault in the harness or
+   the environment shows up as the failure of a kernel that must pass.
+2. **Section 5.2's hash check on the agent's `check.json` is replaced by a stronger rule.** The probe re-runs the shipped check
+   on a probe-owned clean copy of `kernel.py` under `DIR/.verdict/<op>-<n>/`. It records `agent_check_untrusted` when the agent's
+   own result disagrees. `kernel.py` is copied only as a regular file of at most 256 KiB, opened with `O_NOFOLLOW`. Reads of
+   files the agent can write are capped. A sha256 re-check of the copy comes before the gozer call, so the file that was gated is
+   the file that runs on hardware. The report is built from the records the run produced; a resume accepts only `<op>-<int>`
+   records with the same probe id. The boundary is best effort against shortcuts and accidents. It does not stop a determined
+   attacker. Reason: the first design read its verdict from a directory the agent could write, and the review showed a planted
+   symlink or a surviving agent process could forge a pass.
+3. **Two failure categories were added: `harness_error` and `forbidden_code`.** `harness_error` covers a fault in the templates or
+   the environment, including the harness `setup` phase (device open, input building, the reference). `forbidden_code` covers a
+   `kernel.py` that the static gate refuses.
+4. **The check is stronger than PCC alone.** PCC does not change when the output is scaled, so a kernel that returned the wrong
+   magnitude passed. The check now also needs a per-set relative L2 error, a least-squares slope and a max-abs-error bar. All
+   bars are provisional and live in the op specs. A missing field fails. A best-effort static `ast` gate on `kernel.py` runs
+   first. It allows the imports `ttl`, `ttnn` and `math`, refuses `import torch` and host code, requires `OPERATION` to be a plain
+   top-level `def` decorated only with `@ttl.operation`, and accepts aliases. It reports every violation with a remedy.
+5. **The export call** is `torch.export.export(model, (), {"input_ids": ids, "use_cache": False}, strict=False)`. It was measured
+   on 2026-10-15 to trace Qwen3, RWKV, Mamba2 and Moshi's text model. Without `use_cache=False`, three of the four failed. A
+   dispatch-level recorder was tried and fails on Moshi.
+6. **`orchard/stallwatch.py`** (operator instruction, 2026-10-15: "Instead of pure timers, we need watchers"). Every long child
+   process runs under a watcher that stops it on a stall (no output and no CPU) or on a repeating output line. The stop sends
+   SIGTERM to the whole process group first, so `gozer run` can release its lease, and SIGKILL after a grace period. Deadlines
+   are a backstop. The budgets in sections 5.3 and 5.4 are backstops.
+7. **`scaled_count`** is `count_in_layers x (layers in config / layers traced) + count outside layers`. The report says when a
+   count is not scaled. Counts are per static node of the traced graph, so a loop body that runs many times counts once.
+8. **A fifth inventory status, `ignored`**, for metadata no-ops (`orchard/data/ignored_ops.json`: alias, contiguous, detach and
+   similar). Section 4.3 listed four statuses. Without `ignored` the unmapped list was mostly noise.
+9. **The inventory traverses higher-order-op bodies.** Python-level nodes (for example `getitem`) stay out of the op list and are
+   recorded under `python_nodes`. Higher-order wrappers are recorded under `higher_order_nodes`. Both count nodes, not bodies (a
+   `cond` node has two bodies). Before this, the rotary embedding's `cos`, `sin` and `to.device` were missed.
+10. **The ttnn dump** lists public non-class callables at the top level and one level into `experimental` and `transformer`
+    (named `experimental.x`). A real dump for ttnn 0.65.1rc17.dev6200 (821 names) is committed. `mapped` is a name match only:
+    `rsub` is exact only for alpha=1, and `conv1d` takes prepared weights.
+11. **`run_inventory`'s `data_dir` parameter is now `dump_dir`.** The tables are always the packaged ones.
+12. **`tt-orchard kernel-probe` exit codes** are 0 (done), 2 (refused or bad input), 3 (crash), 4 (interrupt) and 5 (hardware
+    hang). The report is written whatever happens, from the records so far, and no hardware phase starts after a crash.
+13. **`kernel-env` completes an interrupted clone.** A `.git` with no HEAD and the right origin is finished (remote, fetch,
+    checkout). A clone at another commit is never reset. The plan's code deleted the clone instead, which blocked every retry
+    after one failed fetch.
+14. **The stage 0 hook is step 9 of the delta-triage skill**, after `delta.json` is final, because step 8 rewrites the whole file.
+15. **Process kills.** The kill changed from SIGKILL to SIGTERM first, then SIGKILL after a grace period (item 6). Signal guards
+    never signal a process group id of 1 or lower, the caller's own group, or a process that is not its group's leader. If
+    anything raises during the grace period, the SIGKILL still goes out.
