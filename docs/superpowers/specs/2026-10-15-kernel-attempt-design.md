@@ -270,7 +270,7 @@ Read from `docs/thin_packages.md` on `origin/docs/v6-canonical-thin-path` (unmer
 - Unmerged branches seen on 2026-10-15 that touch this: `docs/v6-canonical-thin-path`, `feat/v6-extra-code-127`,
   `fix/v6-reproducible-install`, `feat/auxiliary-weights`, `raahem/renumber-scoped-devices`.
 
-## 11. Amendments (2026-10-15 and 2026-10-16, during implementation)
+## 11. Amendments (2026-10-15 and 2026-10-16, during implementation and after the final review)
 
 Each item changes or adds to the approved design above. Reasons come from the implementation ledger and the task reviews.
 
@@ -328,3 +328,30 @@ Each item changes or adds to the approved design above. Reasons come from the im
     The final run leaves 6 unmapped: `__and__`, `index`, `to.dtype_layout`, `diff`, `new_ones` and `to.device`. They stay unmapped
     because their ttnn semantics are not provably identical to the aten ops. Mapping them is a table decision for the operator or a
     later task.
+17. **gozer gets a 120 s SIGTERM grace.** `gozer run` releases its lease in a `finally` after its child exits, and the release
+    resets the chip, which takes about 42 s on this box. The first 5 s grace killed gozer during that reset. Both gozer calls of the
+    probe now pass `GOZER_TERM_GRACE_S` = 120 s; the simulator check keeps 5 s. gozer is still killed at once by a second interrupt
+    during the grace, and then the lease can stay behind.
+18. **A sweep for stray agent processes.** When the agent step ends (also after a crash or an interrupt) and before any verdict, the
+    probe stops every process of the operator's whose environment has `ORCHARD_RUN_DIR` exactly equal to the attempt directory:
+    SIGTERM, up to 2 s, a second scan, then SIGKILL. It never signals itself or an ancestor. The record lists each process with
+    `stopped`, and the report counts them. It cannot see a process that cleared its environment or one whose `/proc` entry is not
+    readable (a non-dumpable process).
+19. **The report gives what the stall watcher saw.** For the smoke test and each hardware run it prints the longest quiet stretch
+    and the longest run of one repeated line, beside the limits (60 s and 20 lines; neither is measured). A stopped run's first line is the
+    watcher's reason (`backstop`, `stalled` or `repeating`). The table has a status column, says `add` is a calibration op and that
+    the simulator computes in f32, and prints a PCC near 1 as `1 - <distance>` or `1 + <distance>`.
+20. **The static gate allows only listed names from `typing` and `__future__`, and refuses forbidden names as attributes and
+    imports.** `from typing import sys as s` reached `sys` through the earlier gate. A limit stays: `from ttnn import shutil as s`
+    passes, because the gate cannot tell a module from another name in `ttl` or `ttnn` without importing ttnn, which opens the device.
+21. **`opinventory.main` defaults `--ttnn-python` to `~/.tenstorrent-venv/bin/python` under the passwd home**, and the stage 0 skill
+    passes it. In an agent shell HOME points inside the run directory. Without the flag every op was `unchecked`.
+22. **The ops-inventory template builds only a subclass of `PreTrainedModel`.** A downloaded config.json could name any public
+    callable of transformers. A name that is not a model class, is not a string, or whose lookup raises is written as `skipped`.
+23. **The simulator dies with the check.** kernel_check runs tt-lang-sim in its own session, kills that group on a timeout, turns
+    SIGTERM, SIGINT and SIGHUP into an exception that kills it too, and starts it with `PR_SET_PDEATHSIG` set to SIGKILL for the
+    case where kernel_check itself is killed outright.
+24. **One probe per output directory.** `kernel-probe` takes `probe.lock` in `--out` (created with `O_EXCL`, holding the pid, boot id
+    and start time) and removes it on every path. A lock held by a live probe is refused with exit 2; one left by an ended probe is
+    taken over.
+25. **The stall watcher keeps at most 64 KiB of an unfinished line.** A longer piece is fed to the repeat detector as a line.
