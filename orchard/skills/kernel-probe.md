@@ -51,6 +51,9 @@ Advice:
 - Copy the example's three thread functions into `OPERATION`: a reader with `@ttl.datamovement()`, a compute
   function with `@ttl.compute()`, and a writer with `@ttl.datamovement()`. Without them the simulator fails with
   `ModuleNotFoundError: ttl.dfb_reset`.
+- Copy only the `@ttl.operation` function from an example. Write `import ttl` and `import ttnn` at the top: the
+  examples' `from sim import ttl, ttnn` is refused, and so are their `import torch` and their host code with
+  `ttnn.from_torch` and `ttnn.to_torch`.
 - Delete the example's `main()` and its `if __name__ == "__main__":` block. Do not open a device: the check opens it,
   builds the inputs and reads the result back. The guide's advice to add a main block does not apply here.
 

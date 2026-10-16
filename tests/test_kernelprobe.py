@@ -2877,3 +2877,36 @@ def test_kernel_env_check_fails_when_the_skill_files_are_missing(fake_kenv, env_
 def test_kernel_env_without_check_does_not_compare_with_upstream(fake_kenv, env_ready, skills_current):
     ttlang_env.main(env_check_args(check=False), env=fake_kenv, out=io.StringIO())
     assert skills_current["calls"] == []
+
+
+# ---- Task 14 fix wave -------------------------------------------------------------------------------------------
+
+def _needle(v: dict) -> str:
+    """The construct a gate violation names, as the skill must spell it: `import torch` for "import torch",
+    `from sim import` for "import from sim", the attribute's name for a read-back."""
+    detail = v["detail"]
+    if detail.startswith("import from "):
+        return f"from {detail.removeprefix('import from ')} import"
+    if detail.startswith("import "):
+        return detail
+    return detail.split()[-1]
+
+
+def _shipped_reference_pys():
+    out = [KERNELS / "upstream_eltwise_add.py"]
+    for name in ("eltwise_add.py", "eltwise_broadcast_reduce.py"):
+        if (SRC / "examples" / name).is_file():
+            out.append(SRC / "examples" / name)
+    return out
+
+
+@pytest.mark.parametrize("path", _shipped_reference_pys(), ids=lambda p: p.name)
+def test_the_skill_names_every_construct_the_gate_refuses_in_a_shipped_reference(path):
+    """The coder is told to copy from these files. Every rule they break must be named in the skill, so a coder that
+    copies a header line is warned before the gate refuses it (review I1: `from sim import ttl, ttnn`)."""
+    gate = kp._template("kernel_check")
+    flat = " ".join(kp.SKILL.read_text().split())
+    violations = gate.kernel_source_violations(path)
+    assert violations, "a shipped example with host code should break at least one rule"
+    for v in violations:
+        assert _needle(v) in flat, (path.name, v)
