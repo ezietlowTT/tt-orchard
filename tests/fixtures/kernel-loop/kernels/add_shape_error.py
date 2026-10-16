@@ -9,7 +9,6 @@
 # function renamed OPERATION and the host code removed. It copies one tile into a 2x2 block, so the
 # check must end shape_mismatch.
 
-import torch
 import ttl
 import ttnn
 

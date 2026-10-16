@@ -113,18 +113,30 @@ def test_add_good_passes(tmp_path):
     assert all(s["pcc"] >= 0.999 for s in check["sets"])
 
 
-@pytest.mark.parametrize("kernel,category,extra", [
-    ("add_wrong_op", "numeric_mismatch", ()),
-    ("add_shape_error", "shape_mismatch", ()),
-    ("add_deadlock", "tt_lang_error", ()),
-    ("add_syntax_error", "import_error", ()),
-    ("add_no_operation", "no_kernel", ()),
-    ("add_spin", "timeout", ("--timeout-s", "5")),
-    ("add_nan", "numeric_mismatch", ()),
+@pytest.mark.parametrize("kernel,category,extra,op", [
+    ("add_wrong_op", "numeric_mismatch", (), "add"),
+    ("add_shape_error", "shape_mismatch", (), "add"),
+    ("add_deadlock", "tt_lang_error", (), "add"),
+    ("add_syntax_error", "import_error", (), "add"),
+    ("add_no_operation", "no_kernel", (), "add"),
+    ("add_spin", "timeout", ("--timeout-s", "5"), "add"),
+    ("add_nan", "numeric_mismatch", (), "add"),
+    # correlated with the right answer, so PCC alone passes them
+    ("add_scaled", "numeric_mismatch", (), "add"),
+    ("rmsnorm_no_norm", "numeric_mismatch", (), "rmsnorm"),
+    ("rmsnorm_wrong_n", "numeric_mismatch", (), "rmsnorm"),
+    # the static gate, one fixture per rule
+    ("forbidden_import", "forbidden_code", (), "add"),
+    ("forbidden_name", "forbidden_code", (), "add"),
+    ("forbidden_dunder", "forbidden_code", (), "add"),
+    ("forbidden_readback", "forbidden_code", (), "add"),
+    ("forbidden_undecorated", "forbidden_code", (), "add"),
+    # prints the missing-diagnostics text itself; diagnostics.py is present, so the kernel is blamed
+    ("add_spoof_diagnostics", "tt_lang_error", (), "add"),
 ])
 @needs_sim
-def test_each_broken_kernel_gets_its_category(tmp_path, kernel, category, extra):
-    tdir, adir = _attempt(tmp_path, kernel)
+def test_each_broken_kernel_gets_its_category(tmp_path, kernel, category, extra, op):
+    tdir, adir = _attempt(tmp_path, kernel, op=op)
     done, check = _run_check(tdir, adir, *extra)
     assert done.returncode == 1, done.stdout + done.stderr
     assert done.stdout.startswith(f"FAIL: {category}: ")
@@ -242,3 +254,325 @@ def test_the_op_specs_name_only_known_references():
         spec = json.loads(p.read_text())
         assert spec["op"] == p.stem and spec["reference"] in known
         assert spec["pcc_bar_sim"] == 0.999 and spec["seeds"] == [0, 1, 2] and spec["heavy_tail"] is True
+
+
+# --- fix round 1: error bars beyond PCC, the static gate, the setup phase -------------------------------------------
+
+SIM_BARS = {"pcc": 0.999, "rel_l2": 1e-2, "slope": [0.98, 1.02], "max_abs_atol": 1e-2, "max_abs_rtol": 1e-2}
+HW_BARS = {"pcc": 0.99, "rel_l2": 5e-2, "slope": [0.95, 1.05], "max_abs_atol": 1e-1, "max_abs_rtol": 5e-2}
+
+
+def _good_set(**over):
+    s = {"name": "seed0", "seed": 0, "heavy_tail": False, "pcc": 0.99999, "max_abs_err": 0.001, "finite": True,
+         "rel_l2": 0.001, "slope": 1.0, "exp_abs_max": 4.0}
+    s.update(over)
+    return s
+
+
+def _classify_sets(sets, phase="sim", bars=None, **kw):
+    args = dict(kernel_present=True, timed_out=False, returncode=0, text="", result={"phase": phase, "sets": sets,
+                "error": None}, bar=(bars or (SIM_BARS if phase == "sim" else HW_BARS))["pcc"], phase=phase)
+    args.update(kw)
+    if bars is not None:
+        args["bars"] = bars
+    return CHECK.classify(**args)
+
+
+def test_a_set_inside_every_bar_passes():
+    assert _classify_sets([_good_set()], bars=SIM_BARS) == (None, "")
+
+
+@pytest.mark.parametrize("over,needle", [
+    ({"rel_l2": 0.05}, "rel_l2 0.05 above bar 0.01"),
+    ({"slope": 2.0}, "slope 2.0 outside [0.98, 1.02]"),
+    ({"slope": 0.5}, "slope 0.5 outside [0.98, 1.02]"),
+    ({"max_abs_err": 0.2, "exp_abs_max": 4.0}, "max_abs_err 0.2 above"),
+])
+def test_each_new_bar_fails_a_set_alone(over, needle):
+    """PCC passes in every case: only the named field is out of its bar, and the FAIL line names it."""
+    category, line = _classify_sets([_good_set(**over)], bars=SIM_BARS)
+    assert category == "numeric_mismatch"
+    assert needle in line and line.startswith("set seed0: ")
+
+
+@pytest.mark.parametrize("field", ["rel_l2", "slope", "max_abs_err", "exp_abs_max", "pcc"])
+@pytest.mark.parametrize("how", ["missing", "null"])
+def test_a_missing_or_null_field_fails(field, how):
+    s = _good_set()
+    if how == "missing":
+        del s[field]
+    else:
+        s[field] = None
+    category, line = _classify_sets([s], bars=SIM_BARS)
+    assert category == "numeric_mismatch"
+    assert field in line
+
+
+def test_the_hw_bars_are_wider_and_use_the_hw_name():
+    s = _good_set(slope=1.03, rel_l2=0.03)
+    assert _classify_sets([s], phase="sim", bars=SIM_BARS)[0] == "numeric_mismatch"
+    assert _classify_sets([s], phase="hw", bars=HW_BARS) == (None, "")
+    assert _classify_sets([_good_set(slope=1.2)], phase="hw", bars=HW_BARS)[0] == "hw_numeric_mismatch"
+
+
+def test_classify_without_bars_uses_the_shipped_defaults():
+    """Task 9 may call classify with only `bar`: the new bars still apply, from the phase's defaults."""
+    assert _classify_sets([_good_set(slope=2.0)])[0] == "numeric_mismatch"
+    assert _classify_sets([_good_set()]) == (None, "")
+    assert _classify_sets([_good_set(slope=1.03)], phase="hw") == (None, "")
+
+
+def test_bars_from_spec_reads_each_phase():
+    spec = json.loads((TEMPLATES / "ops" / "add.json").read_text())
+    assert CHECK.bars_from_spec(spec, "sim") == SIM_BARS
+    assert CHECK.bars_from_spec(spec, "hw") == HW_BARS
+
+
+def test_every_op_spec_has_the_provisional_bars():
+    for p in sorted((TEMPLATES / "ops").glob("*.json")):
+        spec = json.loads(p.read_text())
+        assert spec["provisional"] is True
+        assert spec["rel_l2_bar_sim"] == 1e-2 and spec["rel_l2_bar_hw"] == 5e-2, p.name
+        assert spec["slope_band_sim"] == [0.98, 1.02] and spec["slope_band_hw"] == [0.95, 1.05], p.name
+        assert spec["max_abs_atol_sim"] == 1e-2 and spec["max_abs_rtol_sim"] == 1e-2, p.name
+        assert spec["max_abs_atol_hw"] == 1e-1 and spec["max_abs_rtol_hw"] == 5e-2, p.name
+
+
+def test_classify_timed_out_offline():
+    got = CHECK.classify(kernel_present=True, timed_out=True, returncode=None, text="PROGRESS import\n", result=None,
+                         bar=0.999)
+    assert got[0] == "timeout"
+
+
+@pytest.mark.parametrize("phase", ["sim", "hw"])
+def test_a_setup_phase_error_is_the_harness(phase):
+    """The device would not open: not the kernel's fault, in either phase."""
+    result = {"phase": phase, "sets": [], "error": {"phase": "setup", "type": "RuntimeError",
+                                                    "text": "Failed to open device 0: chip is busy"}}
+    text = "PROGRESS import\nPROGRESS open_device\nRuntimeError: Failed to open device 0: chip is busy\n"
+    category, line = CHECK.classify(kernel_present=True, timed_out=False, returncode=0, text=text, result=result,
+                                    bar=0.999, phase=phase)
+    assert category == "harness_error" and "chip is busy" in line
+
+
+def test_a_nan_set_fails_offline():
+    s = _good_set(pcc=None, finite=False, rel_l2=None, slope=None, max_abs_err=float("nan"))
+    category, line = _classify_sets([s], bars=SIM_BARS)
+    assert category == "numeric_mismatch" and "finite False" in line
+
+
+def test_a_missing_result_after_the_kernel_started_is_the_kernel():
+    text = "PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\n"
+    category, line = CHECK.classify(kernel_present=True, timed_out=False, returncode=0, text=text, result=None,
+                                    bar=0.999)
+    assert category == "tt_lang_error"
+    assert line == "the kernel ended the process without a result"
+    category, _ = CHECK.classify(kernel_present=True, timed_out=False, returncode=0, text=text, result=None,
+                                 bar=0.99, phase="hw")
+    assert category == "compile_error"
+
+
+def test_a_missing_result_before_the_kernel_loaded_is_the_harness():
+    category, _ = CHECK.classify(kernel_present=True, timed_out=False, returncode=1, text="Traceback ...\n",
+                                 result=None, bar=0.999)
+    assert category == "harness_error"
+
+
+SPOOF = ("FileNotFoundError: [Errno 2] No such file or directory: 'ttl/sim/diagnostics.py'\n"
+         "PROGRESS import\n")
+
+
+def test_spoofed_diagnostics_text_is_the_kernel_when_the_file_is_present():
+    result = {"phase": "sim", "sets": [], "error": {"phase": "run", "type": "ValueError", "text": "boom"}}
+    category, _ = CHECK.classify(kernel_present=True, timed_out=False, returncode=0, text=SPOOF, result=result,
+                                 bar=0.999, diagnostics_present=True)
+    assert category == "tt_lang_error"
+    category, _ = CHECK.classify(kernel_present=True, timed_out=False, returncode=0, text=SPOOF, result=result,
+                                 bar=0.999, diagnostics_present=False)
+    assert category == "harness_error"
+
+
+def test_diagnostics_file_lookup(tmp_path):
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    sim = venv / "bin" / "tt-lang-sim"
+    sim.write_text("")
+    assert CHECK.diagnostics_present(sim) is None                 # no ttl package found: unknown
+    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "sim"
+    pkg.mkdir(parents=True)
+    assert CHECK.diagnostics_present(sim) is False
+    (pkg / "diagnostics.py").write_text("")
+    assert CHECK.diagnostics_present(sim) is True
+
+
+# the static gate
+
+@pytest.mark.parametrize("kernel,rule", [
+    ("forbidden_import", "import"),
+    ("forbidden_name", "name"),
+    ("forbidden_dunder", "dunder"),
+    ("forbidden_readback", "readback"),
+    ("forbidden_undecorated", "operation"),
+    ("kernel_exit", "import"),
+])
+def test_the_gate_refuses_each_rule(kernel, rule):
+    ok, reason = CHECK.check_kernel_source(KERNELS / f"{kernel}.py")
+    assert ok is False
+    assert reason.startswith(f"{rule} at line ") and reason.split(" at line ")[1].split(":")[0].isdigit(), reason
+
+
+@pytest.mark.parametrize("kernel", ["add_good", "silu_mul_good", "rmsnorm_good", "add_wrong_op", "add_nan", "add_scaled",
+                                    "add_shape_error", "add_deadlock", "add_spin", "rmsnorm_no_norm", "rmsnorm_wrong_n",
+                                    "add_spoof_diagnostics", "add_syntax_error"])
+def test_the_gate_lets_plain_kernels_through(kernel):
+    """add_syntax_error does not parse; the gate leaves it to the harness, which reports import_error."""
+    assert CHECK.check_kernel_source(KERNELS / f"{kernel}.py") == (True, "")
+
+
+def test_the_gate_reports_no_operation():
+    ok, reason = CHECK.check_kernel_source(KERNELS / "add_no_operation.py")
+    assert ok is False and reason.startswith("no-operation")
+
+
+GATE_HEADER = 'import ttl\nimport ttnn\n\n\n@ttl.operation(grid="full")\ndef OPERATION(a, b, out):\n'
+
+
+@pytest.mark.parametrize("line,rule", [
+    ("    import sys", "import"), ("    import os.path", "import"), ("    import atexit", "import"),
+    ("    import builtins", "import"), ("    import subprocess", "import"), ("    import importlib", "import"),
+    ("    import references", "import"), ("    import torch", "import"), ("    from . import x", "import"),
+    ("    from references import REFERENCES", "import"),
+    ("    open('f')", "name"), ("    exec('1')", "name"), ("    eval('1')", "name"), ("    compile('1', 'f', 'exec')", "name"),
+    ("    x = __import__", "name"), ("    globals()", "name"), ("    locals()", "name"), ("    setattr(a, 'b', 1)", "name"),
+    ("    getattr(a, 'b')", "name"), ("    breakpoint()", "name"), ("    input()", "name"), ("    x = sys", "name"),
+    ("    x = os", "name"), ("    x = __builtins__", "name"), ("    x = references", "name"),
+    ("    x = a.__dict__", "dunder"), ("    x = ttl.__spec__", "dunder"),
+    ("    x = ttnn.to_torch", "readback"), ("    x = ttnn.from_torch", "readback"),
+])
+def test_the_gate_rules_in_detail(tmp_path, line, rule):
+    p = tmp_path / "kernel.py"
+    p.write_text(GATE_HEADER + line + "\n")
+    ok, reason = CHECK.check_kernel_source(p)
+    assert ok is False and reason.startswith(f"{rule} at line 7"), reason
+
+
+def test_the_gate_allows_math(tmp_path):
+    p = tmp_path / "kernel.py"
+    p.write_text("import math\n" + GATE_HEADER + "    x = math.sqrt(2.0)\n")
+    assert CHECK.check_kernel_source(p) == (True, "")
+
+
+@pytest.mark.parametrize("src", [
+    "import ttl\n\n\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttl\n\n\n@ttl.compute()\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttl\n\n\ndef f(a, b, out):\n    pass\n\n\nOPERATION = ttl.operation(grid='full')(f)\n",
+    "import ttl\n\n\ndef outer():\n    @ttl.operation(grid='full')\n    def OPERATION(a, b, out):\n        pass\n\n\nOPERATION = 1\n",
+])
+def test_operation_must_be_a_decorated_top_level_def(tmp_path, src):
+    p = tmp_path / "kernel.py"
+    p.write_text(src)
+    ok, reason = CHECK.check_kernel_source(p)
+    assert ok is False and reason.startswith("operation at line "), reason
+
+
+def test_a_bare_operation_decorator_is_allowed(tmp_path):
+    p = tmp_path / "kernel.py"
+    p.write_text("import ttl\n\n\n@ttl.operation\ndef OPERATION(a, b, out):\n    pass\n")
+    assert CHECK.check_kernel_source(p) == (True, "")
+
+
+@needs_sim
+def test_a_forbidden_kernel_never_reaches_the_simulator(tmp_path):
+    tdir, adir = _attempt(tmp_path, "forbidden_import")
+    done, check = _run_check(tdir, adir)
+    assert done.stdout.startswith("FAIL: forbidden_code: import at line ")
+    assert check["sets"] == [] and "PROGRESS" not in (adir / "harness-output.txt").read_text()
+    assert not (adir / "harness-result.json").exists()
+
+
+@needs_sim
+def test_the_new_fixtures_fail_on_the_named_fields(tmp_path):
+    """Each correlated-but-wrong kernel is failed by a bar other than PCC, and its PCC is above the PCC bar."""
+    for kernel, op in (("add_scaled", "add"), ("rmsnorm_wrong_n", "rmsnorm")):
+        tdir, adir = _attempt(tmp_path / kernel, kernel, op=op)
+        _, check = _run_check(tdir, adir)
+        assert check["category"] == "numeric_mismatch"
+        assert all(s["pcc"] >= 0.999 for s in check["sets"]), check["sets"]
+        assert any(f in check["first_line"] for f in ("rel_l2", "slope", "max_abs_err")), check["first_line"]
+    tdir, adir = _attempt(tmp_path / "no_norm", "rmsnorm_no_norm", op="rmsnorm")
+    _, check = _run_check(tdir, adir)
+    plain = next(s for s in check["sets"] if s["name"] == "seed0")
+    assert plain["pcc"] >= 0.999 and plain["rel_l2"] > 1e-2
+
+
+@needs_sim
+def test_check_json_records_the_bars_and_the_new_fields(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_good")
+    _, check = _run_check(tdir, adir)
+    assert check["bars"] == SIM_BARS
+    for s in check["sets"]:
+        assert s["rel_l2"] is not None and s["rel_l2"] <= 1e-2
+        assert 0.98 <= s["slope"] <= 1.02
+        assert s["exp_abs_max"] > 0
+
+
+@needs_sim
+def test_a_zero_timeout_is_a_timeout(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_good")
+    _, check = _run_check(tdir, adir, "--timeout-s", "0")
+    assert check["category"] == "timeout"
+
+
+def _fake_stack(tmp_path):
+    """A stand-in ttnn whose open_device raises, and a ttl whose decorators do nothing. No real ttnn is imported."""
+    fake = tmp_path / "fake"
+    fake.mkdir()
+    (fake / "ttnn.py").write_text(
+        "TILE_LAYOUT = 'tile'\nbfloat16 = 'bf16'\nTensor = object\n"
+        "def open_device(device_id=0):\n    raise RuntimeError('fake: device 0 is busy')\n"
+        "def close_device(device):\n    pass\n")
+    (fake / "ttl.py").write_text("def operation(*a, **k):\n    return lambda f: f\n")
+    return fake
+
+
+@needs_sim
+def test_a_device_that_will_not_open_is_the_harness(tmp_path):
+    fake = _fake_stack(tmp_path)
+    out = tmp_path / "result.json"
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PYTHONPATH"] = str(fake)
+    done = subprocess.run([str(VENV / "bin" / "python"), str(TEMPLATES / "kernel_harness.py"), "--spec",
+                           str(TEMPLATES / "ops" / "add.json"), "--kernel", str(KERNELS / "add_good.py"), "--out",
+                           str(out), "--phase", "hw"], capture_output=True, text=True, timeout=120, env=env)
+    result = json.loads(out.read_text())
+    assert result["error"]["phase"] == "setup", result
+    assert "device 0 is busy" in result["error"]["text"]
+    category, _ = CHECK.classify(kernel_present=True, timed_out=False, returncode=done.returncode,
+                                 text=done.stdout + done.stderr, result=result, bar=0.99, phase="hw")
+    assert category == "harness_error"
+
+
+@needs_sim
+def test_a_kernel_that_ends_the_process_is_blamed(tmp_path):
+    """kernel_exit.py calls os._exit(0) inside OPERATION. The gate refuses it, so this runs the harness directly."""
+    out = tmp_path / "result.json"
+    done = subprocess.run([str(SIM), str(TEMPLATES / "kernel_harness.py"), "--", "--spec", str(TEMPLATES / "ops" / "add.json"),
+                           "--kernel", str(KERNELS / "kernel_exit.py"), "--out", str(out), "--phase", "sim"],
+                          capture_output=True, text=True, timeout=120, cwd=tmp_path)
+    assert not out.exists()
+    text = done.stdout + done.stderr
+    assert "PROGRESS import" in text
+    category, line = CHECK.classify(kernel_present=True, timed_out=False, returncode=done.returncode, text=text,
+                                    result=None, bar=0.999)
+    assert (category, line) == ("tt_lang_error", "the kernel ended the process without a result")
+
+
+@needs_sim
+def test_an_input_error_after_a_kernel_ran_is_still_the_harness(tmp_path):
+    """The second seed cannot seed a generator. The kernel has already run once, and the fault is still not its own."""
+    def edit(spec):
+        spec["seeds"] = [0, "not-a-seed"]
+    tdir, adir = _attempt(tmp_path, "add_good", spec_edit=edit)
+    _, check = _run_check(tdir, adir)
+    assert check["category"] == "harness_error", check
+    assert [s["name"] for s in check["sets"]] == ["seed0", "seed0-tail"]

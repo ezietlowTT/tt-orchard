@@ -4,7 +4,6 @@
 # Test fixture for tt-orchard's kernel loop: upstream tt-lang examples/eltwise_add.py with the
 # function renamed OPERATION and the host code removed. The output is (a + b) * (0 / 0), so every element is NaN
 # and the check must end numeric_mismatch on the finite test.
-import torch
 import ttl
 import ttnn
 

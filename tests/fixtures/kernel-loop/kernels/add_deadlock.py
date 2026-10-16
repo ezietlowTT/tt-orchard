@@ -11,7 +11,6 @@
 #
 # Test fixture for tt-orchard's kernel loop: upstream tt-lang examples/errors/eltwise_add_deadlock.py with
 # the function renamed OPERATION and the host code removed. The check must end tt_lang_error.
-import torch
 import ttl
 import ttnn
 

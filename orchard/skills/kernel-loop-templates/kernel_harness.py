@@ -48,6 +48,26 @@ def pcc(got, exp, torch):
     return None if value != value else value
 
 
+def metrics(got, exp, torch) -> dict:
+    """Error measures beside PCC. PCC does not change when the output is scaled, so the check also needs the
+    relative L2 error ||got - exp|| / ||exp||, the least-squares slope <got, exp> / <exp, exp> (1.0 when the scale is
+    right) and max|exp|, against which max_abs_err is judged. A value that cannot be computed (a zero norm, NaN or
+    inf) is recorded as null, and the check fails a set with a null field."""
+    g, e = got.flatten().double(), exp.flatten().double()
+
+    def clean(v):
+        v = float(v)
+        return v if v == v and v not in (float("inf"), float("-inf")) else None
+
+    exp_sq = float((e * e).sum())
+    exp_norm = exp_sq ** 0.5
+    return {
+        "rel_l2": clean((g - e).norm() / exp_norm) if exp_norm > 0 else None,
+        "slope": clean((g * e).sum() / exp_sq) if exp_sq > 0 else None,
+        "exp_abs_max": clean(e.abs().max()) if e.numel() else None,
+    }
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", required=True)
@@ -61,8 +81,9 @@ def main(argv=None) -> int:
         args = args[1:]
     a = ap.parse_args(args)
     result = {"phase": a.phase, "sets": [], "error": None}
-    # The phase names who is at fault: `setup` (the spec, the references or the environment, before the kernel is
-    # touched), `import` (loading kernel.py) and `run` (calling OPERATION).
+    # The phase names who is at fault. `setup`: the spec, the references, the environment, the device, the inputs and
+    # the reference output, none of which is the kernel's. `import`: loading kernel.py. `run`: calling OPERATION and
+    # reading its output back. Only `import` and `run` are charged to the kernel.
     stage = "setup"
     try:
         spec = json.loads(Path(a.spec).read_text(encoding="utf-8"))
@@ -71,6 +92,7 @@ def main(argv=None) -> int:
         from references import REFERENCES
         if spec["reference"] not in REFERENCES:
             raise KeyError(f"reference {spec['reference']!r} is not in references.REFERENCES")
+        progress("import")                              # the check charges a result-less exit after this to the kernel
         stage = "import"
         loader = importlib.util.spec_from_file_location("kernel_under_test", a.kernel)
         module = importlib.util.module_from_spec(loader)
@@ -79,12 +101,13 @@ def main(argv=None) -> int:
         if operation is None:
             result["error"] = {"phase": "import", "type": "NoOperation", "text": "kernel.py defines no OPERATION"}
         else:
-            stage = "run"
+            stage = "setup"                             # a device that will not open is not the kernel's fault
             progress("open_device")
             device = ttnn.open_device(device_id=0)
             try:
                 for seed in spec["seeds"]:
                     for tail in ([False, True] if spec.get("heavy_tail") else [False]):
+                        stage = "setup"
                         name = f"seed{seed}{'-tail' if tail else ''}"
                         ins = make_inputs(spec, seed, tail, torch)
                         expected = REFERENCES[spec["reference"]]({k: v.float() for k, v in ins.items()})
@@ -93,11 +116,13 @@ def main(argv=None) -> int:
                                   for v in ins.values()]
                         out = ttnn.from_torch(torch.zeros(spec["output"], dtype=torch.bfloat16), dtype=ttnn.bfloat16,
                                               layout=ttnn.TILE_LAYOUT, device=device)
+                        stage = "run"
                         operation(*tt_ins, out)
                         got = ttnn.to_torch(out).float()
                         err = (got - expected).abs().max()
                         result["sets"].append({"name": name, "seed": seed, "heavy_tail": tail, "pcc": pcc(got, expected, torch),
-                                               "max_abs_err": float(err), "finite": bool(torch.isfinite(got).all())})
+                                               "max_abs_err": float(err), "finite": bool(torch.isfinite(got).all()),
+                                               **metrics(got, expected, torch)})
             finally:
                 ttnn.close_device(device)
     except BaseException as exc:                          # the diagnostic text must reach the check, so record it and print it

@@ -4,7 +4,6 @@
 # Test fixture for tt-orchard's kernel loop: upstream tt-lang examples/eltwise_add.py with the
 # function renamed OPERATION and the host code removed. A colon is missing on the decorated def line, so the file
 # does not parse and the check must end import_error.
-import torch
 import ttl
 import ttnn
 

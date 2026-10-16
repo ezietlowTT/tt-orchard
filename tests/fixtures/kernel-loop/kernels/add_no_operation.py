@@ -4,7 +4,6 @@
 # Test fixture for tt-orchard's kernel loop: upstream tt-lang examples/eltwise_add.py with the
 # function renamed OPERATION and the host code removed. The function is named eltwise_add again, so the file is valid
 # and defines no OPERATION: the check must end no_kernel.
-import torch
 import ttl
 import ttnn
 

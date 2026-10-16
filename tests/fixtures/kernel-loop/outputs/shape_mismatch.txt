@@ -1,11 +1,12 @@
+PROGRESS import
 PROGRESS open_device
 PROGRESS set seed0
 
 ❌ Error in kernel node0-add_read:
 error: ValueError: Tensor shape (32, 32) does not match Block shape (2, 2) (tile counts: 1 vs 4)
-  --> <ATTEMPT_DIR>/kernel.py:47:27
+  --> <ATTEMPT_DIR>/kernel.py:46:27
    |
-47 |                     tx_a = ttl.copy(a[r, c], a_block)
+46 |                     tx_a = ttl.copy(a[r, c], a_block)
    |                           ^
    |
 --------------------------------------------------
@@ -17,7 +18,7 @@ Traceback (most recent call last):
     func()
   File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/program.py", line 454, in _tagged
     fn()
-  File "<ATTEMPT_DIR>/kernel.py", line 47, in add_read
+  File "<ATTEMPT_DIR>/kernel.py", line 46, in add_read
     tx_a = ttl.copy(a[r, c], a_block)
            ^^^^^^^^^^^^^^^^^^^^^^^^^^
   File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/copy.py", line 423, in copy
@@ -36,7 +37,7 @@ ValueError: Tensor shape (32, 32) does not match Block shape (2, 2) (tile counts
 The above exception was the direct cause of the following exception:
 
 Traceback (most recent call last):
-  File "<TEMPLATES>/kernel_harness.py", line 96, in main
+  File "<TEMPLATES>/kernel_harness.py", line 120, in main
     operation(*tt_ins, out)
   File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/operation.py", line 172, in wrapper
     run_operation(modified_func, actual_grid, args, kwargs)

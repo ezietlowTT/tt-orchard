@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Test fixture for tt-orchard's kernel loop: upstream tt-lang examples/eltwise_add.py with the
 # function renamed OPERATION and the host code removed. Changed to a - b, so the check must end numeric_mismatch.
-import torch
 import ttl
 import ttnn
 

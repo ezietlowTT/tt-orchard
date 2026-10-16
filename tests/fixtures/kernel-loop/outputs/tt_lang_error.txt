@@ -1,3 +1,4 @@
+PROGRESS import
 PROGRESS open_device
 PROGRESS set seed0
 
@@ -5,27 +6,27 @@ Deadlock detected: all generators blocked
 
 ❌ Error during deadlock detection:
 error: blocked on wait() on DataflowBuffer(a_dfb) (nodes: 0-1, 8-9, 16-17, 24-25)
-  --> <ATTEMPT_DIR>/kernel.py:45:1
+  --> <ATTEMPT_DIR>/kernel.py:44:1
    |
-45 |                             a_dfb.wait() as a_blk,
+44 |                             a_dfb.wait() as a_blk,
    | ^
    |
 --------------------------------------------------
 
 ❌ Error during deadlock detection:
 error: blocked on wait() on DataflowBuffer(a_dfb) (nodes: 0-1, 8-9, 16-17, 24-25)
-  --> <ATTEMPT_DIR>/kernel.py:61:1
+  --> <ATTEMPT_DIR>/kernel.py:60:1
    |
-61 |                         with a_dfb.wait() as a_blk, b_dfb.wait() as b_blk:
+60 |                         with a_dfb.wait() as a_blk, b_dfb.wait() as b_blk:
    | ^
    |
 --------------------------------------------------
 
 ❌ Error during deadlock detection:
 error: blocked on wait() on DataflowBuffer(out_dfb) (nodes: 0-1, 8-9, 16-17, 24-25)
-  --> <ATTEMPT_DIR>/kernel.py:77:1
+  --> <ATTEMPT_DIR>/kernel.py:76:1
    |
-77 |                         with out_dfb.wait() as out_blk:
+76 |                         with out_dfb.wait() as out_blk:
    | ^
    |
 --------------------------------------------------
@@ -35,7 +36,7 @@ RuntimeError: deadlock
 The above exception was the direct cause of the following exception:
 
 Traceback (most recent call last):
-  File "<TEMPLATES>/kernel_harness.py", line 96, in main
+  File "<TEMPLATES>/kernel_harness.py", line 120, in main
     operation(*tt_ins, out)
   File "<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/operation.py", line 172, in wrapper
     run_operation(modified_func, actual_grid, args, kwargs)
