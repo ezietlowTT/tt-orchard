@@ -2431,3 +2431,14 @@ def test_the_start_line_says_attempts_per_temperature_and_the_total(tmp_path, fa
     kp.main(probe_args(tmp_path, attempts=5, temperatures="0,0.7"), env=fake_kenv, out=out, probe=lambda e, m: True,
             run_watched_fn=no_run)
     assert "5 attempts per temperature (0, 0.7): 10 in total" in out.getvalue()
+
+
+def test_a_greedy_only_run_gives_no_seed_formula_or_seed_advice(tmp_path):
+    """W6. No attempt of a greedy-only run sends a seed, so the header says only that."""
+    header = {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"],
+              "sampling": {"temperatures": [0.0], "top_p": None, "seed_base": 1234, "seed_base_from": "probe id",
+                           "attempts_per_temperature": 3}}
+    kp.write_report(tmp_path, [_sampled(1, 0.0, "a" * 64, op="add")], header)
+    flat = " ".join((tmp_path / "kernel-probe-report.md").read_text().split())
+    assert "No seed is sent at temperature 0." in flat
+    assert "--seed" not in flat and "1234" not in flat and "+ k" not in flat

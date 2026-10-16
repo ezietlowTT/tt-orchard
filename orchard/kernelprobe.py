@@ -961,9 +961,12 @@ def _sampling_text(sp: dict) -> str:
     """The run's sampling in one sentence, with the seed base needed to repeat a sampled run."""
     temps = ", ".join(f"{t:g}" for t in sp.get("temperatures") or [])
     top_p = "the server's default" if sp.get("top_p") is None else f"{sp['top_p']:g}"
-    return (f"Sampling: temperature {temps} ({sp.get('attempts_per_temperature')} attempts each), top_p {top_p}. "
-            f"No seed is sent at temperature 0. Above 0, attempt k sends seed {sp.get('seed_base')} + k (base from "
-            f"{sp.get('seed_base_from')}; repeat it with --seed {sp.get('seed_base')}).")
+    text = (f"Sampling: temperature {temps} ({sp.get('attempts_per_temperature')} attempts each), top_p {top_p}. "
+            "No seed is sent at temperature 0.")
+    if any(t != 0 for t in sp.get("temperatures") or []):       # only then does any attempt send a seed
+        text += (f" Above 0, attempt k sends seed {sp.get('seed_base')} + k (base from {sp.get('seed_base_from')}; "
+                 f"send the same requests again with --seed {sp.get('seed_base')}).")
+    return text
 
 
 def _group_lines(g: dict, rows: list[dict]) -> list[str]:
