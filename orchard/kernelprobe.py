@@ -1230,9 +1230,9 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     written from the records this run's attempts returned. `tier_config` is the TierConfig the coder comes from when a
     flag is missing (the CLI loads it from bringup.toml).
 
-    The output directory is locked (`probe.lock`) from the first write to the end, on every path. A second probe on a
-    directory whose lock names a live probe is refused with exit 2; a lock left by a probe that has ended is taken
-    over.
+    The output directory is locked (an flock on `probe.lock`) from the first write to the end. A second probe on the
+    same directory is refused with exit 2. The kernel releases the lock when this process dies, however it dies; the
+    file may remain after a SIGKILL and is harmless. A clean exit removes it.
 
     A run that stops early still writes its report from what finished, with "The probe stopped: <reason>" in it:
     a hung hardware run (ProbeBlocked) exits 5, an exception in an attempt or in the hardware phase exits 3, and Ctrl-C

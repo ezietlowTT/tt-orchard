@@ -1247,7 +1247,8 @@ Key decisions (spec section 11, items 17 to 25):
 - gozer gets 120 s after the watcher's SIGTERM, because its lease release runs a chip reset of about 42 s. The first 5 s grace
   killed gozer during the reset.
 - The probe stops stray agent processes before any verdict: same uid, `ORCHARD_RUN_DIR` exactly the attempt directory, SIGTERM,
-  2 s, a second scan, SIGKILL. It cannot see a cleared environment or a non-dumpable process.
+  2 s, a second scan, SIGKILL. `stopped` means the process is gone. It cannot see a process whose /proc environ no longer
+  holds the value (an exec with a new environment; `clearenv()` alone does not change it) or a non-dumpable process.
 - The report gives the watcher's longest quiet stretch and longest repeat for each hardware run, so its limits can be set from a
   measurement; it also has a status column and notes on `add` and the simulator's f32.
 - The static gate allows only listed names from `typing` and `__future__` and refuses forbidden names as attributes and imports.
@@ -1256,7 +1257,8 @@ Key decisions (spec section 11, items 17 to 25):
 - The ops-inventory template builds only a `PreTrainedModel` subclass.
 - kernel_check runs the simulator in its own session with `PR_SET_PDEATHSIG` and a SIGTERM handler. The first version of this fix
   (session only) orphaned the simulator when the watcher stopped kernel_check; the re-review found it.
-- `kernel-probe` takes `probe.lock` in its output directory.
+- `kernel-probe` holds an flock on `probe.lock` in its output directory. A first version (a pid file with a staleness
+  check) let two probes run at once after both judged a stale lock dead; the re-review found it.
 Notable moment: an I7 test written against the old code had a child print without end under a 60 s backstop. It wrote a 48 GB log
 under `/tmp/pytest-of-ttuser` and took the root disk to 97% while the live probe ran. I deleted it at once. Tests that make large
 output now run the child under `RLIMIT_FSIZE` (16 MiB) and write a bounded amount.

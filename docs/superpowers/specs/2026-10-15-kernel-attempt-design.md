@@ -335,8 +335,10 @@ Each item changes or adds to the approved design above. Reasons come from the im
 18. **A sweep for stray agent processes.** When the agent step ends (also after a crash or an interrupt) and before any verdict, the
     probe stops every process of the operator's whose environment has `ORCHARD_RUN_DIR` exactly equal to the attempt directory:
     SIGTERM, up to 2 s, a second scan, then SIGKILL. It never signals itself or an ancestor. The record lists each process with
-    `stopped`, and the report counts them. It cannot see a process that cleared its environment or one whose `/proc` entry is not
-    readable (a non-dumpable process).
+    `stopped`, which is true only when the process is gone (no `/proc` entry, a zombie, or another process under the pid); the
+    report counts the others as not confirmed stopped. It cannot see a process whose `/proc/<pid>/environ` no longer holds the
+    value (an exec with a new environment, or a program that overwrote that memory; `clearenv()` alone does not change it) or
+    one whose `/proc` entry is not readable (a non-dumpable process).
 19. **The report gives what the stall watcher saw.** For the smoke test and each hardware run it prints the longest quiet stretch
     and the longest run of one repeated line, beside the limits (60 s and 20 lines; neither is measured). A stopped run's first line is the
     watcher's reason (`backstop`, `stalled` or `repeating`). The table has a status column, says `add` is a calibration op and that
@@ -351,7 +353,9 @@ Each item changes or adds to the approved design above. Reasons come from the im
 23. **The simulator dies with the check.** kernel_check runs tt-lang-sim in its own session, kills that group on a timeout, turns
     SIGTERM, SIGINT and SIGHUP into an exception that kills it too, and starts it with `PR_SET_PDEATHSIG` set to SIGKILL for the
     case where kernel_check itself is killed outright.
-24. **One probe per output directory.** `kernel-probe` takes `probe.lock` in `--out` (created with `O_EXCL`, holding the pid, boot id
-    and start time) and removes it on every path. A lock held by a live probe is refused with exit 2; one left by an ended probe is
-    taken over.
+24. **One probe per output directory.** `kernel-probe` holds an exclusive `flock` on `probe.lock` in `--out` for its whole run. A
+    second probe that cannot take it is refused with exit 2 and told the holder's pid (written in the file as information). The
+    kernel releases the lock when the holder dies, SIGKILL included; the file may remain then, and it is harmless. A clean exit
+    removes the file while it still holds the lock. The first version (a pid file with a staleness check) let two probes that
+    both judged a stale lock dead run at once.
 25. **The stall watcher keeps at most 64 KiB of an unfinished line.** A longer piece is fed to the repeat detector as a line.

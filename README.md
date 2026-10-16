@@ -1100,8 +1100,8 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   names. With a flag missing and no config it refuses and names the two flags. A URL is printed without any
   `user:password@` part.
 - It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`, and when
-  another probe is using the same `--out` directory (its `probe.lock` names a live process). A lock left by a probe
-  that has ended is taken over.
+  another probe is using the same `--out` directory (it holds a lock on `probe.lock`). The lock goes away when its
+  probe ends, however it ends; a `probe.lock` file left after a SIGKILL is harmless.
 - The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
   `kernel.py` made as a regular file of at most 256 KiB, under `<out>/.verdict/<op>-<n>/`. The agent's own `check.json`
   is never believed; when it disagrees, the report marks it `agent_check_untrusted`. Before that re-check, the probe
