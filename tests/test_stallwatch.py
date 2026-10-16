@@ -211,10 +211,8 @@ def test_the_child_is_killed_when_the_watch_loop_raises(tmp_path):
         assert not _alive(made[0].pid)
     finally:
         for p in made:
-            try:
-                os.killpg(p.pid, 9)
-            except ProcessLookupError:
-                pass
+            p.kill()                         # skips a child run_watched has already reaped, so no freed pid is hit
+            p.wait(timeout=5)
 
 
 def test_a_line_split_across_two_reads_is_counted_once(tmp_path):
