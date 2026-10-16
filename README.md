@@ -1089,8 +1089,9 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
 `linear_scan`.
 
 - It starts no model server. The coder must already answer at its endpoint; starting it is `tt-orchard bringup`'s
-  job. Without `--endpoint` and `--model` it uses the tier stage 2 runs on, from the tier config that `bringup.toml`
-  names. With neither flags nor a config it refuses and names the two flags.
+  job. For a flag you leave out it uses the tier stage 2 runs on, from the tier config that `bringup.toml`
+  names. With a flag missing and no config it refuses and names the two flags. A URL is printed without any
+  `user:password@` part.
 - It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`.
 - The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
   `kernel.py`. The agent's own `check.json` is never believed; when it disagrees, the report marks it untrusted.
@@ -1102,6 +1103,8 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   is killed by the stall watcher, the probe stops, and the command exits 5 with the report written for what ran.
 - Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
   attempts' results.
+- A run that stops early still writes its report from the attempts that finished, with the reason. An exception
+  exits 3, Ctrl-C or SIGTERM exits 4, and no hardware run starts after either.
 
 Flags:
 

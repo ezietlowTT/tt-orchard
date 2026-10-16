@@ -162,11 +162,11 @@ def _parser() -> argparse.ArgumentParser:
     inv.add_argument("--seq", type=int, default=8, help="sequence length to trace (default 8)")
     inv.add_argument("--class", dest="cls", help="the transformers class to trace if not config.json's first architecture")
     inv.add_argument("--out", help="output directory (default ./ops-inventory)")
-    from orchard import kernelprobe as _kp
+    from orchard.defaults import KERNEL_PROBE_OPS
     kp = sub.add_parser("kernel-probe", parents=[common],
                         help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
                              "on the simulator (and with --phase hw, on one leased chip). Starts no server")
-    kp.add_argument("--op", required=True, choices=_kp.OPS, help="the op to write a kernel for")
+    kp.add_argument("--op", required=True, choices=KERNEL_PROBE_OPS, help="the op to write a kernel for")
     kp.add_argument("--attempts", type=int, default=5, help="independent attempts, each a fresh conversation (default 5)")
     kp.add_argument("--phase", choices=("sim", "hw"), default="sim",
                     help="sim (default): the simulator only. hw: then a smoke test and each simulator pass on one "

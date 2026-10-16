@@ -50,14 +50,15 @@ import os
 import re
 import secrets
 import shutil
+import signal
 import stat
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from orchard import defaults, ttlang_env
-from orchard.agent import probe_model
-from orchard.agent import AgentStep, Tools, agent_env
+from orchard.agent import AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
 from orchard.stallwatch import StallWatcher, Watched, run_watched
@@ -68,7 +69,7 @@ __all__ = ["Watched"]       # re-exported: tests and callers build fake run_watc
 
 TEMPLATES = Path(__file__).resolve().parent / "skills" / "kernel-loop-templates"
 SKILL = Path(__file__).resolve().parent / "skills" / "kernel-probe.md"
-OPS = ("add", "silu_mul", "rmsnorm", "linear_scan")
+OPS = defaults.KERNEL_PROBE_OPS
 # Provisional: none of these has been measured (spec section 5.3).
 BUDGET = {"max_turns": 40, "wall_s": 1800.0, "sim_timeout_s": 300.0, "hw_backstop_s": 600.0}
 GOZER_WHO = "claude:orchard-kernel-probe"
@@ -630,13 +631,20 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
                                       "elapsed_s": round(got.elapsed_s, 1)})
 
 
-def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_watched=run_watched) -> dict:
+def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_watched=run_watched,
+                 state: dict | None = None) -> dict:
     """The hardware phase of a probe: one smoke test, then hardware_phase for each attempt that passed the simulator.
 
     A failed smoke test ends the phase with no further gozer call, and the report says `hw: unavailable` with the
     smoke test's last lines. A hung smoke test or kernel run raises ProbeBlocked, so no later attempt runs. Returns
-    {"available", "smoke_tail"}."""
+    {"available", "smoke_tail"}.
+
+    Results are kept as they happen, so an exception part way through loses nothing that finished: hardware_phase
+    writes each attempt's `hw` block into its record in place, and the smoke test's result is stored in `state["smoke"]`
+    before any kernel runs."""
     ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched)
+    if state is not None:
+        state["smoke"] = {"available": ok, "smoke_tail": tail}
     if not ok:
         return {"available": False, "smoke_tail": tail}
     for attempt in attempts:
@@ -725,8 +733,8 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines.append(f"- {op}, hardware: {_bars_text(b['hw'])}")
     lines += ["", "## Hardware", ""]
     hw = header.get("hw")
-    if header.get("blocked"):
-        lines += [f"The probe stopped: {header['blocked']}", ""]
+    if header.get("stopped") or header.get("blocked"):
+        lines += [f"The probe stopped: {header.get('stopped') or header['blocked']}", ""]
     if hw is None:
         lines.append("hw: not run")
     elif hw.get("available"):
@@ -756,16 +764,25 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines.append("")
         lines.append(f"attempts to first pass in the simulator: {f['sim']}" if f["sim"] is not None
                      else f"none of {len(rows)} attempts passed in the simulator")
-        if any(isinstance(a.get("hw"), dict) for a in rows):
-            lines.append(f"attempts to first pass on hardware: {f['hw']}" if f["hw"] is not None
-                         else f"none of {len(rows)} attempts passed on hardware")
+        ran = [a for a in rows if isinstance(a.get("hw"), dict)]
+        if ran:
+            # Count only the attempts that ran on hardware. When the probe stopped early, simulator passes that never
+            # reached a chip are said to be left out.
+            left = [a for a in rows if a.get("passed_sim") is True and not isinstance(a.get("hw"), dict)]
+            count = f"{sum(1 for a in ran if _hw_passed(a))} of {len(ran)} attempts that ran on hardware passed"
+            if left and (header.get("stopped") or header.get("blocked")):
+                count += "; the probe stopped before the rest"
+            lines.append(count)
+            if f["hw"] is not None:
+                lines.append(f"attempts to first pass on hardware: {f['hw']}")
     (probe_dir / "kernel-probe-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return data
 
 
 # ---- the command ------------------------------------------------------------------------------------------------
 
-EXIT_OK, EXIT_REFUSED, EXIT_BLOCKED = 0, 2, 5
+# The same codes as orchard/cli.py (a test checks they agree): 3 a crash, 4 an interrupt, 5 a hardware hang.
+EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5
 CODER_STAGE = 2              # the probe's agent is the coder that writes stage 2's code, so it uses stage 2's tier
 
 
@@ -775,6 +792,7 @@ class _Refused(Exception):
 
 def default_env(args) -> ttlang_env.KEnv:
     """The tt-lang environment the flags or the ORCHARD_TTLANG_* variables name, as `tt-orchard kernel-env` sees it."""
+    # Like ttlang_env.main, this reads os.environ and Path.home() directly.
     home = Path.home()
     return ttlang_env.KEnv(
         src_dir=Path(getattr(args, "src_dir", None) or os.environ.get("ORCHARD_TTLANG_SRC")
@@ -805,8 +823,9 @@ def coder_endpoint(args, tier_config, probe) -> tuple[str, str]:
         return tier_config.tiers[tier]["endpoint"], model
     try:
         used, endpoint, _note = resolve_endpoint(tier_config, tier, probe)
-    except TierUnavailable as exc:
-        raise _Refused(f"{exc}. The probe starts no server: start the coder with `tt-orchard bringup`, or pass "
+    except TierUnavailable:
+        t = tier_config.tiers[tier]
+        raise _Refused(f"tier {tier} ({t['model']} at {safe_url(t['endpoint'])}) is not serving. The probe starts no server: start the coder with `tt-orchard bringup`, or pass "
                        "--endpoint and --model for a server that runs") from None
     return endpoint, tier_config.tiers[used]["model"]
 
@@ -830,6 +849,26 @@ def new_probe_id() -> str:
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(4)
 
 
+def safe_url(url) -> str:
+    """`url` with any `user:password@` removed, for printing. The request itself still uses the URL as given."""
+    try:
+        parts = urlsplit(str(url))
+    except ValueError:
+        return "<an unparseable URL>"
+    if "@" not in parts.netloc:
+        return str(url)
+    return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+
+
+def _raise_interrupt(signum, frame):
+    """SIGTERM handler while the probe runs: stop the way Ctrl-C does, so the report is still written."""
+    raise KeyboardInterrupt
+
+
+def _crash(where: str, exc: BaseException) -> str:
+    return f"{where} crashed: {type(exc).__name__}: {str(exc)[:200]}"
+
+
 def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_watched_fn=run_watched,
          tier_config=None) -> int:
     """`tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
@@ -839,9 +878,13 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     endpoint and model are resolved and must answer `probe`. Each refusal returns 2 before any attempt directory
     exists. Then N attempts run one after another, each printing one line as it ends. With --phase hw, run_hardware
     runs one smoke test and then each attempt that passed the simulator, each on one leased chip. The report is
-    written from the records this run's attempts returned. A hung hardware run (ProbeBlocked) ends the hardware
-    phase; the report is still written, and the exit is 5. `tier_config` is the TierConfig the coder comes from when
-    a flag is missing (the CLI loads it from bringup.toml)."""
+    written from the records this run's attempts returned. `tier_config` is the TierConfig the coder comes from when a
+    flag is missing (the CLI loads it from bringup.toml).
+
+    A run that stops early still writes its report from what finished, with "The probe stopped: <reason>" in it:
+    a hung hardware run (ProbeBlocked) exits 5, an exception in an attempt or in the hardware phase exits 3, and Ctrl-C
+    or SIGTERM exits 4. No hardware runs after a crash or an interrupt. If the report itself cannot be written, the
+    records are printed to stderr as JSON and the exit is 3. URLs are printed without any user:password part."""
     say = (lambda line: print(line, file=out)) if out is not None else print
 
     def refuse(message: str) -> int:
@@ -862,45 +905,74 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     except _Refused as exc:
         return refuse(str(exc))
     if not probe(endpoint, model):
-        return refuse(f"the coder at {endpoint} does not answer with the model {model!r}. The probe starts no "
-                      "server: start the coder with `tt-orchard bringup`, or pass --endpoint and --model for a "
+        return refuse(f"the coder at {safe_url(endpoint)} does not answer with the model {model!r}. The probe starts "
+                      "no server: start the coder with `tt-orchard bringup`, or pass --endpoint and --model for a "
                       "server that runs")
 
     probe_dir = Path(getattr(args, "out", None) or "kernel-probe")
     probe_id = new_probe_id()
     facts = tt_lang_facts(env)
-    say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts, coder {model} at {endpoint}")
-    records = []
-    for n in range(1, attempts + 1):
-        record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint, model=model,
-                             coder_model=model, probe_id=probe_id, http=http, run_watched=run_watched_fn,
-                             tt_lang=facts)
-        records.append(record)
-        say(_attempt_line(record))
-
-    hw, blocked = None, None
-    if getattr(args, "phase", "sim") == "hw":
-        shared = getattr(args, "shared_python", None) or str(Path.home() / ".tenstorrent-venv" / "bin" / "python")
+    say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts, coder {model} at {safe_url(endpoint)}")
+    records: list[dict] = []
+    hw, stopped, blocked, code = None, None, None, EXIT_OK
+    state: dict = {}
+    hw_started = False
+    try:
+        previous = signal.signal(signal.SIGTERM, _raise_interrupt)
+    except ValueError:                                  # not the main thread: no handler can be installed
+        previous = None
+    try:
+        where = "attempt 1"
         try:
-            hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
-                              run_watched=run_watched_fn)
-        except ProbeBlocked as exc:
-            blocked = str(exc)
-            # A hung smoke test carries its own hardware block. A hung kernel run comes after a passing smoke test.
-            hw = exc.hw if exc.hw is not None else {"available": True, "smoke_tail": []}
+            for n in range(1, attempts + 1):
+                where = f"attempt {n}"
+                record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint, model=model,
+                                     coder_model=model, probe_id=probe_id, http=http, run_watched=run_watched_fn,
+                                     tt_lang=facts)
+                records.append(record)
+                say(_attempt_line(record))
+            if getattr(args, "phase", "sim") == "hw":
+                where, hw_started = "the hardware phase", True
+                shared = getattr(args, "shared_python", None) or str(Path.home() / ".tenstorrent-venv" / "bin" / "python")
+                try:
+                    hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
+                                      run_watched=run_watched_fn, state=state)
+                except ProbeBlocked as exc:
+                    blocked = stopped = str(exc)
+                    code = EXIT_BLOCKED
+                    # A hung smoke test carries its own hardware block. A kernel hang came after a passing smoke test.
+                    hw = exc.hw if exc.hw is not None else state.get("smoke")
+        except KeyboardInterrupt:
+            stopped, code = f"interrupted during {where}", EXIT_ABORTED
+        except Exception as exc:
+            stopped, code = _crash(where, exc), EXIT_ERROR
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+    if hw_started and hw is None:
+        hw = state.get("smoke")                         # a crash or an interrupt after the smoke test ran
+    try:
         for a in records:
             if isinstance(a.get("hw"), dict):
                 say(_hw_line(a))
         if hw and not hw.get("available") and not hw.get("hung"):
             say("hardware unavailable: the smoke test failed (the report has its last lines)")
-
-    header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
-                           ignored_records=0)
-    if blocked:
-        header["blocked"] = blocked
-    write_report(probe_dir, records, header)
-    say(f"report: {probe_dir / 'kernel-probe-report.md'}")
-    if blocked:
-        say(f"blocked: {blocked}")
-        return EXIT_BLOCKED
-    return EXIT_OK
+        header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
+                               ignored_records=0)
+        if stopped:
+            header["stopped"] = stopped
+        if blocked:
+            header["blocked"] = blocked
+        write_report(probe_dir, records, header)
+        say(f"report: {probe_dir / 'kernel-probe-report.md'}")
+        if stopped:
+            say(f"stopped: {stopped}")
+    except Exception as exc:                            # never let the last step lose the records
+        try:
+            print(f"the report could not be written ({type(exc).__name__}: {exc}); the attempt records follow",
+                  file=sys.stderr)
+            print(json.dumps({"stopped": stopped, "attempts": records}, default=str), file=sys.stderr)
+        except Exception:
+            pass
+        return EXIT_ERROR
+    return code
