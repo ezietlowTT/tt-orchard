@@ -1115,7 +1115,8 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
   `harness_error` (a fault in the templates or the environment, including the setup phase).
 - The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
-  set). Attempts are independent draws, so the report gives counts and no rates.
+  set). The report gives counts and no rates. At temperature 0 (the default) attempts can repeat each other, so for
+  each op and temperature the report counts the distinct kernels and warns when every attempt wrote the same one.
 - `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
   runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
   The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress

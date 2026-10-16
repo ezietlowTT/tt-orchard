@@ -37,8 +37,9 @@ longer holds the value (an exec with a new environment, or a program that overwr
 and can write anywhere the operator can, including the `.verdict` directory. The static gate and this boundary are
 best effort.
 
-The budget (BUDGET) and the watchdog's detectors bound each attempt. Attempts are independent draws, and the report
-gives counts with no rates.
+The budget (BUDGET) and the watchdog's detectors bound each attempt. Attempts at temperature 0 (the default, greedy
+decoding) can repeat each other, so the report counts the distinct kernels per op and temperature; it gives counts
+with no rates.
 
 `main` is the command `tt-orchard kernel-probe`. It starts no model server: the coder must already answer at its
 endpoint (starting it is `tt-orchard bringup`'s job), and the simulator environment must pass
@@ -965,14 +966,77 @@ def _sampling_text(sp: dict) -> str:
             f"{sp.get('seed_base_from')}; repeat it with --seed {sp.get('seed_base')}).")
 
 
+def _group_lines(g: dict, rows: list[dict]) -> list[str]:
+    """One temperature group of an op: a heading, the attempts table and the distinct-kernel lines."""
+    lines = ["", f"### temperature {g['temperature']:g}", "",
+             "| attempt | simulator | hardware | status | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
+             "first line | agent check |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for a in sorted(rows, key=lambda a: a["attempt"]):
+        h = a.get("hw") if isinstance(a.get("hw"), dict) else None
+        category = a.get("category") or (h or {}).get("category")
+        first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
+        lines.append("| " + " | ".join([
+            _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
+            "-" if h is None else ("yes" if h.get("passed") else "no"), _status_cell(a),
+            _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
+            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
+    return lines + [""] + _distinct_lines(g)
+
+
 def _bars_text(b: dict) -> str:
     lo, hi = b["slope"]
     return (f"pcc >= {b['pcc']}, rel_l2 <= {b['rel_l2']}, slope in [{lo}, {hi}], "
             f"max_abs_err <= {b['max_abs_atol']} + {b['max_abs_rtol']} * max|expected|")
 
 
+def _temperature_of(a: dict) -> float:
+    """The attempt's sampling temperature; a record from before sampling was recorded was greedy (0)."""
+    sp = a.get("sampling") if isinstance(a.get("sampling"), dict) else {}
+    t = sp.get("temperature")
+    return float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else 0.0
+
+
+def kernel_groups(attempts: list[dict], ops: list[str]) -> list[dict]:
+    """One group per op and temperature, in the order they appear: the attempt numbers, the sampling, and how many
+    distinct kernels the attempts wrote (by provenance.kernel_sha256). Attempts with no kernel copied count apart."""
+    groups: dict[tuple, dict] = {}
+    for op in ops:
+        for a in sorted((a for a in attempts if a["op"] == op), key=lambda a: a["attempt"]):
+            key = (op, _temperature_of(a))
+            g = groups.setdefault(key, {"op": op, "temperature": key[1], "attempts": [], "shas": [],
+                                        "sampling": a.get("sampling") if isinstance(a.get("sampling"), dict)
+                                        else {"temperature": 0.0, "top_p": None, "seed": None}})
+            g["attempts"].append(a["attempt"])
+            g["shas"].append((a.get("provenance") or {}).get("kernel_sha256"))
+    out = []
+    for g in groups.values():
+        shas = [x for x in g.pop("shas") if x]
+        out.append({**g, "with_kernel": len(shas), "distinct_kernels": len(set(shas)),
+                    "no_kernel": len(g["attempts"]) - len(shas)})
+    return out
+
+
+def _distinct_lines(g: dict) -> list[str]:
+    """The distinct-kernel line of a group, and a warning when every attempt that wrote a kernel wrote the same one."""
+    line = f"distinct kernels: {g['distinct_kernels']} of {g['with_kernel']} attempts"
+    if g["no_kernel"]:
+        line += f"; {g['no_kernel']} wrote no kernel"
+    lines = [line]
+    if g["with_kernel"] > 1 and g["distinct_kernels"] == 1:
+        if g["temperature"] == 0:
+            lines.append(f"All {g['with_kernel']} attempts produced the same kernel: at temperature 0 the server decodes "
+                         "greedily, so repeated attempts at one prompt can be one sample. Raise --temperature to "
+                         "explore.")
+        else:
+            lines.append(f"All {g['with_kernel']} attempts produced the same kernel at temperature "
+                         f"{g['temperature']:g}: the server may ignore the temperature or the seed.")
+    return lines
+
+
 def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
-    """Write kernel-probe-report.json (header, attempts, attempts to first pass per op) and kernel-probe-report.md."""
+    """Write kernel-probe-report.json (header, attempts, attempts to first pass per op, and per op and temperature the
+    distinct-kernel counts) and kernel-probe-report.md."""
     probe_dir = Path(probe_dir)
     probe_dir.mkdir(parents=True, exist_ok=True)
     ops = list(header.get("ops") or [])
@@ -982,14 +1046,16 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     by_op = {op: [a for a in attempts if a["op"] == op] for op in ops}
     first = {op: {"sim": _first_pass(rows, lambda a: a.get("passed_sim") is True), "hw": _first_pass(rows, _hw_passed)}
              for op, rows in by_op.items()}
-    data = {"header": header, "attempts": attempts, "first_pass": first}
+    groups = kernel_groups(attempts, ops)
+    data = {"header": header, "attempts": attempts, "first_pass": first, "groups": groups}
     _write_json(probe_dir / "kernel-probe-report.json", data)
 
     t = header.get("tt_lang") or {}
     lines = ["# Kernel probe report", "",
              f"Probe id: {header.get('probe_id')}. Coder model: {header.get('coder_model')}.", "",
-             "Attempts are independent draws from a model server that may not accept a seed. The report gives counts "
-             "and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
+             "Attempts at temperature 0 are repeatable and can repeat each other. Attempts at temperature above 0 "
+             "are independent draws only if the server honours the seed or no seed is sent; honouring the seed is "
+             "not verified. The report gives counts and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
              "outliers. A kernel that passes them can still fail on real activations.", "",
              "The simulator promotes bf16 to f32 (tt-lang-sim's default) and the references compute in f32, so on a "
              "simple op a correct kernel shows a max_abs_err of 0.0 and a PCC of 1.0. Rounding on hardware is "
@@ -1027,19 +1093,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines += ["hw: unavailable. The smoke test (upstream's eltwise_add.py on one chip) failed. Its last lines:", "",
                   "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
     for op, rows in by_op.items():
-        lines += ["", f"## {op}", "",
-                  "| attempt | simulator | hardware | status | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
-                  "first line | agent check |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
-        for a in sorted(rows, key=lambda a: a["attempt"]):
-            h = a.get("hw") if isinstance(a.get("hw"), dict) else None
-            category = a.get("category") or (h or {}).get("category")
-            first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
-            lines.append("| " + " | ".join([
-                _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
-                "-" if h is None else ("yes" if h.get("passed") else "no"), _status_cell(a),
-                _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
-                _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
+        lines += ["", f"## {op}"]
+        for g in (g for g in groups if g["op"] == op):
+            lines += _group_lines(g, [a for a in rows if a["attempt"] in g["attempts"]])
         f = first[op]
         lines.append("")
         lines.append(f"attempts to first pass in the simulator: {f['sim']}" if f["sim"] is not None

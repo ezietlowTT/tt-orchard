@@ -2305,3 +2305,47 @@ def test_the_cli_parser_has_the_sampling_flags():
     args = cli._parser().parse_args(["kernel-probe", "--op", "add", "--temperatures", "0,0.5", "--top-p", "0.9",
                                      "--seed", "7"])
     assert (args.temperatures, args.top_p, args.seed, args.temperature) == ("0,0.5", "0.9", "7", None)
+
+
+def _sampled(n, temperature, sha, op="silu_mul"):
+    a = _row_attempt(op=op, attempt=n, sampling={"temperature": temperature, "top_p": None,
+                                                  "seed": None if temperature == 0 else 100 + n})
+    a["provenance"] = {"kernel_sha256": sha}
+    return a
+
+
+def test_the_report_groups_attempts_by_temperature_and_counts_distinct_kernels(tmp_path):
+    attempts = [_sampled(1, 0.0, "a" * 64), _sampled(2, 0.0, "a" * 64), _sampled(3, 0.0, None),
+                _sampled(4, 0.7, "b" * 64), _sampled(5, 0.7, "c" * 64), _sampled(6, 0.7, "b" * 64)]
+    data = kp.write_report(tmp_path, attempts, {"probe_id": "t", "bars": {}, "hw": None, "ops": ["silu_mul"],
+                                                "sampling": {"temperatures": [0.0, 0.7], "top_p": None,
+                                                             "seed_base": 100, "seed_base_from": "--seed",
+                                                             "attempts_per_temperature": 3}})
+    md = (tmp_path / "kernel-probe-report.md").read_text()
+    zero, warm = md.split("### temperature 0.7")
+    assert "### temperature 0\n" in zero
+    assert "| 1 |" in zero and "| 3 |" in zero and "| 4 |" not in zero and "| 4 |" in warm and "| 1 |" not in warm
+    assert "distinct kernels: 1 of 2 attempts; 1 wrote no kernel" in zero
+    assert "All 2 attempts produced the same kernel: at temperature 0 the server decodes greedily" in zero
+    assert "Raise --temperature to explore." in zero
+    assert "distinct kernels: 2 of 3 attempts" in warm and "produced the same kernel" not in warm
+    groups = {g["temperature"]: g for g in data["groups"]}
+    assert groups[0.0]["distinct_kernels"] == 1 and groups[0.0]["with_kernel"] == 2 and groups[0.0]["no_kernel"] == 1
+    assert groups[0.7]["distinct_kernels"] == 2 and groups[0.7]["no_kernel"] == 0
+    assert groups[0.0]["sampling"]["temperature"] == 0.0 and groups[0.7]["attempts"] == [4, 5, 6]
+
+
+@pytest.mark.parametrize("shas,warn", [(["a" * 64], False), (["a" * 64, "b" * 64], False),
+                                       (["a" * 64, "a" * 64, "a" * 64], True), ([None, None], False)],
+                         ids=["one", "two-distinct", "three-same", "none-written"])
+def test_the_same_kernel_warning_needs_more_than_one_attempt_with_a_kernel(tmp_path, shas, warn):
+    md_text = " ".join(_report_md(tmp_path, [_sampled(i + 1, 0.0, s) for i, s in enumerate(shas)]).split())
+    assert ("produced the same kernel" in md_text) is warn
+
+
+def test_the_header_says_greedy_attempts_can_repeat_each_other(tmp_path):
+    flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.0, "a" * 64)]).split())
+    assert "Attempts at temperature 0 are repeatable and can repeat each other." in flat
+    assert ("Attempts at temperature above 0 are independent draws only if the server honours the seed or no seed "
+            "is sent; honouring the seed is not verified.") in flat
+    assert "Attempts are independent draws from a model server" not in flat
