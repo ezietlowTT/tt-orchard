@@ -29,5 +29,14 @@
   "aten.softplus.default": {"ttnn": "softplus"},
   "aten.tril.default": {"ttnn": "tril"},
   "aten.repeat_interleave.self_int": {"ttnn": "repeat_interleave"},
-  "aten.expand.default": {"ttnn": "expand"}
+  "aten.expand.default": {"ttnn": "expand"},
+  "aten.to.dtype": {"ttnn": "typecast"},
+  "aten.pad.default": {"ttnn": "pad"},
+  "aten.arange.default": {"ttnn": "arange"},
+  "aten.zeros_like.default": {"ttnn": "zeros_like"},
+  "aten.ones.default": {"ttnn": "ones"},
+  "aten.eq.Tensor": {"ttnn": "eq"},
+  "aten.le.Tensor": {"ttnn": "le"},
+  "aten.ne.Scalar": {"ttnn": "ne"},
+  "aten.scaled_dot_product_attention.default": {"ttnn": "transformer.scaled_dot_product_attention"}
 }

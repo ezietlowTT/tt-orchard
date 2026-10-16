@@ -8,6 +8,8 @@ Statuses, and what each claims:
                 This is a name match. It does not say the op supports the shape, dtype or layout the model needs.
     composable  a decomposition exists and every leaf is `mapped`.
     unmapped    neither.
+    ignored     the op is listed in ignored_ops.json: pure metadata that needs no ttnn op. It makes no ttnn claim,
+                so it is `ignored` with or without a dump.
     unchecked   there is no dump for the installed ttnn version, so nothing is claimed.
 
 The dump comes from `tt-orchard inventory refresh-ttnn` (orchard/ttnn_dump.py), which imports ttnn under a lease,
@@ -27,7 +29,7 @@ from pathlib import Path
 DATA_DIR = Path(__file__).resolve().parent / "data"
 TEMPLATE = Path(__file__).resolve().parent / "skills" / "ops-inventory-templates" / "ops_inventory.py"
 SCHEMA = 1
-STATUSES = ("mapped", "composable", "unmapped", "unchecked")
+STATUSES = ("mapped", "composable", "unmapped", "unchecked", "ignored")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 LABEL = {
     "traced": "measured: the op names, counts and one sample shape per op come from torch.export on the meta device",
@@ -51,6 +53,14 @@ def load_table(path) -> dict:
     return data
 
 
+def load_ignored(path) -> frozenset:
+    """Read the list of aten ops that are metadata only."""
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not (isinstance(data, list) and all(isinstance(x, str) for x in data)):
+        raise ValueError(f"{path}: expected a JSON list of aten op names")
+    return frozenset(data)
+
+
 def load_dump(version, data_dir=DATA_DIR):
     """The recorded dump for exactly this ttnn version, or None. A version that is not a plain token is refused,
     so it cannot name a file outside data_dir."""
@@ -66,8 +76,11 @@ def load_dump(version, data_dir=DATA_DIR):
     return d if d.get("ttnn_version") == version and isinstance(d.get("names"), list) else None
 
 
-def status_of(op, mapping, decomps, names, seen=()):
-    """(status, ttnn name, leaves). `names` is the set of names in the dump, or None for no usable dump."""
+def status_of(op, mapping, decomps, names, seen=(), ignored=frozenset()):
+    """(status, ttnn name, leaves). `names` is the set of names in the dump, or None for no usable dump.
+    `ignored` is the set of metadata-only ops; they are checked first because they make no ttnn claim."""
+    if op in ignored:
+        return "ignored", None, []
     entry = mapping.get(op)
     if names is None:
         return "unchecked", (entry or {}).get("ttnn"), []
@@ -77,11 +90,13 @@ def status_of(op, mapping, decomps, names, seen=()):
     if parts and op not in seen:
         leaves, ok = [], True
         for p in parts:
-            s, _, sub = status_of(p, mapping, decomps, names, seen + (op,))
+            s, _, sub = status_of(p, mapping, decomps, names, seen + (op,), ignored)
             if s == "mapped":
                 leaves.append(p)
             elif s == "composable":
                 leaves.extend(sub)
+            elif s == "ignored":
+                pass                      # metadata only: nothing to build
             else:
                 ok = False
         if ok:
@@ -89,7 +104,7 @@ def status_of(op, mapping, decomps, names, seen=()):
     return "unmapped", (entry or {}).get("ttnn"), []
 
 
-def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None) -> dict:
+def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ignored=frozenset()) -> dict:
     """The inventory dict for one raw trace. `against` is another inventory (the base model's) to compare with."""
     inv = {"schema": SCHEMA, "model_dir": raw.get("model_dir"), "architectures": raw.get("architectures", []),
            "traced_class": raw.get("traced_class"), "torch": raw.get("torch"), "transformers": raw.get("transformers"),
@@ -113,14 +128,18 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None) -> 
     inv["ttnn_dump_note"] = note
     layers, traced = raw.get("layers_in_config"), raw.get("layers_traced")
     factor = layers / traced if layers and traced else None
-    inv["scaling"] = (f"in-layer ops scaled by {layers}/{traced}" if factor
-                      else "the config has no recognisable layer count: counts are not scaled")
+    if not factor:
+        inv["scaling"] = "the config has no recognisable layer count: counts are not scaled"
+    elif layers == traced:
+        inv["scaling"] = "all layers traced: no scaling needed"
+    else:
+        inv["scaling"] = f"in-layer ops scaled by {layers}/{traced}"
     base_ops = {o["op"] for o in against["ops"]} if against else None
     rows, distinct, scaled_total = [], {s: 0 for s in STATUSES}, {s: 0 for s in STATUSES}
     for o in raw["ops"]:
-        status, ttnn_name, leaves = status_of(o["op"], mapping, decomps, names)
+        status, ttnn_name, leaves = status_of(o["op"], mapping, decomps, names, ignored=ignored)
         inl = o.get("count_in_layers", 0)
-        scaled = round(inl * factor + (o["count"] - inl)) if factor else o["count"]
+        scaled = round(inl * factor + max(o["count"] - inl, 0)) if factor else o["count"]
         row = {"op": o["op"], "count": o["count"], "scaled_count": scaled, "status": status, "ttnn": ttnn_name,
                "leaves": leaves, "sample": o.get("sample"), "modules": o.get("modules", [])}
         if base_ops is not None:
@@ -146,12 +165,13 @@ def render_md(inv) -> str:
                      "supports the shape, dtype or layout this model needs.")
     else:
         lines.append(f"Nothing is claimed as mapped: {inv['ttnn_dump_note']}.")
-    lines += ["", "| status | distinct ops |", "| --- | --- |"]
+    lines += ["", "Ignored ops are metadata only (views of a tensor that is already there) and need no ttnn op.",
+              "", "| status | distinct ops |", "| --- | --- |"]
     lines += [f"| {s} | {n} |" for s, n in inv["summary"]["distinct"].items()]
     if inv["failures"]:
-        lines += ["", "Trace failures:"] + [f"- {f['stage']}: {f['error']}" for f in inv["failures"]]
+        lines += ["", "Trace failures:"] + [f"- {f.get('stage')}: {f.get('error')}" for f in inv["failures"]]
     lines += ["", "| op | count | scaled | status | ttnn |", "| --- | --- | --- | --- | --- |"]
-    order = {s: i for i, s in enumerate(("unmapped", "unchecked", "composable", "mapped"))}
+    order = {s: i for i, s in enumerate(("unmapped", "unchecked", "composable", "mapped", "ignored"))}
     for r in sorted(inv["ops"], key=lambda r: (order[r["status"]], -r["scaled_count"], r["op"])):
         lines.append(f"| `{r['op']}` | {r['count']} | {r['scaled_count']} | {r['status']} | {r['ttnn'] or ''} |")
     return "\n".join(lines) + "\n"
@@ -183,8 +203,18 @@ def installed_ttnn_version(run, python):
 
 
 def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, cls=None, against=None,
-                  run=_real_run, data_dir=DATA_DIR, say=print) -> int:
-    """Trace, map, write. 0 on success (a skipped model is a success), 2 when the template could not run."""
+                  run=_real_run, dump_dir=DATA_DIR, say=print) -> int:
+    """Trace, map, write. 0 on success (a skipped model is a success), 2 when the template could not run or a
+    file it needs is unreadable. The tables always come from the package; `dump_dir` only says where the ttnn dump is."""
+    base = None
+    if against:
+        try:
+            base = json.loads(Path(against).read_text(encoding="utf-8"))
+            if not isinstance(base, dict) or not isinstance(base.get("ops"), list):
+                raise ValueError("no `ops` list")
+        except (OSError, ValueError) as exc:
+            say(f"cannot use the --against inventory {against}: {exc}")
+            return 2
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     raw_path = out / "raw-ops.json"
@@ -194,12 +224,17 @@ def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, c
     if rc not in (0, 3) or not raw_path.is_file():
         say(f"the trace did not run (exit {rc}): {(stderr or stdout).strip()[-300:]}")
         return 2
-    raw = json.loads(raw_path.read_text(encoding="utf-8"))
+    try:
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("not a JSON object")
+    except (OSError, ValueError) as exc:
+        say(f"raw-ops.json is unreadable: {exc}")
+        return 2
     version = installed_ttnn_version(run, ttnn_python)
-    base = json.loads(Path(against).read_text(encoding="utf-8")) if against else None
-    inv = build(raw, mapping=load_table(Path(data_dir) / "aten_to_ttnn.json"),
-                decomps=load_table(Path(data_dir) / "decompositions.json"), dump=load_dump(version, data_dir),
-                installed_ttnn=version, against=base)
+    inv = build(raw, mapping=load_table(DATA_DIR / "aten_to_ttnn.json"),
+                decomps=load_table(DATA_DIR / "decompositions.json"), dump=load_dump(version, dump_dir),
+                installed_ttnn=version, against=base, ignored=load_ignored(DATA_DIR / "ignored_ops.json"))
     j, m = write_outputs(inv, out)
     say(f"wrote {j} and {m}")
     if inv.get("skipped"):

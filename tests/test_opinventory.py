@@ -39,13 +39,19 @@ def test_a_name_in_the_matching_dump_is_mapped():
     assert rows(inv)["aten.mm.default"]["status"] == "mapped" and rows(inv)["aten.mm.default"]["ttnn"] == "matmul"
 
 
-@pytest.mark.parametrize("dump,installed", [(None, "0.65.1"), (DUMP, "0.70.0"), (DUMP, None)],
+NOTE_NO_DUMP = "no recorded dump for the installed ttnn; nothing is claimed as mapped"
+NOTE_OTHER = "the recorded dump is for ttnn 0.65.1 and ttnn 0.70.0 is installed; not used"
+NOTE_UNKNOWN = "the installed ttnn version is unknown, so the recorded dump is not used"
+
+
+@pytest.mark.parametrize("dump,installed,note", [(None, "0.65.1", NOTE_NO_DUMP), (DUMP, "0.70.0", NOTE_OTHER),
+                                                 (DUMP, None, NOTE_UNKNOWN)],
                          ids=["no dump", "dump for another version", "installed version unknown"])
-def test_nothing_is_claimed_without_a_dump_for_the_installed_version(dump, installed):
-    """Review focus 2."""
+def test_nothing_is_claimed_without_a_dump_for_the_installed_version(dump, installed, note):
+    """Review focus 2. Each case has its own exact note."""
     inv = oi.build(raw(), mapping=MAPPING, decomps=DECOMPS, dump=dump, installed_ttnn=installed)
     assert {r["status"] for r in inv["ops"]} == {"unchecked"}
-    assert inv["ttnn_dump"] is None and inv["ttnn_dump_note"]
+    assert inv["ttnn_dump"] is None and inv["ttnn_dump_note"] == note
 
 
 def test_an_op_with_no_mapping_and_no_decomposition_is_unmapped():
@@ -97,7 +103,97 @@ def test_against_marks_ops_the_base_model_also_uses():
 
 def test_the_summary_counts_ops_by_status():
     inv = oi.build(raw(), mapping=MAPPING, decomps=DECOMPS, dump=DUMP, installed_ttnn="0.65.1")
-    assert inv["summary"]["distinct"] == {"mapped": 2, "composable": 1, "unmapped": 2, "unchecked": 0}
+    assert inv["summary"]["distinct"] == {"mapped": 2, "composable": 1, "unmapped": 2, "unchecked": 0, "ignored": 0}
+
+
+def test_a_nested_decomposition_is_composable_and_lists_the_final_leaves():
+    nested = {"aten.outer.default": ["aten.addmm.default", "aten.embedding.default"], **DECOMPS}
+    s, _, leaves = oi.status_of("aten.outer.default", MAPPING, nested, {"matmul", "embedding", "add"})
+    assert s == "composable" and leaves == ["aten.mm.default", "aten.add.Tensor", "aten.embedding.default"]
+
+
+def test_an_ignored_op_is_ignored_with_or_without_a_dump():
+    ig = frozenset({"aten.alias.default"})
+    assert oi.status_of("aten.alias.default", {}, {}, {"add"}, ignored=ig)[0] == "ignored"
+    assert oi.status_of("aten.alias.default", {}, {}, None, ignored=ig)[0] == "ignored"
+    assert oi.status_of("aten.alias.default", {}, {}, {"add"})[0] == "unmapped"
+
+
+def test_a_metadata_only_leaf_needs_nothing_so_the_decomposition_is_still_composable():
+    d = {"aten.x.default": ["aten.mm.default", "aten.alias.default"]}
+    got = oi.status_of("aten.x.default", MAPPING, d, {"matmul"}, ignored=frozenset({"aten.alias.default"}))
+    assert got == ("composable", None, ["aten.mm.default"])
+    assert oi.status_of("aten.x.default", MAPPING, d, {"matmul"})[0] == "unmapped"
+
+
+def test_build_counts_ignored_ops_and_markdown_says_they_are_metadata_only():
+    r = raw(ops=[op("aten.alias.default", 4, 4), op("aten.mm.default", 1, 1)])
+    inv = oi.build(r, mapping=MAPPING, decomps=DECOMPS, dump=DUMP, installed_ttnn="0.65.1",
+                   ignored=frozenset({"aten.alias.default"}))
+    assert rows(inv)["aten.alias.default"]["status"] == "ignored" and inv["summary"]["distinct"]["ignored"] == 1
+    assert inv["summary"]["scaled_total"]["ignored"] == 4 * 12
+    md = oi.render_md(inv)
+    assert "| ignored | 1 |" in md and "Ignored ops are metadata only" in md
+    nodump = oi.build(r, mapping=MAPPING, decomps=DECOMPS, dump=None, ignored=frozenset({"aten.alias.default"}))
+    assert rows(nodump)["aten.alias.default"]["status"] == "ignored"
+    assert rows(nodump)["aten.mm.default"]["status"] == "unchecked"
+
+
+def test_shipped_tables_make_composable_and_mapped_reachable_on_real_fixtures():
+    """Proven on the packaged tables and the real traces, with a synthetic dump of every mapped ttnn name."""
+    mapping = oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json")
+    decomps = oi.load_table(oi.DATA_DIR / "decompositions.json")
+    ignored = oi.load_ignored(oi.DATA_DIR / "ignored_ops.json")
+    dump = {"ttnn_version": "9.9.9", "names": sorted({e["ttnn"] for e in mapping.values()})}
+    total = {"mapped": 0, "composable": 0}
+    for f in sorted(FIXTURES.glob("raw-*.json")):
+        inv = oi.build(json.loads(f.read_text()), mapping=mapping, decomps=decomps, dump=dump, installed_ttnn="9.9.9",
+                       ignored=ignored)
+        for k in total:
+            total[k] += inv["summary"]["distinct"][k]
+        for r in inv["ops"]:
+            if r["op"] == "aten.select.int":
+                assert r["status"] == "composable" and r["leaves"] == ["aten.slice.Tensor", "aten.squeeze.dim"]
+        assert rows(inv).get("aten.alias.default", {"status": "ignored"})["status"] == "ignored"
+    assert total["composable"] >= 3 and total["mapped"] >= 80, total
+
+
+def test_every_ignored_op_and_decomposition_names_an_op_in_a_fixture():
+    seen = set()
+    for f in FIXTURES.glob("raw-*.json"):
+        seen |= {o["op"] for o in json.loads(f.read_text()).get("ops", [])}
+    ignored = oi.load_ignored(oi.DATA_DIR / "ignored_ops.json")
+    decomps = oi.load_table(oi.DATA_DIR / "decompositions.json")
+    assert ignored and not sorted(ignored - seen) and not sorted(set(decomps) - seen)
+    assert not ignored & {"aten.clone.default", "aten.copy_.default"}
+
+
+def test_load_ignored_refuses_anything_but_a_list_of_names(tmp_path):
+    p = tmp_path / "i.json"
+    p.write_text(json.dumps({"aten.x": 1}))
+    with pytest.raises(ValueError):
+        oi.load_ignored(p)
+
+
+def test_an_outside_term_below_zero_is_clamped():
+    """count_in_layers larger than count would otherwise give a negative outside term."""
+    inv = oi.build(raw(ops=[op("aten.mm.default", 4, 6)]), mapping=MAPPING, decomps=DECOMPS, dump=DUMP,
+                   installed_ttnn="0.65.1")
+    assert rows(inv)["aten.mm.default"]["scaled_count"] == 6 * 12      # the outside term 4 - 6 is clamped to 0 (no -2)
+
+
+def test_all_layers_traced_needs_no_scaling_and_says_so():
+    inv = oi.build(raw(layers_in_config=2, layers_traced=2), mapping=MAPPING, decomps=DECOMPS, dump=DUMP,
+                   installed_ttnn="0.65.1")
+    assert inv["scaling"] == "all layers traced: no scaling needed"
+    assert rows(inv)["aten.mm.default"]["scaled_count"] == 10
+
+
+def test_render_md_survives_a_failure_record_with_missing_keys():
+    inv = oi.build(raw(failures=[{"stage": "export"}, {"error": "boom"}, {}]), mapping=MAPPING, decomps=DECOMPS,
+                   dump=DUMP, installed_ttnn="0.65.1")
+    md = oi.render_md(inv)
+    assert "export" in md and "boom" in md
 
 
 def test_a_dump_version_that_is_a_path_is_refused(tmp_path):
@@ -157,30 +253,22 @@ def fake_run(template_rc, version="0.65.1", fixture="raw-qwen3-tiny.json"):
     return run
 
 
-def data_dir_without_dump(tmp_path):
-    """A data directory with the shipped tables and no ttnn dump."""
-    d = tmp_path / "data"
-    d.mkdir()
-    for name in ("aten_to_ttnn.json", "decompositions.json"):
-        (d / name).write_text((oi.DATA_DIR / name).read_text())
-    return d
-
-
 def test_run_inventory_writes_both_files(tmp_path):
     said = []
     rc = oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path / "o", run=fake_run(0),
-                          data_dir=data_dir_without_dump(tmp_path), say=said.append)
+                          dump_dir=tmp_path / "dumps", say=said.append)
     assert rc == 0
     assert (tmp_path / "o" / "ops-inventory.json").is_file() and (tmp_path / "o" / "ops-inventory.md").is_file()
     inv = json.loads((tmp_path / "o" / "ops-inventory.json").read_text())
-    assert {r["status"] for r in inv["ops"]} == {"unchecked"}      # no dump in data_dir
+    assert {r["status"] for r in inv["ops"]} <= {"unchecked", "ignored"} and "unchecked" in {
+        r["status"] for r in inv["ops"]}                                 # no dump in dump_dir
     assert any("distinct ops by status" in s for s in said)
 
 
 def test_run_inventory_returns_2_when_the_template_exits_4(tmp_path):
     said = []
     rc = oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path / "o", run=fake_run(4),
-                          data_dir=data_dir_without_dump(tmp_path), say=said.append)
+                          dump_dir=tmp_path / "dumps", say=said.append)
     assert rc == 2 and not (tmp_path / "o" / "ops-inventory.json").exists()
     assert any("did not run" in s and "boom" in s for s in said)
 
@@ -188,7 +276,75 @@ def test_run_inventory_returns_2_when_the_template_exits_4(tmp_path):
 def test_run_inventory_passes_the_class_and_sizes_to_the_template(tmp_path):
     run = fake_run(0)
     oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path, layers=3, seq=16, cls="XCls", run=run,
-                     data_dir=data_dir_without_dump(tmp_path), say=lambda s: None)
+                     dump_dir=tmp_path / "dumps", say=lambda s: None)
     argv = run.calls[0]
     assert argv[argv.index("--class") + 1] == "XCls" and argv[argv.index("--layers") + 1] == "3" \
         and argv[argv.index("--seq") + 1] == "16"
+
+
+def test_a_dump_directory_with_a_dump_and_no_tables_works(tmp_path):
+    """The tables always come from the package; dump_dir only says where to look for the dump."""
+    dumps = tmp_path / "dumps"
+    dumps.mkdir()
+    mapping = oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json")
+    (dumps / "ttnn_ops-0.65.1.json").write_text(
+        json.dumps({"ttnn_version": "0.65.1", "names": sorted({e["ttnn"] for e in mapping.values()})}))
+    rc = oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path / "o", run=fake_run(0),
+                          dump_dir=dumps, say=lambda s: None)
+    inv = json.loads((tmp_path / "o" / "ops-inventory.json").read_text())
+    assert rc == 0 and inv["ttnn_dump"]["ttnn_version"] == "0.65.1" and "mapped" in {r["status"] for r in inv["ops"]}
+
+
+def test_with_an_unknown_installed_version_the_live_note_is_the_no_dump_note(tmp_path):
+    """run_inventory passes dump=load_dump(None)=None, so build() never sees the unknown-version case from here."""
+    run = fake_run(0)
+    base = run
+
+    def run2(argv, timeout):
+        return (1, "", "no ttnn") if "importlib.metadata" in " ".join(argv) else base(argv, timeout)
+    oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path / "o", run=run2,
+                     dump_dir=tmp_path / "dumps", say=lambda s: None)
+    inv = json.loads((tmp_path / "o" / "ops-inventory.json").read_text())
+    assert inv["ttnn_dump_note"] == NOTE_NO_DUMP
+
+
+@pytest.mark.parametrize("content", [None, "not json", "[1, 2]", '{"ops": "x"}', '{"nope": []}'],
+                         ids=["missing", "malformed", "not an object", "ops not a list", "no ops"])
+def test_a_bad_against_file_returns_2_before_the_trace_runs(tmp_path, content):
+    against = tmp_path / "base.json"
+    if content is not None:
+        against.write_text(content)
+    run = fake_run(0)
+    said = []
+    rc = oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path / "o", against=against, run=run,
+                          dump_dir=tmp_path / "dumps", say=said.append)
+    assert rc == 2 and run.calls == [] and any("against" in m for m in said)
+
+
+def test_a_corrupt_raw_ops_file_returns_2_with_a_message(tmp_path):
+    def run(argv, timeout):
+        if "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text("{broken")
+            return 0, "", ""
+        return 0, "0.65.1\n", ""
+    said = []
+    rc = oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path / "o", run=run,
+                          dump_dir=tmp_path / "dumps", say=said.append)
+    assert rc == 2 and any("raw-ops.json" in m for m in said)
+
+
+def test_template_exit_3_still_builds_an_inventory_and_the_markdown_shows_the_failures(tmp_path):
+    fx = tmp_path / "raw.json"
+    d = json.loads((FIXTURES / "raw-qwen3-tiny.json").read_text())
+    d["failures"] = [{"stage": "export", "error": "kaboom"}]
+    fx.write_text(json.dumps(d))
+
+    def run(argv, timeout):
+        if "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text(fx.read_text())
+            return 3, "", ""
+        return 0, "0.65.1\n", ""
+    rc = oi.run_inventory("/m", python="py", ttnn_python="py", out_dir=tmp_path / "o", run=run,
+                          dump_dir=tmp_path / "dumps", say=lambda s: None)
+    md = (tmp_path / "o" / "ops-inventory.md").read_text()
+    assert rc == 0 and "Trace failures:" in md and "export: kaboom" in md

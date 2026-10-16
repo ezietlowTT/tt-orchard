@@ -1,1 +1,1 @@
-{"aten.addmm.default": ["aten.mm.default", "aten.add.Tensor"], "aten.silu_.default": ["aten.silu.default"]}
+{"aten.select.int": ["aten.slice.Tensor", "aten.squeeze.dim"]}
