@@ -564,20 +564,32 @@ def _cmdline(proc_root: str, pid: int) -> str:
 
 def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.killpg, grace_s: float = SWEEP_GRACE_S,
                  clock=time.monotonic, sleep=time.sleep) -> list[dict]:
-    """Stop every process that carries this attempt's ORCHARD_RUN_DIR: SIGTERM, up to `grace_s` for them to go, then
-    SIGKILL for any that are left. Returns [{"pid", "cmdline"}] for the processes it found. Never raises.
+    """Stop every process that carries this attempt's ORCHARD_RUN_DIR: SIGTERM, up to `grace_s` for them to go, then a
+    second scan and SIGKILL for everything it finds, so a process a stray started during the grace is caught too.
+    Returns [{"pid", "cmdline", "stopped"}]; `stopped` is True only when /proc no longer shows the process with the
+    attempt's value after the SIGKILL. Never raises an Exception. An interrupt during the grace (a second Ctrl-C)
+    still gets the SIGKILL pass before it goes on.
 
     Our own pid and our ancestors are never signalled. Each signal goes to the pid itself (os.kill), except for a
     process that leads its own group, whose group is signalled so its children go too; a group is never signalled when
     its id is 1 or less or is our own group (the stallwatch guards). Before each signal the process's environment is
-    read again, so a pid that ended and was reused by another process in between is not signalled."""
+    read again, so a pid that ended and was reused by another process in between is not signalled.
+
+    What it cannot see: a process that cleared or replaced its environment, and a process whose /proc entry cannot be
+    read (a non-dumpable process, for example one that ran a setuid program, has a root-owned /proc entry)."""
     records: list[dict] = []
     try:
         protected = _protected_pids(proc_root)
         entry = _run_dir_entry(run_dir)
-        targets = [pid for pid in scan_strays(run_dir, proc_root=proc_root)
-                   if isinstance(pid, int) and pid > 1 and pid not in protected]
-        records = [{"pid": pid, "cmdline": _cmdline(proc_root, pid)} for pid in targets]
+
+        def found() -> list[int]:
+            return [pid for pid in scan_strays(run_dir, proc_root=proc_root)
+                    if isinstance(pid, int) and pid > 1 and pid not in protected]
+
+        def note(pids) -> None:
+            known = {r["pid"] for r in records}
+            records.extend({"pid": pid, "cmdline": _cmdline(proc_root, pid), "stopped": False}
+                           for pid in pids if pid not in known)
 
         def send(pid: int, sig) -> None:
             if not _environ_has(proc_root, pid, entry):
@@ -591,13 +603,28 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
             except (ProcessLookupError, PermissionError):
                 pass
 
+        def kill_pass() -> None:
+            note(found())                                # a second scan: new processes started during the grace
+            for r in records:
+                send(r["pid"], signal.SIGKILL)
+
+        targets = found()
+        note(targets)
         for pid in targets:
             send(pid, signal.SIGTERM)
-        deadline = clock() + grace_s
-        while clock() < deadline and any(_environ_has(proc_root, pid, entry) for pid in targets):
+        try:
+            deadline = clock() + grace_s
+            while clock() < deadline and any(_environ_has(proc_root, pid, entry) for pid in targets):
+                sleep(SWEEP_POLL_S)
+        except BaseException:
+            kill_pass()                                  # an interrupt during the grace must not skip the SIGKILL
+            raise
+        kill_pass()
+        deadline = clock() + 1.0                         # a killed process leaves /proc within moments
+        while clock() < deadline and any(_environ_has(proc_root, r["pid"], entry) for r in records):
             sleep(SWEEP_POLL_S)
-        for pid in targets:
-            send(pid, signal.SIGKILL)
+        for r in records:
+            r["stopped"] = not _environ_has(proc_root, r["pid"], entry)
     except Exception:
         pass
     return records
@@ -871,9 +898,15 @@ def _status_cell(a: dict) -> str:
 def _agent_cell(a: dict) -> str:
     """The agent column: whether its own check.json was untrusted, and how many of its processes the sweep stopped."""
     parts = ["untrusted"] if a.get("agent_check_untrusted") else []
-    n = len(a.get("swept") or [])
-    if n:
-        parts.append(f"{n} stray agent process{'es' if n != 1 else ''} stopped")
+    swept = [r for r in a.get("swept") or [] if isinstance(r, dict)]
+    stopped = [r for r in swept if r.get("stopped") is not False]
+    left = [r for r in swept if r.get("stopped") is False]
+    if stopped:
+        parts.append(f"{len(stopped)} stray agent process{'es' if len(stopped) != 1 else ''} stopped")
+    if left:
+        pids = ", ".join(str(r.get("pid")) for r in left)
+        parts.append(f"{len(left)} stray agent process{'es' if len(left) != 1 else ''} could not be stopped "
+                     f"(pid{'s' if len(left) != 1 else ''} {pids})")
     return _cell("; ".join(parts))
 
 

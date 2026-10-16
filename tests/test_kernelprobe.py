@@ -1562,6 +1562,97 @@ def test_the_sweep_never_raises(tmp_path, monkeypatch):
     assert kp.sweep_strays(tmp_path, kill=lambda *a: None, killpg=lambda *a: None) == []
 
 
+def _carries(pid, adir) -> bool:
+    """Whether /proc shows `pid` alive, not a zombie, with this test's unique ORCHARD_RUN_DIR in its environment."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(errors="replace")
+        env = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    if stat[stat.rfind(")") + 2:].split()[0] == "Z":
+        return False
+    return ("ORCHARD_RUN_DIR=" + str(Path(adir).resolve())).encode() in env.split(b"\0")
+
+
+def test_a_process_a_stray_starts_during_the_grace_is_found_by_a_second_scan_and_killed(tmp_path):
+    """S1. On SIGTERM the stray starts a new process in a session of its own (outside any group the sweep signalled)
+    and exits. A second scan after the grace finds it by its ORCHARD_RUN_DIR and kills it."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    pidfile = tmp_path / "fork.pid"
+    code = ("import os, signal, subprocess, sys, time\n"
+            "def on_term(*a):\n"
+            "    p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+            f"    open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+            "    os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(60)\n")
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stray = _subprocess.Popen([_sys.executable, "-c", code], env=env, start_new_session=True,
+                              stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent, violations = [], []
+    fork = None
+    try:
+        assert stray.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills(lambda pid: _carries(pid, adir), sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=2.0)
+        fork = int(pidfile.read_text())
+        assert stray.wait(timeout=5) == 0
+        assert not _carries(fork, adir)
+        assert {r["pid"]: r["stopped"] for r in swept} == {stray.pid: True, fork: True}
+        assert violations == []
+    finally:
+        _stop(stray)
+        if fork and _carries(fork, adir):
+            os.kill(fork, 9)
+
+
+def test_a_second_interrupt_during_the_grace_still_sends_the_sigkill_and_propagates(tmp_path):
+    """S1. Ctrl-C during the grace (the injected sleep raises KeyboardInterrupt) must not skip the SIGKILL pass."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stubborn = _subprocess.Popen(
+        [_sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                "print('ready', flush=True); time.sleep(60)"],
+        env=env, start_new_session=True, stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent, violations = [], []
+
+    def interrupted(_s):
+        raise KeyboardInterrupt
+    try:
+        assert stubborn.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
+        with pytest.raises(KeyboardInterrupt):
+            kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=5.0, sleep=interrupted)
+        assert stubborn.wait(timeout=5) == -_signal.SIGKILL
+        assert violations == []
+    finally:
+        _stop(stubborn)
+
+
+def test_a_process_still_there_after_the_sigkill_is_reported_as_not_stopped(tmp_path, monkeypatch):
+    """S1. Fakes only: the scan names a pid, every kill function is a recorder, and /proc keeps showing the process.
+    The record says it was not stopped, and the report says so with its pid."""
+    monkeypatch.setattr(kp, "scan_strays", lambda run_dir, **kw: [999999999])
+    monkeypatch.setattr(kp, "_environ_has", lambda *a: True)
+    sent = []
+    record = lambda *a: sent.append(a)                           # noqa: E731
+    now = [0.0]
+
+    def clock():                                                  # each reading moves on 0.5 s, so no wait spins
+        now[0] += 0.5
+        return now[0]
+    swept = kp.sweep_strays(tmp_path, kill=record, killpg=record, grace_s=0, sleep=lambda _s: None, clock=clock)
+    assert swept == [{"pid": 999999999, "cmdline": "", "stopped": False}]
+    md = _report_md(tmp_path / "r", [_row_attempt(swept=swept)])
+    row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    assert "1 stray agent process could not be stopped (pid 999999999)" in row and "process stopped" not in row
+    md = _report_md(tmp_path / "r2", [_row_attempt(swept=[dict(swept[0], stopped=True)])])
+    assert "1 stray agent process stopped" in md
+
+
 class _BackgroundingStep:
     """Stands in for AgentStep: run() starts a process with the agent's environment that outlives the step, the way a
     shell command that backgrounds a process and exits would, then returns or raises."""
