@@ -30,6 +30,10 @@ class StallWatcher:
         if self._mark_at is None:
             self._mark_at, self._mark_bytes, self._mark_ticks = now, out_bytes, cpu_ticks
             return None
+        # A drop in the tree CPU total means a busy descendant exited and its ticks left the sum. The tree changed;
+        # no progress was lost. Rebase the mark. The drop does not count as progress and does not reset the clock.
+        if cpu_ticks < self._mark_ticks:
+            self._mark_ticks = cpu_ticks
         # Progress is measured against the last time progress was seen, so slow CPU use still adds up.
         if out_bytes > self._mark_bytes or cpu_ticks - self._mark_ticks >= self.min_cpu_ticks:
             self._mark_at, self._mark_bytes, self._mark_ticks = now, out_bytes, cpu_ticks
@@ -92,6 +96,9 @@ class Watched:
     elapsed_s: float
 
 
+WAIT_AFTER_KILL_S = 10.0     # longest wait for the leader to be reaped after the kill
+
+
 def _kill_group(proc) -> None:
     try:
         os.killpg(proc.pid, signal.SIGKILL)       # the child leads its own session, so this reaches grandchildren
@@ -103,23 +110,44 @@ def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: 
                 proc_root: str = "/proc", popen=subprocess.Popen, clock=time.monotonic) -> Watched:
     """Run `argv` with stdout and stderr appended to `log_path`, and stop it when the watcher says it is stuck or
     when `backstop_s` has passed. The child gets its own session so the whole group can be killed."""
-    start, read_pos = clock(), 0
+    start = clock()
     with open(log_path, "ab") as log:
+        # Start reading where this child's output begins: an appended log may hold an earlier attempt's lines.
+        read_pos = os.path.getsize(log_path)
+        pending = b""                                  # bytes after the last newline, kept until the line is complete
         proc = popen(list(argv), cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        while True:
+        try:
+            while True:
+                try:
+                    return Watched(proc.wait(timeout=poll_s), None, False, clock() - start)
+                except subprocess.TimeoutExpired:
+                    pass
+                now = clock()
+                size = os.path.getsize(log_path)
+                with open(log_path, "rb") as f:
+                    f.seek(read_pos)
+                    data = pending + f.read(size - read_pos)
+                read_pos = size
+                cut = data.rfind(b"\n") + 1                # decode whole lines only, so no line or character is split
+                fresh = data[:cut].decode("utf-8", errors="replace").splitlines()
+                pending = data[cut:]
+                reason = watcher.feed_lines(fresh) or watcher.observe(now, size, tree_cpu_ticks(proc.pid, proc_root))
+                if reason is None and now - start >= backstop_s:
+                    reason = f"backstop: still running after {backstop_s:.0f} s"
+                if reason is not None:
+                    if proc.poll() is not None:        # it ended by itself between the wait and this decision
+                        return Watched(proc.returncode, None, False, clock() - start)
+                    _kill_group(proc)
+                    try:
+                        code = proc.wait(timeout=WAIT_AFTER_KILL_S)
+                    except subprocess.TimeoutExpired:
+                        code = None
+                    return Watched(code, reason, True, clock() - start)
+        except BaseException:
+            # Any error or interrupt (including the supervisor's abort signals) must not leave the child running.
+            _kill_group(proc)
             try:
-                return Watched(proc.wait(timeout=poll_s), None, False, clock() - start)
+                proc.wait(timeout=WAIT_AFTER_KILL_S)
             except subprocess.TimeoutExpired:
                 pass
-            now = clock()
-            size = os.path.getsize(log_path)
-            with open(log_path, "rb") as f:
-                f.seek(read_pos)
-                fresh = f.read(size - read_pos).decode("utf-8", errors="replace").splitlines()
-            read_pos = size
-            reason = watcher.feed_lines(fresh) or watcher.observe(now, size, tree_cpu_ticks(proc.pid, proc_root))
-            if reason is None and now - start >= backstop_s:
-                reason = f"backstop: still running after {backstop_s:.0f} s"
-            if reason is not None:
-                _kill_group(proc)
-                return Watched(proc.wait(), reason, True, clock() - start)
+            raise

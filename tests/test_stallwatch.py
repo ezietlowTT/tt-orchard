@@ -115,3 +115,122 @@ def test_the_whole_process_group_is_killed_so_a_grandchild_does_not_survive(tmp_
             break
         time.sleep(0.1)
     assert gone
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: stale log, dropped CPU ticks, cleanup on error, partial lines,
+# a bounded wait after the kill, and a child that ends before the kill.
+# ---------------------------------------------------------------------------
+import subprocess as _sp
+
+import orchard.stallwatch as stallwatch
+
+
+class _ExitedProc:
+    """A fake child that has already ended by itself, but whose wait() still times out once."""
+    pid = 0
+    returncode = 0
+
+    def wait(self, timeout=None):
+        raise _sp.TimeoutExpired("fake", timeout)
+
+    def poll(self):
+        return 0
+
+
+class _StuckProc:
+    """A fake child that never ends and ignores the kill. A wait with no timeout would block forever."""
+    pid = 0
+    returncode = None
+
+    def wait(self, timeout=None):
+        assert timeout is not None, "an unbounded wait on a child that will not end"
+        raise _sp.TimeoutExpired("fake", timeout)
+
+    def poll(self):
+        return None
+
+
+def _alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+
+
+def test_an_old_log_is_not_read_as_this_childs_output(tmp_path):
+    log = tmp_path / "log"
+    log.write_bytes(b"same\n" * 50)                       # left by an earlier attempt, appended to
+    w = StallWatcher(quiet_s=30, repeat_lines=5)
+    cmd = [sys.executable, "-c", "import time\nfor i in range(6):\n print('line', i, flush=True); time.sleep(0.3)"]
+    got = run_watched(cmd, cwd=tmp_path, env=dict(os.environ), log_path=log, watcher=w, backstop_s=30, poll_s=0.2)
+    assert not got.killed and got.returncode == 0
+
+
+def test_a_drop_in_tree_cpu_ticks_is_rebased_and_later_cpu_use_counts():
+    w = StallWatcher(quiet_s=10, min_cpu_ticks=2)
+    w.observe(0.0, 100, 500)
+    assert w.observe(5.0, 100, 100) is None               # a busy descendant exited: its ticks left the total
+    assert w.observe(11.0, 100, 103) is None              # 3 ticks since the rebase is progress
+
+
+def test_a_drop_in_tree_cpu_ticks_does_not_reset_the_quiet_clock():
+    w = StallWatcher(quiet_s=10, min_cpu_ticks=2)
+    w.observe(0.0, 100, 500)
+    assert w.observe(5.0, 100, 100) is None
+    assert "stalled" in w.observe(10.5, 100, 100)         # no output and no new CPU since 0 s
+
+
+def test_the_child_is_killed_when_the_watch_loop_raises(tmp_path):
+    class Boom(StallWatcher):
+        def observe(self, *a):
+            raise RuntimeError("boom")
+    made = []
+
+    def popen(*a, **k):
+        made.append(subprocess.Popen(*a, **k))
+        return made[-1]
+    try:
+        with pytest.raises(RuntimeError):
+            run_watched(["sleep", "60"], cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
+                        watcher=Boom(), backstop_s=30, poll_s=0.2, popen=popen)
+        assert not _alive(made[0].pid)
+    finally:
+        for p in made:
+            try:
+                os.killpg(p.pid, 9)
+            except ProcessLookupError:
+                pass
+
+
+def test_a_line_split_across_two_reads_is_counted_once(tmp_path):
+    w = StallWatcher(quiet_s=30, repeat_lines=3)
+    code = ("import sys, time\n"
+            "sys.stdout.write('same\\nsame\\nsa'); sys.stdout.flush(); time.sleep(0.8)\n"
+            "sys.stdout.write('me\\n'); sys.stdout.flush(); time.sleep(5)")
+    got = run_watched([sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
+                      watcher=w, backstop_s=30, poll_s=0.2)
+    assert got.killed and "repeating" in got.reason and got.elapsed_s < 4
+
+
+def test_the_wait_after_the_kill_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(stallwatch, "_kill_group", lambda proc: None)
+    monkeypatch.setattr(stallwatch, "WAIT_AFTER_KILL_S", 0.2)
+    got = run_watched(["x"], cwd=tmp_path, env={}, log_path=tmp_path / "log", watcher=StallWatcher(),
+                      backstop_s=0, poll_s=0.01, popen=lambda *a, **k: _StuckProc())
+    assert got.killed and got.returncode is None and got.reason.startswith("backstop")
+
+
+def test_a_child_that_ended_before_the_kill_is_not_reported_as_killed(tmp_path, monkeypatch):
+    killed = []
+    monkeypatch.setattr(stallwatch, "_kill_group", lambda proc: killed.append(proc))
+    got = run_watched(["x"], cwd=tmp_path, env={}, log_path=tmp_path / "log", watcher=StallWatcher(),
+                      backstop_s=0, poll_s=0.01, popen=lambda *a, **k: _ExitedProc())
+    assert not got.killed and got.reason is None and got.returncode == 0 and not killed
+
+
+def test_the_repeat_count_is_exact():
+    w = StallWatcher(repeat_lines=3)
+    assert w.feed_lines(["a", "b", "b"]) is None          # b has run twice
+    assert "repeating" in w.feed_lines(["b"])             # the third b fires
