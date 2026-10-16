@@ -1119,7 +1119,10 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   120 s), the probe stops, and the command exits 5 with the report written for what ran. The grace covers gozer's
   lease release, whose chip reset takes about 42 s, so a watcher stop normally ends with the lease released. Only
   when gozer itself had to be killed after the grace can the lease be left under a dead process: look with
-  `gozer status` and use the gozer-gatekeeper skill.
+  `gozer status` and use the gozer-gatekeeper skill. The watcher's limits on hardware (60 s with no output and no
+  CPU use, 20 repeats of one line) are not measured. For the smoke test and each hardware run the report gives the
+  longest quiet stretch and the longest repeat the watcher saw, and a stopped run's first line names the rule
+  that stopped it (`backstop`, `stalled` or `repeating`).
 - Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
   attempts' results.
 - A run that stops early still writes its report from the attempts that finished, with the reason. An exception

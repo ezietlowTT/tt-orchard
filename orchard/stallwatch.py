@@ -25,6 +25,9 @@ class StallWatcher:
         self.quiet_s, self.min_cpu_ticks, self.repeat_lines = quiet_s, min_cpu_ticks, repeat_lines
         self._mark_at = self._mark_bytes = self._mark_ticks = None
         self._line, self._run = None, 0
+        # What the watcher saw, for setting the limits from a measurement: the longest stretch with no progress (to
+        # the sample that ended it, or to the last sample) and the longest run of one repeated line.
+        self.max_quiet_s, self.max_repeat = 0.0, 0
 
     def observe(self, now: float, out_bytes: int, cpu_ticks: int) -> str | None:
         if self._mark_at is None:
@@ -35,10 +38,11 @@ class StallWatcher:
         if cpu_ticks < self._mark_ticks:
             self._mark_ticks = cpu_ticks
         # Progress is measured against the last time progress was seen, so slow CPU use still adds up.
+        quiet = now - self._mark_at
+        self.max_quiet_s = max(self.max_quiet_s, quiet)
         if out_bytes > self._mark_bytes or cpu_ticks - self._mark_ticks >= self.min_cpu_ticks:
             self._mark_at, self._mark_bytes, self._mark_ticks = now, out_bytes, cpu_ticks
             return None
-        quiet = now - self._mark_at
         if quiet >= self.quiet_s:
             return f"stalled: no output and no CPU use for {quiet:.0f} s"
         return None
@@ -50,6 +54,7 @@ class StallWatcher:
                 continue
             self._run = self._run + 1 if line == self._line else 1
             self._line = line
+            self.max_repeat = max(self.max_repeat, self._run)
             if self._run >= self.repeat_lines:
                 return f"repeating: {line[:80]!r} x {self._run}"
         return None
@@ -95,6 +100,8 @@ class Watched:
     killed: bool
     elapsed_s: float
     max_pending_bytes: int = 0   # the most bytes of an unfinished line the watcher held at one time
+    max_quiet_s: float = 0.0     # the longest stretch with no output and no CPU use that the watcher saw
+    max_repeat: int = 0          # the longest run of one repeated line that the watcher saw
 
 
 # The watcher keeps the bytes after the last newline until their line is complete. A child that prints without
@@ -206,11 +213,14 @@ def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: 
         read_pos = os.path.getsize(log_path)
         pending = b""                                  # bytes after the last newline, kept until the line is complete
         max_pending = 0
+
+        def seen():
+            return (max_pending, getattr(watcher, "max_quiet_s", 0.0), getattr(watcher, "max_repeat", 0))
         proc = popen(list(argv), cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             while True:
                 try:
-                    return Watched(proc.wait(timeout=poll_s), None, False, clock() - start, max_pending)
+                    return Watched(proc.wait(timeout=poll_s), None, False, clock() - start, *seen())
                 except subprocess.TimeoutExpired:
                     pass
                 now = clock()
@@ -231,13 +241,13 @@ def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: 
                     reason = f"backstop: still running after {backstop_s:.0f} s"
                 if reason is not None:
                     if proc.poll() is not None:        # it ended by itself between the wait and this decision
-                        return Watched(proc.returncode, None, False, clock() - start, max_pending)
+                        return Watched(proc.returncode, None, False, clock() - start, *seen())
                     _kill_group(proc, term_grace_s=term_grace_s)
                     try:
                         code = proc.wait(timeout=WAIT_AFTER_KILL_S)
                     except subprocess.TimeoutExpired:
                         code = None
-                    return Watched(code, reason, True, clock() - start, max_pending)
+                    return Watched(code, reason, True, clock() - start, *seen())
         except BaseException:
             # Any error or interrupt (including the supervisor's abort signals) must not leave the child running.
             _kill_group(proc, term_grace_s=term_grace_s)

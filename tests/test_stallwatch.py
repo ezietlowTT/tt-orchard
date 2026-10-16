@@ -570,3 +570,25 @@ def test_a_child_that_prints_4_mib_of_one_character_without_a_newline_is_stopped
                       watcher=StallWatcher(quiet_s=1000, repeat_lines=3), term_grace_s=1.0)
     assert got.killed and got.reason.startswith("repeating:"), got.reason
     assert (tmp_path / "log").stat().st_size <= 4 << 20
+
+
+# I8: the watcher reports the longest quiet stretch and the longest repeat it saw, so the limits can be set from a
+# measurement.
+
+def test_the_watcher_keeps_the_longest_quiet_stretch_and_the_longest_repeat():
+    w = StallWatcher(quiet_s=100, min_cpu_ticks=2, repeat_lines=50)
+    w.observe(0.0, 10, 5)
+    w.observe(7.5, 10, 5)                                  # 7.5 s quiet so far
+    w.observe(9.0, 11, 5)                                  # output: the stretch ended at 9 s
+    w.observe(12.0, 11, 5)
+    assert w.max_quiet_s == pytest.approx(9.0)
+    w.feed_lines(["a", "a", "a", "b", "a", "a"])
+    assert w.max_repeat == 3
+
+
+def test_run_watched_returns_the_watchers_longest_quiet_stretch_and_repeat(tmp_path):
+    code = "import sys, time\nfor _ in range(5):\n    print('same', flush=True)\ntime.sleep(1.5)\n"
+    got = run_watched([sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
+                      popen=_tracked_popen, poll_s=0.1, backstop_s=30, watcher=StallWatcher(quiet_s=100))
+    assert got.returncode == 0 and got.max_repeat == 5
+    assert 0.5 <= got.max_quiet_s <= 5.0, got.max_quiet_s

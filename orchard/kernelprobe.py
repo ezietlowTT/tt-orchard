@@ -82,6 +82,10 @@ GOZER_WHO = "claude:orchard-kernel-probe"
 # leaves the lease under a dead pid. The watcher stops waiting as soon as the group is gone, so the normal path does
 # not wait out the whole grace.
 GOZER_TERM_GRACE_S = 120.0
+# The stall watcher's limits for the smoke test and each hardware run. Not measured: the report gives the longest
+# quiet stretch and the longest repeat the watcher saw on each run, so these can be set from a measurement.
+HW_QUIET_S = 60.0
+HW_REPEAT_LINES = 20
 AGENT = "kernel-probe"
 # One shell command of the agent may run this long: one simulator check plus a margin. The wall budget is checked
 # between turns, so an attempt can overrun it by up to this much.
@@ -669,23 +673,41 @@ def _size(path: Path) -> int:
     return path.stat().st_size if path.is_file() else 0
 
 
-def smoke_test(*, env, shared_python, run_watched=run_watched) -> tuple[bool, list[str]]:
+def _hw_watcher() -> StallWatcher:
+    return StallWatcher(quiet_s=HW_QUIET_S, repeat_lines=HW_REPEAT_LINES)
+
+
+def _watch_facts(got) -> dict:
+    """What the stall watcher saw on one hardware run, beside the limits it applied."""
+    return {"max_quiet_s": round(float(getattr(got, "max_quiet_s", 0.0) or 0.0), 1),
+            "max_repeat": int(getattr(got, "max_repeat", 0) or 0),
+            "quiet_limit_s": HW_QUIET_S, "repeat_limit": HW_REPEAT_LINES}
+
+
+def _watch_text(w: dict) -> str:
+    return (f"longest quiet stretch {w['max_quiet_s']:.1f} s, longest repeat {w['max_repeat']} lines; "
+            f"watcher limits {w['quiet_limit_s']:.0f} s and {w['repeat_limit']} lines")
+
+
+def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | None = None) -> tuple[bool, list[str]]:
     """Upstream's examples/eltwise_add.py with the shared venv's tt-lang and ttnn, on one leased chip (spec 5.4).
     (ok, the last lines of its output). ok needs exit 0 and `PASSED!` in the output. A run the stall watcher
-    killed raises ProbeBlocked."""
+    killed raises ProbeBlocked. `record`, when given, receives `watch`: what the stall watcher saw (_watch_facts)."""
     Path(env.scratch_dir).mkdir(parents=True, exist_ok=True)
     log = Path(env.scratch_dir) / "smoke.txt"
     start = _size(log)
     argv = _gozer("kernel-probe smoke test", str(shared_python), str(Path(env.src_dir) / "examples" / "eltwise_add.py"))
-    got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
+    got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=_hw_watcher(),
                       backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     text = _new_text(log, start)
     tail = text.splitlines()[-SMOKE_TAIL_LINES:]
+    if record is not None:
+        record["watch"] = _watch_facts(got)
     if got.killed:
         # A hang blocks the probe. The watcher's SIGTERM reaches gozer too, and gozer normally releases its lease
         # (with the chip reset) within GOZER_TERM_GRACE_S. Only a gozer that had to be killed after the grace can
         # leave its lease under a dead process.
-        hw = {"available": False, "hung": True, "reason": got.reason, "smoke_tail": tail}
+        hw = {"available": False, "hung": True, "reason": got.reason, "smoke_tail": tail, "watch": _watch_facts(got)}
         last = " / ".join(tail[-5:]) or "(no output)"
         raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its last lines: {last}. The watcher stopped it, and "
                            "gozer normally releases the lease when it stops. If gozer itself had to be killed after "
@@ -739,11 +761,14 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     argv = _gozer(f"kernel-probe {op} attempt {n}", str(shared_python), str(TEMPLATES / "kernel_harness.py"),
                   "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
                   "--phase", "hw")
-    got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
+    got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=_hw_watcher(),
                       backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     if got.killed:
+        # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
+        # watcher stop is not read as a device hang without saying which rule stopped it.
         _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
-                                   "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1)})
+                                   "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1),
+                                   "watch": _watch_facts(got)})
         raise ProbeBlocked(f"{op} attempt {n}: {got.reason}")
     try:
         raw = _read_regular(out, 64 * 1024 * 1024)
@@ -759,7 +784,7 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
     return _record_hw(adir, attempt, {"passed": category is None, "category": category, "first_line": line,
                                       **set_measures(sets), "sets": sets, "violations": [],
-                                      "elapsed_s": round(got.elapsed_s, 1)})
+                                      "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got)})
 
 
 def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_watched=run_watched,
@@ -773,16 +798,17 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
     Results are kept as they happen, so an exception part way through loses nothing that finished: hardware_phase
     writes each attempt's `hw` block into its record in place, and the smoke test's result is stored in `state["smoke"]`
     before any kernel runs."""
-    ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched)
+    seen: dict = {}
+    ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched, record=seen)
     if state is not None:
-        state["smoke"] = {"available": ok, "smoke_tail": tail}
+        state["smoke"] = {"available": ok, "smoke_tail": tail, "watch": seen.get("watch")}
     if not ok:
-        return {"available": False, "smoke_tail": tail}
+        return {"available": False, "smoke_tail": tail, "watch": seen.get("watch")}
     for attempt in attempts:
         if attempt.get("passed_sim") is True:
             adir = Path(probe_dir) / attempt["op"] / f"attempt-{attempt['attempt']}"
             hardware_phase(adir, attempt, env=env, shared_python=shared_python, run_watched=run_watched)
-    return {"available": True, "smoke_tail": tail}
+    return {"available": True, "smoke_tail": tail, "watch": seen.get("watch")}
 
 
 # ---- the report -------------------------------------------------------------------------------------------------
@@ -898,6 +924,8 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     hw = header.get("hw")
     if header.get("stopped") or header.get("blocked"):
         lines += [f"The probe stopped: {header.get('stopped') or header['blocked']}", ""]
+    if isinstance(hw, dict) and isinstance(hw.get("watch"), dict):
+        lines += [f"smoke test: {_watch_text(hw['watch'])}", ""]
     if hw is None:
         lines.append("hw: not run")
     elif hw.get("available"):
@@ -937,6 +965,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
             lines.append(count)
             if f["hw"] is not None:
                 lines.append(f"attempts to first pass on hardware: {f['hw']}")
+            for a in sorted(ran, key=lambda a: a["attempt"]):
+                if isinstance(a["hw"].get("watch"), dict):
+                    lines.append(f"attempt {a['attempt']} on hardware: {_watch_text(a['hw']['watch'])}")
     (probe_dir / "kernel-probe-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return data
 

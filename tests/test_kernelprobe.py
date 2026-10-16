@@ -1658,3 +1658,53 @@ def test_a_pcc_short_of_1_is_never_printed_as_1(tmp_path, pcc, shown):
     cells = [c.strip() for c in row.strip("|").split("|")]
     header = [c.strip() for c in next(l for l in md.splitlines() if l.startswith("| attempt")).strip("|").split("|")]
     assert cells[header.index("PCC min (sim)")] == shown
+
+
+# ---- what the stall watcher saw on hardware (I8) -------------------------------------------------------------------
+
+
+def test_the_report_gives_the_watchers_longest_quiet_stretch_and_repeat_for_the_smoke_test_and_each_run(tmp_path,
+                                                                                                         fake_kenv):
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+
+    def fake(argv, **kw):
+        if "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET]}))
+            return kp.Watched(0, None, False, 30.0, max_quiet_s=12.34, max_repeat=4)
+        with open(kw["log_path"], "a") as f:
+            f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 9.0, max_quiet_s=3.21, max_repeat=2)
+
+    hw = kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=fake)
+    assert hw["watch"] == {"max_quiet_s": 3.2, "max_repeat": 2, "quiet_limit_s": kp.HW_QUIET_S,
+                           "repeat_limit": kp.HW_REPEAT_LINES}
+    assert attempt["hw"]["watch"]["max_quiet_s"] == 12.3 and attempt["hw"]["watch"]["max_repeat"] == 4
+    header = kp.report_header(env=fake_kenv, coder_model="c", probe_id="t", ops=["add"], hw=hw, tt_lang=FACTS)
+    kp.write_report(tmp_path, [attempt], header)
+    flat = " ".join((tmp_path / "kernel-probe-report.md").read_text().split())
+    assert ("smoke test: longest quiet stretch 3.2 s, longest repeat 2 lines; watcher limits 60 s and 20 lines"
+            in flat)
+    assert ("attempt 1 on hardware: longest quiet stretch 12.3 s, longest repeat 4 lines; watcher limits 60 s and "
+            "20 lines" in flat)
+
+
+@pytest.mark.parametrize("reason,word", [("backstop: still running after 600 s", "backstop"),
+                                         ("stalled: no output and no CPU use for 60 s", "stalled")])
+def test_a_hang_row_says_whether_the_backstop_or_the_stall_rule_stopped_it(tmp_path, fake_kenv, reason, word):
+    """Neither reason may be read as a device hang without the watcher's own words."""
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+
+    def fake(argv, **kw):
+        if "--out" in argv:
+            return kp.Watched(-15, reason, True, 600.0, max_quiet_s=60.0, max_repeat=1)
+        with open(kw["log_path"], "a") as f:
+            f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 9.0)
+
+    with pytest.raises(kp.ProbeBlocked):
+        kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=fake)
+    assert attempt["hw"]["category"] == "hang" and attempt["hw"]["first_line"].startswith(word)
+    assert attempt["hw"]["watch"]["max_quiet_s"] == 60.0
+    kp.write_report(tmp_path, [attempt], {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"]})
+    row = next(l for l in (tmp_path / "kernel-probe-report.md").read_text().splitlines() if l.startswith("| 1 |"))
+    assert f"| hang | {word}" in row
