@@ -20,9 +20,12 @@ Standard library only. The torch side is orchard/skills/ops-inventory-templates/
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -242,3 +245,64 @@ def run_inventory(model_dir, *, python, ttnn_python, out_dir, layers=2, seq=8, c
     else:
         say("distinct ops by status: " + ", ".join(f"{s} {n}" for s, n in inv["summary"]["distinct"].items()))
     return 0
+
+
+UNMAPPED_LIST_MAX = 10
+
+
+def record_in_delta(stage_dir) -> bool:
+    """Merge a short summary of `ops-inventory.json` into `delta.json`, both in `stage_dir`, under the key `inventory`.
+
+    The summary holds the traced class, the skip reason (or None), the distinct-op counts by status, up to ten
+    `unmapped` op names (most frequent first, by scaled count) and the ttnn dump the statuses were checked against.
+    A skipped inventory records the reason and no counts. Every other key of delta.json is left as it was. The file
+    is replaced through a temporary file in the same directory, so a reader never sees half a file. Returns False and
+    changes nothing when either file is missing or is not a JSON object.
+    """
+    sd = Path(stage_dir)
+    try:
+        inv = json.loads((sd / "ops-inventory.json").read_text(encoding="utf-8"))
+        delta = json.loads((sd / "delta.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(inv, dict) or not isinstance(delta, dict):
+        return False
+    rec = {"traced_class": inv.get("traced_class"), "skipped": inv.get("skipped") or None}
+    if not rec["skipped"]:
+        rows = [o for o in inv.get("ops") or [] if isinstance(o, dict) and o.get("status") == "unmapped"]
+        rows.sort(key=lambda o: -(o.get("scaled_count") or 0))
+        rec["distinct"] = (inv.get("summary") or {}).get("distinct")
+        rec["unmapped_ops"] = [o.get("op") for o in rows[:UNMAPPED_LIST_MAX]]
+    rec["ttnn_dump"] = inv.get("ttnn_dump")
+    delta["inventory"] = rec
+    tmp = sd / f".delta.json.{os.getpid()}.tmp"
+    try:
+        tmp.write_text(json.dumps(delta, indent=2) + "\n", encoding="utf-8")
+        os.replace(tmp, sd / "delta.json")
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        return False
+    return True
+
+
+def main(argv=None) -> int:
+    """`python3 -m orchard.opinventory`: run the inventory into a stage directory, then record it in delta.json.
+    Exit 0 or 2 as run_inventory does. A missing delta.json is not an error here: the inventory files are still written."""
+    ap = argparse.ArgumentParser(prog="python3 -m orchard.opinventory", description=main.__doc__)
+    ap.add_argument("--model-dir", required=True)
+    ap.add_argument("--out", required=True, help="the stage directory")
+    ap.add_argument("--python", required=True, help="interpreter with torch and transformers")
+    ap.add_argument("--ttnn-python", default=None)
+    ap.add_argument("--layers", type=int, default=2)
+    ap.add_argument("--seq", type=int, default=8)
+    ap.add_argument("--class", dest="cls", default=None)
+    a = ap.parse_args(argv)
+    rc = run_inventory(a.model_dir, python=a.python, ttnn_python=a.ttnn_python, out_dir=a.out,
+                       layers=a.layers, seq=a.seq, cls=a.cls)
+    if rc == 0 and not record_in_delta(a.out):
+        print("delta.json was not updated: it or ops-inventory.json is missing or unreadable")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())
