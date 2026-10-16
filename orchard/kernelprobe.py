@@ -42,7 +42,8 @@ gives counts with no rates.
 `main` is the command `tt-orchard kernel-probe`. It starts no model server: the coder must already answer at its
 endpoint (starting it is `tt-orchard bringup`'s job), and the simulator environment must pass
 `tt-orchard kernel-env --check`. Exit 0 means a report was written, whatever the attempts' results; 2 is a refusal
-before anything ran; 5 means a hardware run hung, and the report covers what ran before it.
+before anything ran; 3 means an attempt or the hardware phase had a crash; 4 means an interrupt (Ctrl-C or SIGTERM)
+stopped the run; 5 means a hardware run hung. With 3, 4 and 5 the report covers what ran before the stop.
 """
 from __future__ import annotations
 

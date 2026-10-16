@@ -1222,6 +1222,11 @@ def test_the_exit_codes_match_the_cli():
     from orchard import cli
     assert (kp.EXIT_OK, kp.EXIT_REFUSED, kp.EXIT_ERROR, kp.EXIT_ABORTED, kp.EXIT_BLOCKED) == \
         (cli.EXIT_OK, cli.EXIT_REFUSED, cli.EXIT_ERROR, cli.EXIT_ABORTED, cli.EXIT_BLOCKED)
+    # m1: the module docstring names every exit code the command uses, each with its meaning
+    doc = " ".join(kp.__doc__.split())
+    for code, words in ((kp.EXIT_OK, "a report was written"), (kp.EXIT_REFUSED, "refusal"),
+                        (kp.EXIT_ERROR, "crash"), (kp.EXIT_ABORTED, "interrupt"), (kp.EXIT_BLOCKED, "hung")):
+        assert re.search(rf"\b{code}\b[^.;]*{words}", doc), (code, words)
 
 
 def test_an_attempt_that_crashes_keeps_the_earlier_attempts_in_the_report_and_exits_3(tmp_path, fake_kenv, env_ready,
