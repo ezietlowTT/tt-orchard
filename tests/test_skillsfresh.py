@@ -427,16 +427,21 @@ def test_the_provenance_header_tt_warp_adds_is_removed_before_comparing():
     assert sf.upstream_skill_md(UPSTREAM_SKILL_MD) == UPSTREAM_SKILL_MD          # an unchanged copy stays as it is
 
 
-def test_the_real_installed_skill_md_matches_its_upstream_blob_when_present():
-    """The installed SKILL.md on this machine, with the header removed, has upstream's blob sha (measured 2026-10-16:
-    cb2e7e00...). Skipped where the skill is not installed."""
+def test_the_rule_undoes_both_installer_edits_on_the_real_installed_skill_md_when_present():
+    """Review M4: the earlier version skipped on a sha mismatch and so could never fail. This one checks what the rule
+    must do to the real file, whatever its version: the installed copy carries the ttm- name and the provenance block,
+    and the normalized copy has neither and nothing else removed. Skipped only where the skill is not installed."""
     path = Path.home() / ".claude" / "skills" / "ttm-tt-lang" / "SKILL.md"
     if not path.is_file():
         pytest.skip("SKIPPED: ~/.claude/skills/ttm-tt-lang is not installed here")
-    got = blob_sha(sf.upstream_skill_md(path.read_bytes()))
-    if got != "cb2e7e00da1dd7e7b9dcea1127ce8487ccdc0c9c":
-        pytest.skip(f"SKIPPED: the installed SKILL.md is another version ({got})")
-    assert got == "cb2e7e00da1dd7e7b9dcea1127ce8487ccdc0c9c"
+    raw = path.read_bytes()
+    out = sf.upstream_skill_md(raw)
+    assert b"name: ttm-tt-lang\n" in raw and b"> **Provenance:**" in raw
+    assert out.startswith(b"---\nname: tt-lang\n") and b"Provenance" not in out
+    removed = raw.decode().splitlines()
+    kept = out.decode().splitlines()
+    gone = [line for line in removed if line not in kept]
+    assert gone and all(line.startswith("> ") or line == "name: ttm-tt-lang" for line in gone), gone
 
 
 def test_an_installed_skill_equal_to_upstream_is_current(tmp_path):
