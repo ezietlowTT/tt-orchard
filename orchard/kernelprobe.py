@@ -18,6 +18,19 @@ The hardware phase runs only on an attempt whose authoritative simulator check p
 resets a chip. A hardware run that the stall watcher kills is a hang: the probe stops with ProbeBlocked naming the
 attempt. Before any gozer call the hardware path applies the kernel check's static gate again.
 
+The probe keeps its own records outside the attempt directory, in `DIR/.verdict/<op>-<n>/`: the clean copy of
+kernel.py, the authoritative check's result and output, the hardware result and output, and the probe's attempt.json.
+The report is built from these (load_attempts). kernel.py is copied only when it is a regular file (not a link, a
+directory or a device) of at most MAX_KERNEL_BYTES; anything else ends the attempt with no check and no hardware run.
+The sha256 of the copied bytes is recorded, and the hardware phase refuses a copy whose hash has changed. A
+convenience copy of attempt.json is written into the attempt directory after whatever was at that path is removed,
+so the probe never writes through a link the agent left.
+
+These measures stop shortcuts and accidents: a model that edits its check, plants a link, or leaves a file in the
+way. They do not stop an agent determined to attack the operator's account. Agent shells run as the operator, so a
+background process the agent started can outlive its step and write anywhere the operator can, including the
+`.verdict` directory. The static gate and this boundary are best effort.
+
 The budget (BUDGET) and the watchdog's detectors bound each attempt. Attempts are independent draws, and the report
 gives counts with no rates.
 
@@ -28,7 +41,9 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import shutil
+import stat
 import sys
 import time
 from pathlib import Path
@@ -50,9 +65,15 @@ OPS = ("add", "silu_mul", "rmsnorm", "linear_scan")
 BUDGET = {"max_turns": 40, "wall_s": 1800.0, "sim_timeout_s": 300.0, "hw_backstop_s": 600.0}
 GOZER_WHO = "claude:orchard-kernel-probe"
 AGENT = "kernel-probe"
-# The fresh directory inside an attempt where the authoritative check runs. It holds a copy of kernel.py and the
-# files the check writes, and nothing else the agent made. The hardware phase runs this same copy.
+# One shell command of the agent may run this long: one simulator check plus a margin. The wall budget is checked
+# between turns, so an attempt can overrun it by up to this much.
+AGENT_TOOL_TIMEOUT_S = BUDGET["sim_timeout_s"] + 120
+# The probe's own directory, beside the ops' attempt directories: DIR/.verdict/<op>-<n>/.
+VERDICT_DIR = ".verdict"
+# Inside a verdict directory, the fresh directory where the authoritative check runs. It holds the copy of kernel.py
+# and the files the check writes. The hardware phase runs this same copy.
 CLEAN_DIR = "authoritative"
+MAX_KERNEL_BYTES = 256 * 1024     # choice: the fixtures are under 4 KiB; a kernel this large is not a kernel
 TEMPLATE_FILES = ("kernel_check.py", "kernel_harness.py", "references.py")
 # Every category an attempt can end in. The check and the harness produce all but `hang`, which the probe sets when
 # the stall watcher kills a hardware run.
@@ -115,7 +136,7 @@ def attempt_tools(adir: Path) -> Tools:
     shell command goes through the runner's rules (no pip, no gozer writes, no resets, no uploads). A shell command may
     run as long as one simulator check plus a margin."""
     adir = Path(adir)
-    return Tools(adir, adir, agent_env(adir), timeout=BUDGET["sim_timeout_s"] + 120)
+    return Tools(adir, adir, agent_env(adir), timeout=AGENT_TOOL_TIMEOUT_S)
 
 
 class ProbeControl:
@@ -154,44 +175,140 @@ class ProbeControl:
         return None
 
 
-def authoritative_check(adir: Path, *, op: str, env, run_watched=run_watched, tt_lang: dict | None = None) -> dict:
-    """Run the SHIPPED check on a copy of the agent's kernel.py and return its result (check.json's fields).
+def verdict_dir(probe_dir, op: str, n) -> Path:
+    """The probe-owned directory of attempt `n` of `op`: DIR/.verdict/<op>-<n>/."""
+    return Path(probe_dir) / VERDICT_DIR / f"{op}-{n}"
 
-    The agent's directory holds copies of the templates and the spec, and the agent can edit them or plant other
-    files, so the check runs in a fresh directory (CLEAN_DIR) that holds only a copy of kernel.py. Every input the
-    check would read from check_config.json is passed on the command line. The result goes to
-    `check-authoritative.json` next to the agent's own check.json. A run the stall watcher killed is `timeout`,
-    whatever file it left."""
+
+def _verdict_dir_of(adir) -> Path:
+    """The verdict directory of an attempt directory DIR/<op>/attempt-<n>."""
     adir = Path(adir)
-    clean = adir / CLEAN_DIR
-    shutil.rmtree(clean, ignore_errors=True)
-    clean.mkdir(parents=True)
-    kernel = adir / "kernel.py"
-    if kernel.is_file():
-        (clean / "kernel.py").write_bytes(kernel.read_bytes())
-    out = adir / "check-authoritative.json"
-    out.unlink(missing_ok=True)
+    return verdict_dir(adir.parent.parent, adir.parent.name, adir.name.removeprefix("attempt-"))
+
+
+def _remove(path: Path) -> None:
+    """Remove whatever is at `path` without following a link: a link or a file is unlinked, a real directory is
+    removed with its contents (shutil.rmtree unlinks links inside it and does not follow them)."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(st.st_mode):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+
+
+def _real_dir(path: Path) -> None:
+    """Make `path` a real directory: anything else at that path (a link, a file) is removed first."""
+    try:
+        st = os.lstat(path)
+        if not stat.S_ISDIR(st.st_mode):
+            _remove(path)
+    except FileNotFoundError:
+        pass
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def _fresh_dir(path: Path) -> None:
+    _remove(path)
+    path.mkdir(parents=True)
+
+
+def _write_new(path: Path, data: bytes) -> None:
+    """Write a new file at `path`. Whatever was there is removed first, and the open refuses to follow a link or to
+    reuse a file that appeared in between (O_CREAT | O_EXCL | O_NOFOLLOW)."""
+    _remove(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+
+
+def _read_regular(path: Path, limit: int) -> bytes | None:
+    """The bytes of `path` if it is a regular file (checked on the open file, which is opened without following a link
+    and without blocking on a FIFO), at most `limit` + 1 of them. None otherwise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError:
+        return None
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return None
+        return f.read(limit + 1)
+
+
+def copy_kernel(adir: Path, clean: Path) -> tuple[str | None, str | None, str]:
+    """Copy the agent's kernel.py into `clean`. (category or None, sha256 of the copied bytes, first line).
+
+    Only a regular file of at most MAX_KERNEL_BYTES is copied. A missing file is `no_kernel`. A link, a directory, a
+    device or a larger file is `forbidden_code`, and nothing of its content is read into any record."""
+    src = Path(adir) / "kernel.py"
+    try:
+        st = os.lstat(src)
+    except FileNotFoundError:
+        return "no_kernel", None, "kernel.py does not exist"
+    if not stat.S_ISREG(st.st_mode):
+        return "forbidden_code", None, "kernel.py is not a regular file (it is a link, a directory or a device)"
+    if st.st_size > MAX_KERNEL_BYTES:
+        return "forbidden_code", None, f"kernel.py is larger than 256 KiB ({st.st_size} bytes)"
+    data = _read_regular(src, MAX_KERNEL_BYTES)
+    if data is None:
+        return "forbidden_code", None, "kernel.py is not a regular file (it changed while it was opened)"
+    if len(data) > MAX_KERNEL_BYTES:
+        return "forbidden_code", None, "kernel.py is larger than 256 KiB"
+    _write_new(Path(clean) / "kernel.py", data)
+    return None, hashlib.sha256(data).hexdigest(), ""
+
+
+FILE_RULE_REMEDY = "write kernel.py with write_file as a plain file of at most 256 KiB"
+
+
+def authoritative_check(adir: Path, *, op: str, env, run_watched=run_watched, tt_lang: dict | None = None,
+                        vdir: Path | None = None) -> dict:
+    """Run the SHIPPED check on a copy of the agent's kernel.py and return its result (check.json's fields plus
+    `kernel_sha256`, the sha256 of the copied bytes).
+
+    Everything happens in the probe-owned verdict directory, made fresh here: the clean copy of kernel.py
+    (CLEAN_DIR), `check-authoritative.json` and `authoritative-output.txt`. Nothing is read back from the attempt
+    directory except kernel.py, and that only when copy_kernel accepts it; otherwise no check runs. Every input the
+    check would read from check_config.json is passed on the command line. A run the stall watcher killed is
+    `timeout`, whatever file it left."""
+    vdir = Path(vdir) if vdir is not None else _verdict_dir_of(adir)
+    _real_dir(vdir.parent)
+    _fresh_dir(vdir)
+    clean = vdir / CLEAN_DIR
+    clean.mkdir()
+    category, sha, line = copy_kernel(adir, clean)
+    if category is not None:
+        rule = [{"rule": "file", "line": 0, "detail": line, "remedy": FILE_RULE_REMEDY}] \
+            if category == "forbidden_code" else []
+        return {"passed": False, "category": category, "first_line": line, "sets": [], "violations": rule,
+                "kernel_sha256": None}
+    out = vdir / "check-authoritative.json"
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
     argv = [sys.executable, str(TEMPLATES / "kernel_check.py"), "--attempt-dir", str(clean),
             "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--sim", str(env.sim),
             "--timeout-s", str(BUDGET["sim_timeout_s"]), "--tt-lang-json", json.dumps(facts),
             "--out", str(out)]
     # env=None: the child inherits the probe's own environment. The shipped check needs PATH; it is not an agent shell.
-    got = run_watched(argv, cwd=clean, env=None, log_path=adir / "authoritative-output.txt",
+    got = run_watched(argv, cwd=clean, env=None, log_path=vdir / "authoritative-output.txt",
                       watcher=StallWatcher(quiet_s=BUDGET["sim_timeout_s"] / 2),
                       backstop_s=BUDGET["sim_timeout_s"] + 120)
     if got.killed:
-        return {"passed": False, "category": "timeout", "first_line": got.reason, "sets": [], "violations": []}
-    if not out.is_file():
-        return {"passed": False, "category": "harness_error", "sets": [], "violations": [],
+        return {"passed": False, "category": "timeout", "first_line": got.reason, "sets": [], "violations": [],
+                "kernel_sha256": sha}
+    raw = _read_regular(out, 64 * 1024 * 1024)
+    if raw is None:
+        return {"passed": False, "category": "harness_error", "sets": [], "violations": [], "kernel_sha256": sha,
                 "first_line": f"kernel_check.py wrote no result (exit {got.returncode})"}
     try:
-        result = json.loads(out.read_text(encoding="utf-8"))
+        result = json.loads(raw.decode("utf-8", errors="replace"))
     except ValueError:
         result = None
     if not isinstance(result, dict):
-        return {"passed": False, "category": "harness_error", "sets": [], "violations": [],
+        return {"passed": False, "category": "harness_error", "sets": [], "violations": [], "kernel_sha256": sha,
                 "first_line": "kernel_check.py wrote a result that is not a JSON object"}
+    result["kernel_sha256"] = sha
     return result
 
 
@@ -247,7 +364,35 @@ def _read_agent_check(path: Path):
 
 
 def _write_json(path: Path, data) -> None:
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    """Write a probe-owned JSON file (never through a link)."""
+    _write_new(Path(path), (json.dumps(data, indent=2) + "\n").encode("utf-8"))
+
+
+def _save_attempt(adir: Path, attempt: dict) -> None:
+    """Write the attempt record. The verdict lives in the probe-owned directory; the copy in the attempt directory is a
+    convenience for a person reading it, written after whatever was at that path is removed, and is never read back."""
+    _write_json(_verdict_dir_of(adir) / "attempt.json", attempt)
+    try:
+        _write_json(Path(adir) / "attempt.json", attempt)
+    except OSError:
+        pass                                            # the convenience copy is optional
+
+
+def load_attempts(probe_dir) -> list[dict]:
+    """Every attempt record the probe wrote, read from the probe-owned directory (never from an attempt directory),
+    ordered by op (OPS order) and attempt number."""
+    out = []
+    root = Path(probe_dir) / VERDICT_DIR
+    for path in sorted(root.glob("*/attempt.json")) if root.is_dir() else []:
+        raw = _read_regular(path, 64 * 1024 * 1024)
+        try:
+            data = json.loads(raw.decode("utf-8")) if raw is not None else None
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and "op" in data and "attempt" in data:
+            out.append(data)
+    order = {op: i for i, op in enumerate(OPS)}
+    return sorted(out, key=lambda a: (order.get(a["op"], len(OPS)), a["op"], a["attempt"]))
 
 
 def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
@@ -290,10 +435,10 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
-        "provenance": provenance(kernel_sha256=_sha256(adir / CLEAN_DIR / "kernel.py"), tt_lang=facts,
+        "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"]),
     }
-    _write_json(adir / "attempt.json", attempt)
+    _save_attempt(adir, attempt)
     return attempt
 
 
@@ -320,25 +465,28 @@ def _size(path: Path) -> int:
 
 def smoke_test(*, env, shared_python, run_watched=run_watched) -> tuple[bool, list[str]]:
     """Upstream's examples/eltwise_add.py with the shared venv's tt-lang and ttnn, on one leased chip (spec 5.4).
-    (ok, the last lines of its output). ok needs exit 0, no kill by the watcher, and `PASSED!` in the output."""
+    (ok, the last lines of its output). ok needs exit 0 and `PASSED!` in the output. A run the stall watcher
+    killed raises ProbeBlocked."""
     Path(env.scratch_dir).mkdir(parents=True, exist_ok=True)
     log = Path(env.scratch_dir) / "smoke.txt"
     start = _size(log)
     argv = _gozer("kernel-probe smoke test", str(shared_python), str(Path(env.src_dir) / "examples" / "eltwise_add.py"))
     got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
                       backstop_s=BUDGET["hw_backstop_s"])
+    if got.killed:
+        # A hang blocks the probe. gozer was killed with the example, so its lease may outlive it.
+        raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its lease may be held by a dead process: use "
+                           "gozer-gatekeeper or `gozer reconcile`, never reset by hand")
     text = _new_text(log, start)
     tail = text.splitlines()[-SMOKE_TAIL_LINES:]
-    if got.killed:
-        tail.append(f"(killed: {got.reason})")
-    return (got.returncode == 0 and not got.killed and "PASSED!" in text), tail
+    return (got.returncode == 0 and "PASSED!" in text), tail
 
 
 def _record_hw(adir: Path, attempt: dict, hw: dict) -> dict:
     attempt["hw"] = hw
     if isinstance(attempt.get("provenance"), dict):
         attempt["provenance"]["hardware_pcc_min"] = hw.get("pcc_min")
-    _write_json(Path(adir) / "attempt.json", attempt)
+    _save_attempt(adir, attempt)
     return hw
 
 
@@ -346,16 +494,18 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     """Run one attempt's checked kernel on one chip and judge it with the hardware bars. Call it only for an attempt
     whose authoritative simulator check passed, after a passing smoke test (run_hardware does both).
 
-    It runs the copy of kernel.py the authoritative check judged (CLEAN_DIR), with the shipped harness and spec. The
-    static gate runs again first; a kernel that breaks a rule ends `forbidden_code` and no gozer command runs. A run the
-    stall watcher kills is a hang: it is recorded, and ProbeBlocked names the attempt. Returns the `hw` block, which is
-    also written into attempt.json."""
+    It runs the copy of kernel.py the authoritative check judged (the verdict directory's CLEAN_DIR), with the
+    shipped harness and spec. The static gate runs again first; a kernel that breaks a rule ends `forbidden_code` and
+    no gozer command runs. Then the copy is hashed again: when it differs from the sha256 recorded at copy time, the
+    attempt ends `harness_error` and no gozer command runs. A run the stall watcher kills is a hang: it is recorded,
+    and ProbeBlocked names the attempt. Returns the `hw` block, which is also written into attempt.json."""
     adir = Path(adir)
+    vdir = _verdict_dir_of(adir)
     op, n = attempt["op"], attempt["attempt"]
     spec = load_spec(op)
     check = _template("kernel_check")
-    kernel = adir / CLEAN_DIR / "kernel.py"
-    if not kernel.is_file():
+    kernel = vdir / CLEAN_DIR / "kernel.py"
+    if not kernel.is_file() or kernel.is_symlink():
         return _record_hw(adir, attempt, {"passed": False, "category": "no_kernel", "pcc_min": None, "sets": [],
                                           "violations": [], "first_line": "the checked copy of kernel.py is missing"})
     violations = check.kernel_source_violations(kernel)
@@ -364,21 +514,28 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
         category = "no_kernel" if reason.startswith("no-operation") else "forbidden_code"
         return _record_hw(adir, attempt, {"passed": False, "category": category, "pcc_min": None, "sets": [],
                                           "violations": violations, "first_line": reason})
-    out = adir / "hw-result.json"
-    out.unlink(missing_ok=True)
-    log = adir / "hw-output.txt"
+    recorded = (attempt.get("provenance") or {}).get("kernel_sha256")
+    data = _read_regular(kernel, MAX_KERNEL_BYTES)
+    if data is None or recorded is None or hashlib.sha256(data).hexdigest() != recorded:
+        return _record_hw(adir, attempt, {"passed": False, "category": "harness_error", "pcc_min": None, "sets": [],
+                                          "violations": [], "first_line": "the clean kernel copy changed since the "
+                                                                          "simulator check; it was not run"})
+    out = vdir / "hw-result.json"
+    _remove(out)
+    log = vdir / "hw-output.txt"
     start = _size(log)
     argv = _gozer(f"kernel-probe {op} attempt {n}", str(shared_python), str(TEMPLATES / "kernel_harness.py"),
                   "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
                   "--phase", "hw")
-    got = run_watched(argv, cwd=adir / CLEAN_DIR, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
+    got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
                       backstop_s=BUDGET["hw_backstop_s"])
     if got.killed:
         _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
                                    "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1)})
         raise ProbeBlocked(f"{op} attempt {n}: {got.reason}")
     try:
-        result = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else None
+        raw = _read_regular(out, 64 * 1024 * 1024)
+        result = json.loads(raw.decode("utf-8", errors="replace")) if raw is not None else None
     except ValueError:
         result = None
     if not isinstance(result, dict):
@@ -397,7 +554,7 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
     """The hardware phase of a probe: one smoke test, then hardware_phase for each attempt that passed the simulator.
 
     A failed smoke test ends the phase with no further gozer call, and the report says `hw: unavailable` with the
-    smoke test's last lines. ProbeBlocked from a hang propagates, so no later attempt runs. Returns
+    smoke test's last lines. A hung smoke test or kernel run raises ProbeBlocked, so no later attempt runs. Returns
     {"available", "smoke_tail"}."""
     ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched)
     if not ok:
@@ -421,7 +578,10 @@ def report_header(*, env, coder_model, probe_id, ops, hw=None, tt_lang: dict | N
         bars[op] = {phase: check.bars_from_spec(spec, phase) for phase in ("sim", "hw")}
     return {"tt_lang": tt_lang if tt_lang is not None else tt_lang_facts(env), "coder_model": coder_model,
             "probe_id": probe_id, "ops": list(ops), "bars": bars, "provisional": True, "budget": dict(BUDGET),
-            "inputs": "synthetic", "hw": hw}
+            "inputs": "synthetic", "hw": hw,
+            "budget_note": (f"The wall budget ({BUDGET['wall_s']:.0f} s) is checked between turns, so an attempt can "
+                            f"overrun it by up to one tool timeout ({AGENT_TOOL_TIMEOUT_S:.0f} s at most, for the "
+                            "kernel check).")}
 
 
 def _first_pass(rows: list[dict], passed) -> int | None:
@@ -470,6 +630,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
              "Attempts are independent draws from a model server that may not accept a seed. The report gives counts "
              "and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
              "outliers. A kernel that passes them can still fail on real activations.", "",
+             *([header["budget_note"], ""] if header.get("budget_note") else []),
              "## tt-lang", "",
              f"- simulator version: {t.get('sim_version')}",
              f"- source SHA: {t.get('source_sha')}",

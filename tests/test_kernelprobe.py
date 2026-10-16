@@ -9,6 +9,7 @@ Every hardware call goes through a fake `run_watched`, which records the argv an
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -162,6 +163,7 @@ def test_a_check_killed_for_a_stall_is_a_timeout_or_hang_never_a_pass(tmp_path, 
         return kp.Watched(-9, "stalled: no output and no CPU use for 120 s", True, 130.0)
     adir = tmp_path / "add" / "attempt-1"
     kp.prepare_attempt(adir, op="add", env=fake_kenv, tt_lang=FACTS)
+    (adir / "kernel.py").write_text((KERNELS / "add_spin.py").read_text())
     got = kp.authoritative_check(adir, op="add", env=fake_kenv, run_watched=stalled, tt_lang=FACTS)
     assert got["passed"] is False and got["category"] == "timeout" and "stalled" in got["first_line"]
 
@@ -197,10 +199,13 @@ def test_attempt_json_records_violations_and_the_range_of_each_measure(tmp_path,
     violations = [{"rule": "import", "line": 1, "detail": "import os", "remedy": "import only ttl"}]
     authoritative = {"passed": False, "category": "forbidden_code", "first_line": "1 violation: import at line 1",
                      "sets": sets, "violations": violations}
-    with FakeModel(lambda r: final("done")) as server:
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    kernel = (KERNELS / "forbidden_import.py").read_text()
+    with FakeModel(agent_does(lambda: (adir / "kernel.py").write_text(kernel))) as server:
         attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(authoritative))
-    on_disk = json.loads((tmp_path / "probe" / "add" / "attempt-1" / "attempt.json").read_text())
+    on_disk = json.loads((tmp_path / "probe" / ".verdict" / "add-1" / "attempt.json").read_text())
     assert on_disk == attempt
+    assert json.loads((tmp_path / "probe" / "add" / "attempt-1" / "attempt.json").read_text()) == attempt
     assert attempt["category"] == "forbidden_code" and attempt["violations"] == violations
     assert attempt["pcc_min"] == 0.9991 and attempt["slope_range"] == [0.999, 1.004] and attempt["rel_l2_max"] == 0.008
     assert set(attempt) >= {"op", "attempt", "status", "turns", "agent_wall_s", "passed_sim", "category", "first_line",
@@ -208,7 +213,8 @@ def test_attempt_json_records_violations_and_the_range_of_each_measure(tmp_path,
     assert attempt["hw"] is None and attempt["status"] == "done"
     prov = attempt["provenance"]
     assert prov["origin"] == "kernel" and prov["tt_lang"] == FACTS and prov["coder_model"] == "fake-coder"
-    assert prov["probe_id"] == "t" and prov["kernel_sha256"] is None and prov["hardware_pcc_min"] is None
+    assert prov["probe_id"] == "t" and prov["hardware_pcc_min"] is None
+    assert prov["kernel_sha256"] == hashlib.sha256(kernel.encode()).hexdigest()
 
 
 # ---- the agent, its budget and its watchers ---------------------------------------------------------------------
@@ -299,8 +305,8 @@ def test_the_skill_names_the_gate_rules_and_the_thread_functions():
     text = kp.SKILL.read_text()
     flat = " ".join(text.split())
     for needle in ("kernel.py", "kernel_check.py", "reference/eltwise_add.py", "OPERATION", "@ttl.operation",
-                   "import torch", "from_torch", "to_torch", "open_device", "main()", "@ttl.compute()",
-                   "@ttl.datamovement()", "ttl, ttnn and math", "forbidden_code"):
+                   "import torch", "from_torch", "to_torch", "Do not open a device", "main()", "@ttl.compute()",
+                   "@ttl.datamovement()", "import only", "forbidden_code", "ttl.dfb_reset"):
         assert needle in flat, needle
     assert "gozer" not in text.lower()
 
@@ -313,12 +319,12 @@ def _passed_attempt(tmp_path, env, kernel="add_good.py", n=1):
     adir = tmp_path / "add" / f"attempt-{n}"
     kp.prepare_attempt(adir, op="add", env=env, tt_lang=FACTS)
     (adir / "kernel.py").write_text((KERNELS / kernel).read_text())
-    clean = adir / kp.CLEAN_DIR
-    clean.mkdir()
+    clean = kp.verdict_dir(tmp_path, "add", n) / kp.CLEAN_DIR
+    clean.mkdir(parents=True)
     (clean / "kernel.py").write_text((KERNELS / kernel).read_text())
     attempt = {"op": "add", "attempt": n, "passed_sim": True, "category": None, "hw": None,
-               "provenance": kp.provenance(kernel_sha256="k", tt_lang=FACTS, coder_model="c", probe_id="t",
-                                           simulator_pcc_min=0.9999)}
+               "provenance": kp.provenance(kernel_sha256=hashlib.sha256((clean / "kernel.py").read_bytes()).hexdigest(),
+                                           tt_lang=FACTS, coder_model="c", probe_id="t", simulator_pcc_min=0.9999)}
     (adir / "attempt.json").write_text(json.dumps(attempt))
     return adir, attempt
 
@@ -365,7 +371,8 @@ def test_hardware_commands_run_only_through_gozer_and_only_after_a_passing_smoke
     tail = run[run.index("--") + 1:]
     assert tail[0] == "/shared/python" and Path(tail[1]) == kp.TEMPLATES / "kernel_harness.py"
     assert Path(tail[tail.index("--spec") + 1]) == kp.TEMPLATES / "ops" / "add.json"
-    assert Path(tail[tail.index("--kernel") + 1]) == adir / kp.CLEAN_DIR / "kernel.py"
+    assert Path(tail[tail.index("--kernel") + 1]) == kp.verdict_dir(tmp_path, "add", 1) / kp.CLEAN_DIR / "kernel.py"
+    assert Path(tail[tail.index("--out") + 1]).parent == kp.verdict_dir(tmp_path, "add", 1)
     assert tail[tail.index("--phase") + 1] == "hw"
 
 
@@ -374,7 +381,7 @@ def test_the_hardware_result_is_judged_with_the_hardware_bars(tmp_path, fake_ken
     adir, attempt = _passed_attempt(tmp_path, fake_kenv)
     hw = kp.hardware_phase(adir, attempt, env=fake_kenv, shared_python="/p", run_watched=hw_writer([GOOD_HW_SET], []))
     assert hw["passed"] is True and hw["category"] is None and hw["pcc_min"] == 0.995
-    assert json.loads((adir / "attempt.json").read_text())["hw"]["passed"] is True
+    assert json.loads((kp.verdict_dir(tmp_path, "add", 1) / "attempt.json").read_text())["hw"]["passed"] is True
     assert attempt["provenance"]["hardware_pcc_min"] == 0.995
     adir2, attempt2 = _passed_attempt(tmp_path, fake_kenv, n=2)
     low = dict(GOOD_HW_SET, pcc=0.98)
@@ -399,7 +406,7 @@ def test_a_hardware_hang_blocks_the_probe_and_names_the_attempt(tmp_path, fake_k
         kp.run_hardware([attempt, attempt4], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=hangs)
     assert "add attempt 3" in str(info.value) and "stalled" in str(info.value)
     assert len(calls) == 2                                 # the smoke test and the first kernel run, which hung
-    on_disk = json.loads((adir / "attempt.json").read_text())
+    on_disk = json.loads((kp.verdict_dir(tmp_path, "add", 3) / "attempt.json").read_text())
     assert on_disk["hw"]["category"] == "hang" and on_disk["hw"]["passed"] is False
 
 
@@ -482,3 +489,163 @@ def test_write_report_counts_attempts_to_first_pass_per_op(tmp_path):
 def test_the_category_list_includes_forbidden_code_and_hang():
     assert {"no_kernel", "import_error", "tt_lang_error", "shape_mismatch", "numeric_mismatch", "timeout",
             "compile_error", "hang", "hw_numeric_mismatch", "harness_error", "forbidden_code"} == set(kp.CATEGORIES)
+
+
+# ---- the probe-owned verdict directory (fix round 1) ------------------------------------------------------------
+
+
+NO_KERNEL = {"passed": False, "category": "no_kernel", "first_line": "kernel.py does not exist", "sets": []}
+
+
+def agent_does(action):
+    """A scripted agent whose first turn runs `action()` in the test process (standing in for a shell command the
+    agent ran), then ends."""
+    def script(request):
+        if turn(request) == 0:
+            action()
+            return call("shell", command="ls")
+        return final("done")
+    return script
+
+
+def test_a_symlinked_attempt_json_is_replaced_and_its_target_left_alone(tmp_path, fake_kenv):
+    operator_file = tmp_path / "operator.txt"
+    operator_file.write_text("the operator's file\n")
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    with FakeModel(agent_does(lambda: (adir / "attempt.json").symlink_to(operator_file))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL))
+    assert operator_file.read_text() == "the operator's file\n"
+    assert json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text()) == attempt
+    assert not (adir / "attempt.json").is_symlink() and json.loads((adir / "attempt.json").read_text()) == attempt
+
+
+def test_a_symlinked_kernel_py_is_forbidden_and_nothing_runs(tmp_path, fake_kenv):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("import ttl\nTOKEN = 'hf_secretvalue'\n")
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    calls = []
+    with FakeModel(agent_does(lambda: (adir / "kernel.py").symlink_to(secret))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL, calls))
+    assert calls == [] and attempt["passed_sim"] is False and attempt["category"] == "forbidden_code"
+    assert "regular file" in attempt["first_line"]
+    assert "hf_secretvalue" not in (kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text()
+    assert not (kp.verdict_dir(tmp_path / "probe", "add", 1) / kp.CLEAN_DIR / "kernel.py").exists()
+
+
+def test_an_oversized_kernel_py_is_forbidden_and_nothing_runs(tmp_path, fake_kenv):
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    calls = []
+    big = "# padding\n" * (kp.MAX_KERNEL_BYTES // 10 + 10)
+    with FakeModel(agent_does(lambda: (adir / "kernel.py").write_text(big))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL, calls))
+    assert calls == [] and attempt["category"] == "forbidden_code" and "256 KiB" in attempt["first_line"]
+
+
+def test_a_missing_kernel_py_is_no_kernel_and_nothing_runs(tmp_path, fake_kenv):
+    calls = []
+    with FakeModel(lambda r: final("nothing")) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL, calls))
+    assert calls == [] and attempt["category"] == "no_kernel"
+
+
+def test_a_planted_authoritative_symlink_does_not_crash_and_the_check_uses_the_probe_owned_copy(tmp_path, fake_kenv):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("keep")
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+
+    def plant():
+        (adir / "kernel.py").write_text((KERNELS / "add_good.py").read_text())
+        (adir / "authoritative").symlink_to(elsewhere, target_is_directory=True)
+    calls = []
+    with FakeModel(agent_does(plant)) as server:
+        run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL, calls))
+    clean = Path(calls[0][calls[0].index("--attempt-dir") + 1])
+    assert clean == kp.verdict_dir(tmp_path / "probe", "add", 1) / kp.CLEAN_DIR
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["keep.txt"]
+
+
+def test_a_check_result_rewritten_in_the_attempt_directory_is_not_read(tmp_path, fake_kenv):
+    """A background process the agent left behind writes a passing check-authoritative.json into its directory after
+    the shipped check wrote the real one in the probe-owned directory."""
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    real = {"passed": False, "category": "numeric_mismatch", "first_line": "set seed0: pcc 0.1", "sets": []}
+
+    def fake(argv, **kw):
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps(real))
+        (adir / "check-authoritative.json").write_text(json.dumps({"passed": True, "category": None, "sets": []}))
+        return kp.Watched(1, None, False, 0.1)
+    with FakeModel(agent_does(lambda: (adir / "kernel.py").write_text((KERNELS / "add_good.py").read_text()))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=fake)
+    assert attempt["passed_sim"] is False and attempt["category"] == "numeric_mismatch"
+
+
+def test_the_hardware_phase_refuses_a_clean_copy_that_changed(tmp_path, fake_kenv):
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    (kp.verdict_dir(tmp_path, "add", 1) / kp.CLEAN_DIR / "kernel.py").write_text(
+        (KERNELS / "add_good.py").read_text() + "# changed\n")
+    calls = []
+    hw = kp.hardware_phase(adir, attempt, env=fake_kenv, shared_python="/p", run_watched=hw_writer([GOOD_HW_SET], calls))
+    assert calls == [] and hw["passed"] is False and hw["category"] == "harness_error"
+    assert "the clean kernel copy changed" in hw["first_line"]
+
+
+def test_load_attempts_reads_the_probe_owned_records(tmp_path, fake_kenv):
+    with FakeModel(lambda r: final("nothing")) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL))
+    (tmp_path / "probe" / "add" / "attempt-1" / "attempt.json").write_text(json.dumps(dict(attempt, passed_sim=True)))
+    assert kp.load_attempts(tmp_path / "probe") == [attempt]
+
+
+def test_a_smoke_test_killed_by_the_watcher_blocks_the_probe(tmp_path, fake_kenv):
+    def hangs(argv, **kw):
+        return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
+    with pytest.raises(kp.ProbeBlocked) as info:
+        kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=hangs)
+    text = str(info.value)
+    assert "the smoke test hung" in text and "stalled" in text and "gozer-gatekeeper" in text
+
+
+def test_a_smoke_test_that_exits_non_zero_is_unavailable_without_blocking(tmp_path, fake_kenv):
+    def fails(argv, **kw):
+        with open(kw["log_path"], "a") as f:
+            f.write("PASSED!\nthen a crash\n")
+        return kp.Watched(1, None, False, 3.0)
+    ok, tail = kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=fails)
+    assert ok is False and "then a crash" in tail
+
+
+def test_the_skill_states_every_rule_the_gate_enforces():
+    """Each rule in the gate's REMEDIES has a plain-word counterpart in the skill, so the two cannot drift apart."""
+    gate = kp._template("kernel_check")
+    words = {"import": "import only", "name": "getattr", "dunder": "double underscores",
+             "readback": "to_torch", "operation": "OPERATION"}
+    assert set(words) == set(gate.REMEDIES)
+    flat = " ".join(kp.SKILL.read_text().split())
+    for rule, word in words.items():
+        assert word in flat, rule
+    assert "`__name__` and `__all__`" in flat and "from __future__" in flat
+    assert len(kp.SKILL.read_text().splitlines()) <= 55
+
+
+def test_the_report_header_says_the_wall_budget_can_overrun_by_one_tool_timeout(tmp_path, fake_kenv):
+    header = kp.report_header(env=fake_kenv, coder_model="c", probe_id="t", ops=["add"], tt_lang=FACTS)
+    kp.write_report(tmp_path, [], header)
+    md = (tmp_path / "kernel-probe-report.md").read_text()
+    assert "checked between turns" in md and f"{int(kp.AGENT_TOOL_TIMEOUT_S)} s" in md
+    assert kp.AGENT_TOOL_TIMEOUT_S == 420
+
+
+def test_a_stale_verdict_from_an_earlier_run_is_not_read(tmp_path, fake_kenv):
+    """The verdict directory is made fresh for each attempt: a passing result left by an earlier run is gone before
+    the check runs, so a check that writes nothing is a harness_error."""
+    vdir = kp.verdict_dir(tmp_path / "probe", "add", 1)
+    vdir.mkdir(parents=True)
+    (vdir / "check-authoritative.json").write_text(json.dumps({"passed": True, "category": None, "sets": []}))
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+
+    def writes_nothing(argv, **kw):
+        return kp.Watched(1, None, False, 0.1)
+    with FakeModel(agent_does(lambda: (adir / "kernel.py").write_text((KERNELS / "add_good.py").read_text()))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=writes_nothing)
+    assert attempt["passed_sim"] is False and attempt["category"] == "harness_error"
