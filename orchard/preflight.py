@@ -555,9 +555,14 @@ def default_signals(cfg, research_options=None) -> Signals:
             model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
             hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
     def skills_freshness():
+        # The research rule for a dry run (and the UI's preflight, which runs like one) is "no cache and no file": both
+        # pass research options with no cache directory. The skills result cache then stays in memory. A caller with
+        # no options is treated the same way.
         from orchard import skillsfresh
         offline = bool(getattr(research_options, "offline", False)) if research_options is not None else False
-        return skillsfresh.check_skills_dirs(cfg.skills_dirs, reuse_s=SKILLS_REUSE_S, offline=offline)
+        write = research_options is not None and getattr(research_options, "cache_dir", None) is not None
+        return skillsfresh.check_skills_dirs(cfg.skills_dirs, reuse_s=SKILLS_REUSE_S, offline=offline,
+                                             cache=skillsfresh.Cache(write=write))
 
     return Signals(
         skills_freshness=skills_freshness,

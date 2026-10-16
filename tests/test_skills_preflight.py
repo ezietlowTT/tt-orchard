@@ -105,3 +105,48 @@ def test_the_dry_run_page_shows_the_skills_row(tmp_path):
     text = out.getvalue()
     assert code == 0 and rec.argv is None
     assert "skills" in text and "behind" in text and "pull --ff-only" in text
+
+
+# ---- review M6: a dry run and the UI preflight write no cache file ------------------------------------------------
+
+def _cache_write(tmp_path, monkeypatch, options):
+    seen = {}
+    monkeypatch.setattr(sf, "check_skills_dirs", lambda dirs, **kw: seen.update(kw) or [])
+    pf.default_signals(cfg(tmp_path), research_options=options).skills_freshness()
+    return seen["cache"].write
+
+
+def test_a_dry_run_or_the_ui_preflight_keeps_the_skills_cache_in_memory(tmp_path, monkeypatch):
+    """Both build research options with no cache directory (the project rule: a dry run keeps no cache and writes no
+    file), and so does any caller that passes no options."""
+    from orchard.research import Options
+    assert _cache_write(tmp_path, monkeypatch, Options(cache_dir=None)) is False
+    assert _cache_write(tmp_path, monkeypatch, None) is False
+
+
+def test_a_real_bringup_may_write_the_skills_cache(tmp_path, monkeypatch):
+    from orchard.research import Options
+    assert _cache_write(tmp_path, monkeypatch, Options(cache_dir=tmp_path / "research-cache")) is True
+
+
+def test_a_dry_run_leaves_no_skills_cache_file(tmp_path, monkeypatch):
+    """End to end through the real check, with a fake process runner whose clone is current (a result that would be
+    cached): no file appears at the cache path."""
+    from orchard.research import Options
+    c = cfg(tmp_path)
+    repo = tmp_path / "skills"
+    repo.mkdir()
+    c.skills_dirs = [repo]
+    sha = "2" * 40
+    answers = {"--show-toplevel": f"{repo}\n", "HEAD": f"{sha}\n", "get-url": "https://github.com/tenstorrent/skills\n",
+               "ls-remote": f"{sha}\trefs/heads/main\n", "status": "", "symbolic-ref": "main\n"}
+
+    def run(argv, timeout, env=None):
+        for key, out in answers.items():
+            if key in argv:
+                return 0, out, ""
+        return 1, "", "not faked"
+    monkeypatch.setattr(sf, "_raw_run", run)
+    (got,) = pf.default_signals(c, research_options=Options(cache_dir=None)).skills_freshness()
+    assert got.state == sf.CURRENT
+    assert not sf.default_cache_path().exists()
