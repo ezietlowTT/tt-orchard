@@ -697,3 +697,72 @@ def test_the_summary_names_the_class_when_it_is_more_than_the_path(tmp_path):
 def test_the_summary_of_a_plain_run_does_not_mention_a_class(tmp_path):
     _, results, _ = built(tmp_path)
     assert "class " not in section(results, "## Summary")
+
+
+# ---- the op inventory ----------------------------------------------------------------------------------
+
+INVENTORY = {
+    "traced_class": "Qwen3_5ForCausalLM",
+    "skipped": None,
+    "ttnn_dump": {"ttnn_version": "0.79.0-test", "sha256": "ab"},
+    "ttnn_dump_note": None,
+    "summary": {"distinct": {"mapped": 3, "composable": 1, "unmapped": 12, "unchecked": 0, "ignored": 2}},
+    "ops": ([{"op": f"aten.weird_{i:02d}", "scaled_count": 100 - i, "status": "unmapped", "modules": ["m"]}
+             for i in range(12)]
+            + [{"op": "aten.mm", "scaled_count": 9999, "status": "mapped", "modules": ["m"]}]),
+}
+
+
+def results_text(tmp_path, inventory=None, **kw) -> str:
+    run = make_run(tmp_path, **kw)
+    if inventory is not None:
+        write_json(run / "stages" / "0" / "ops-inventory.json", inventory)
+    assert build(run).returncode == 0
+    return (bundle_of(run) / "RESULTS.md").read_text()
+
+
+def test_the_inventory_gets_an_ops_and_kernels_section(tmp_path):
+    text = results_text(tmp_path, INVENTORY)
+    sec = section(text, "## Ops and kernels")
+    assert "Qwen3_5ForCausalLM" in sec
+    for status, n in INVENTORY["summary"]["distinct"].items():
+        assert f"{status} {n}" in sec
+    assert "0.79.0-test" in sec
+    assert "name match" in sec and "shape, dtype or layout" in sec
+    listed = [i for i in range(12) if f"aten.weird_{i:02d}" in sec]
+    assert listed == list(range(10))          # the 10 most frequent unmapped ops, in that order
+    assert "aten.mm" not in sec               # mapped ops are not listed
+
+
+def test_without_an_inventory_there_is_no_section_and_the_rest_is_unchanged(tmp_path):
+    absent = results_text(tmp_path / "a")
+    assert "Ops and kernels" not in absent
+    (tmp_path / "b").mkdir()
+    broken = make_run(tmp_path / "b")
+    write(broken / "stages" / "0" / "ops-inventory.json", "{not json")
+    assert build(broken).returncode == 0
+    assert (bundle_of(broken) / "RESULTS.md").read_text() == absent
+    # A valid inventory only adds the section; every other line stays as it was.
+    (tmp_path / "c").mkdir()
+    with_inv = results_text(tmp_path / "c", INVENTORY)
+    sec = "## Ops and kernels\n" + section(with_inv, "## Ops and kernels")
+    assert with_inv.replace(sec, "").replace("\n\n\n", "\n\n") == absent.replace("\n\n\n", "\n\n")
+
+
+def test_a_skipped_inventory_prints_its_reason_and_no_counts(tmp_path):
+    inv = {"traced_class": None, "skipped": "no reference interpreter was set", "summary": {}, "ops": [],
+           "ttnn_dump": None, "ttnn_dump_note": None}
+    sec = section(results_text(tmp_path, inv), "## Ops and kernels")
+    assert "no reference interpreter was set" in sec
+    assert "unmapped" not in sec and "mapped is a name match" not in sec
+
+
+def test_text_copied_from_the_inventory_is_redacted(tmp_path):
+    inv = json.loads(json.dumps(INVENTORY))
+    inv["ops"][0]["op"] = "/home/someone/secret/op"
+    inv["traced_class"] = "/home/someone/Class"
+    inv["ttnn_dump_note"] = "dump at /home/someone/dump.json"
+    inv["ttnn_dump"] = None
+    text = results_text(tmp_path, inv)
+    assert "Ops and kernels" in text
+    assert "/home/someone" not in text
