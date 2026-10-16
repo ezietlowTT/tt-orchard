@@ -151,6 +151,19 @@ class _StuckProc:
         return None
 
 
+def _alive_with(pid, marker):
+    """True only when `pid` is alive, is no zombie, and its command line still holds `marker` (this test's unique tmp
+    path), so a pid the kernel has reused for another process is never killed."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            stat = f.read()
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read()
+    except OSError:
+        return False
+    return stat[stat.rfind(")") + 2:].split()[0] != "Z" and marker.encode() in cmdline
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
@@ -258,7 +271,7 @@ _STARTED: list = []
 
 def _tracked_popen(*a, **k):
     proc = subprocess.Popen(*a, **k)
-    _STARTED.append(proc.pid)
+    _STARTED.append(proc)
     return proc
 
 
@@ -267,10 +280,11 @@ def _kill_every_started_child_by_pid():
     """Whatever a test started is killed by pid at teardown, so a regression cannot leave a 120 s sleeper behind."""
     _STARTED.clear()
     yield
-    for pid in _STARTED:
+    for proc in _STARTED:
+        proc.kill()                          # skips a child that has been reaped, so a freed pid is never signalled
         try:
-            os.kill(pid, 9)
-        except (ProcessLookupError, PermissionError):
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             pass
 
 
@@ -340,7 +354,7 @@ def test_a_grandchild_that_ignores_sigterm_is_killed_after_the_grace_even_when_t
         assert got.elapsed_s >= 0.4                                     # the group was given its grace
         assert _wait_gone(pid)
     finally:
-        if pid and _alive(pid):
+        if pid and _alive_with(pid, str(pidfile)):
             os.kill(pid, 9)
 
 

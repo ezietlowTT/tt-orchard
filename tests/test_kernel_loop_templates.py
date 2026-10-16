@@ -884,7 +884,8 @@ def _dead_or_zombie(pid):
 
 def test_a_simulator_timeout_stops_the_grandchild_too(tmp_path):
     """A stand-in for tt-lang-sim starts a grandchild in its own process group and sleeps. The check's timeout must
-    stop both. Every process here is one this test started; leftovers are killed by pid in the finally."""
+    stop both. Every process here is one this test started; a leftover is killed in the finally only while it is
+    alive and still carries this test's marker."""
     tdir, adir = _attempt(tmp_path, "add_good")
     marks = tmp_path / "pids"
     marks.mkdir()
@@ -898,9 +899,11 @@ def test_a_simulator_timeout_stops_the_grandchild_too(tmp_path):
                    "time.sleep(60)\n")
     sim.chmod(0o755)
     pids = []
+    marker = f"orchard-m2-{os.getpid()}-{time.monotonic_ns()}"
     try:
         done = subprocess.run([sys.executable, str(tdir / "kernel_check.py"), "--attempt-dir", str(adir), "--sim",
-                               str(sim), "--timeout-s", "3"], capture_output=True, text=True, timeout=60)
+                               str(sim), "--timeout-s", "3"], capture_output=True, text=True, timeout=60,
+                              env=dict(os.environ, ORCHARD_TEST_MARKER=marker))
         pids = [int((marks / n).read_text()) for n in ("sim", "grandchild") if (marks / n).is_file()]
         assert len(pids) == 2, done.stdout + done.stderr
         assert done.stdout.startswith("FAIL: timeout"), done.stdout + done.stderr
@@ -910,10 +913,7 @@ def test_a_simulator_timeout_stops_the_grandchild_too(tmp_path):
         assert all(_dead_or_zombie(p) for p in pids), [p for p in pids if not _dead_or_zombie(p)]
     finally:
         for p in pids:
-            try:
-                os.kill(p, 9)
-            except (ProcessLookupError, PermissionError):
-                pass
+            _kill_if_ours(p, marker)
 
 
 @pytest.mark.parametrize("pid", ["own group", 1, 0, -3, None])
@@ -1018,3 +1018,21 @@ def test_sigkill_of_kernel_check_still_stops_the_simulator(tmp_path):
             proc.wait(timeout=5)
         for p in (_pids(marks) if marks else []):
             _kill_if_ours(p, marker)
+
+
+def test_the_cleanup_helper_leaves_a_process_without_the_marker_alone(tmp_path):
+    """S2. A pid the kernel reused for another process must never be killed: the helper checks the marker first."""
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                             env=dict(os.environ, ORCHARD_TEST_MARKER="someone-else"))
+    try:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not _ours_alive(other.pid, "someone-else"):
+            time.sleep(0.02)
+        _kill_if_ours(other.pid, f"orchard-s2-{os.getpid()}")
+        time.sleep(0.2)
+        assert other.poll() is None
+        _kill_if_ours(other.pid, "someone-else")
+        assert other.wait(timeout=5) == -9
+    finally:
+        other.kill()
+        other.wait(timeout=5)

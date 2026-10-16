@@ -1476,11 +1476,9 @@ def test_the_guard_records_a_signal_the_sweep_would_swallow(tmp_path):
 
 
 def _stop(*procs):
+    """Popen.kill skips a child that has already been reaped, so a freed pid is never signalled."""
     for p in procs:
-        try:
-            os.kill(p.pid, 9)
-        except (ProcessLookupError, PermissionError):
-            pass
+        p.kill()
         try:
             p.wait(timeout=5)
         except Exception:
