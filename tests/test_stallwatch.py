@@ -253,14 +253,47 @@ class _ReadyWatcher(StallWatcher):
         return self._reason if any(line.strip() == "ready" for line in lines) else None
 
 
+_STARTED: list = []
+
+
+def _tracked_popen(*a, **k):
+    proc = subprocess.Popen(*a, **k)
+    _STARTED.append(proc.pid)
+    return proc
+
+
+@pytest.fixture(autouse=True)
+def _kill_every_started_child_by_pid():
+    """Whatever a test started is killed by pid at teardown, so a regression cannot leave a 120 s sleeper behind."""
+    _STARTED.clear()
+    yield
+    for pid in _STARTED:
+        try:
+            os.kill(pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _watch(tmp_path, cmd, grace, watcher=None, **kw):
-    return run_watched(cmd, cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
+    return run_watched(cmd, cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log", popen=_tracked_popen,
                        watcher=watcher or _ReadyWatcher(), backstop_s=60, poll_s=0.1, term_grace_s=grace, **kw)
+
+
+def _dead_or_zombie(pid):
+    """A zombie has been killed and only waits for its parent to reap it, which an init that does not reap never does."""
+    if not _alive(pid):
+        return True
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return True
+    return text[text.rfind(")") + 2:].split()[0] == "Z"
 
 
 def _wait_gone(pid):
     for _ in range(40):          # the kernel needs a moment to reap a killed orphan; the loop checks the pid itself
-        if not _alive(pid):
+        if _dead_or_zombie(pid):
             return True
         time.sleep(0.05)
     return False
@@ -314,13 +347,13 @@ def test_a_grandchild_that_ignores_sigterm_is_killed_after_the_grace_even_when_t
 def test_a_repeating_child_is_stopped_with_sigterm_and_keeps_the_repeating_reason(tmp_path):
     code = "import time\nwhile True:\n print('same', flush=True); time.sleep(0.02)"
     got = run_watched(_py(code), cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
-                      watcher=StallWatcher(quiet_s=1000, repeat_lines=5), backstop_s=60, poll_s=0.1, term_grace_s=1.0)
+                      watcher=StallWatcher(quiet_s=1000, repeat_lines=5), backstop_s=60, poll_s=0.1, term_grace_s=1.0, popen=_tracked_popen)
     assert got.killed and got.reason.startswith("repeating") and got.returncode == -_signal.SIGTERM
 
 
 def test_the_backstop_stops_a_child_with_sigterm_and_keeps_the_backstop_reason(tmp_path):
     got = run_watched(["sleep", "120"], cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
-                      watcher=StallWatcher(quiet_s=1000), backstop_s=0.3, poll_s=0.1, term_grace_s=1.0)
+                      watcher=StallWatcher(quiet_s=1000), backstop_s=0.3, poll_s=0.1, term_grace_s=1.0, popen=_tracked_popen)
     assert got.killed and got.reason.startswith("backstop") and got.returncode == -_signal.SIGTERM
 
 
@@ -337,7 +370,7 @@ def test_the_cleanup_after_an_error_also_lets_the_child_run_its_sigterm_cleanup(
 
     with pytest.raises(RuntimeError):
         run_watched(_py(code), cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
-                    watcher=Boom(), backstop_s=60, poll_s=0.1, term_grace_s=1.0)
+                    watcher=Boom(), backstop_s=60, poll_s=0.1, term_grace_s=1.0, popen=_tracked_popen)
     assert marker.exists()
 
 
@@ -354,22 +387,6 @@ def test_killing_a_child_that_already_exited_is_quiet(tmp_path):
     proc = subprocess.Popen(["true"], start_new_session=True)
     proc.wait()
     stallwatch._kill_group(proc, term_grace_s=0.3)
-
-
-def test_a_missing_or_foreign_group_is_swallowed_and_does_not_wait_out_the_grace(monkeypatch):
-    class P:
-        pid = 12345
-
-        def poll(self):
-            return None
-
-    for exc in (ProcessLookupError, PermissionError):
-        def fake_killpg(pgid, sig, exc=exc):
-            raise exc()
-        monkeypatch.setattr(stallwatch.os, "killpg", fake_killpg)
-        t = time.monotonic()
-        stallwatch._kill_group(P(), term_grace_s=5.0)
-        assert time.monotonic() - t < 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -426,5 +443,95 @@ def test_kill_group_sends_no_signal_for_a_live_process_that_does_not_lead_its_ow
 
 def test_group_gone_never_probes_a_foreign_group():
     for pgid in (None, 0, 1, os.getpgrp()):
-        assert stallwatch._group_gone(pgid) is True or _KILLPG_CALLS == []
+        assert stallwatch._group_gone(pgid) is True
+        assert _KILLPG_CALLS == []
     assert _KILLPG_CALLS == []
+
+
+# ---------------------------------------------------------------------------
+# Fully faked group: the guards say yes, os.killpg is a script, so no real signal can be sent.
+# ---------------------------------------------------------------------------
+class _FakeGroup:
+    """Scripts os.killpg for pid 4242. `alive` is how many signal-0 probes still say the group exists."""
+
+    def __init__(self, monkeypatch, *, alive=10**9, term=None, kill=None):
+        self.calls, self.alive, self.term, self.kill = [], alive, term, kill
+        monkeypatch.setattr(stallwatch, "_own_group", lambda pgid: True)
+        monkeypatch.setattr(stallwatch, "_signalable", lambda pgid: True)
+        monkeypatch.setattr(os, "killpg", self._killpg)
+
+    def _killpg(self, pgid, sig):
+        assert pgid == 4242, pgid
+        self.calls.append(sig)
+        if sig == 0:
+            if self.alive <= 0:
+                raise ProcessLookupError()
+            self.alive -= 1
+        elif sig == _signal.SIGTERM and self.term:
+            raise self.term()
+        elif sig == _signal.SIGKILL and self.kill:
+            raise self.kill()
+
+    def sent(self, sig):
+        return self.calls.count(sig)
+
+
+class _Fake4242:
+    pid = 4242
+
+    def __init__(self, poll=None):
+        self._poll = poll
+
+    def poll(self):
+        if self._poll:
+            return self._poll()
+        return None
+
+
+@pytest.mark.parametrize("exc", [ProcessLookupError, PermissionError])
+def test_a_sigterm_that_finds_no_group_is_swallowed_and_nothing_else_is_sent(monkeypatch, exc):
+    g = _FakeGroup(monkeypatch, term=exc)
+    t = time.monotonic()
+    stallwatch._kill_group(_Fake4242(), term_grace_s=5.0)
+    assert g.calls == [_signal.SIGTERM] and time.monotonic() - t < 1.0
+
+
+@pytest.mark.parametrize("exc", [ProcessLookupError, PermissionError])
+def test_a_sigkill_that_finds_no_group_is_swallowed(monkeypatch, exc):
+    g = _FakeGroup(monkeypatch, kill=exc)
+    stallwatch._kill_group(_Fake4242(), term_grace_s=0.1)
+    assert g.sent(_signal.SIGTERM) == 1 and g.sent(_signal.SIGKILL) == 1
+
+
+def test_a_group_that_vanishes_during_the_grace_ends_the_wait_without_a_sigkill(monkeypatch):
+    g = _FakeGroup(monkeypatch, alive=2)
+    t = time.monotonic()
+    stallwatch._kill_group(_Fake4242(), term_grace_s=5.0)
+    assert g.sent(_signal.SIGKILL) == 0 and time.monotonic() - t < 1.0
+
+
+def test_the_group_is_probed_again_just_before_the_sigkill(monkeypatch):
+    g = _FakeGroup(monkeypatch, alive=1)          # alive for the first probe, gone when the grace has run out
+    stallwatch._kill_group(_Fake4242(), term_grace_s=0.0)
+    assert g.sent(_signal.SIGKILL) == 0 and g.sent(0) == 2
+
+
+def test_a_second_interrupt_during_the_grace_still_sigkills_once_and_propagates(monkeypatch):
+    g = _FakeGroup(monkeypatch)
+
+    def interrupted(_s):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(stallwatch.time, "sleep", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        stallwatch._kill_group(_Fake4242(), term_grace_s=5.0)
+    assert g.sent(_signal.SIGTERM) == 1 and g.sent(_signal.SIGKILL) == 1
+
+
+def test_an_interrupt_in_the_leader_check_during_the_grace_still_sigkills_once_and_propagates(monkeypatch):
+    g = _FakeGroup(monkeypatch)
+
+    def interrupted():
+        raise KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        stallwatch._kill_group(_Fake4242(poll=interrupted), term_grace_s=5.0)
+    assert g.sent(_signal.SIGTERM) == 1 and g.sent(_signal.SIGKILL) == 1

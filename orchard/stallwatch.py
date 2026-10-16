@@ -134,13 +134,33 @@ def _group_gone(pgid: int) -> bool:
     return False
 
 
+def _sigkill_group(pgid) -> None:
+    """SIGKILL the group unless it is already gone. The group is probed first, so a group that ended in the last
+    moment is not signalled. No leadership check here: the reaped leader no longer answers getpgid, and Linux keeps
+    the group id reserved while any member lives. The only unsafe window needs the last member to die and the pid
+    counter to wrap all the way round between the probe and the signal; the exposure is the same as with a plain
+    SIGKILL of the group."""
+    if not _signalable(pgid) or _group_gone(pgid):
+        return
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
 def _kill_group(proc, term_grace_s: float = 5.0) -> None:
     """Stop the child's whole process group: SIGTERM first, then SIGKILL for whatever is left after the grace.
 
     A wrapper such as `gozer run` releases its chip lease when it gets SIGTERM; SIGKILL would leave the lease held by
     a dead process. The group is judged gone by the group itself, so a leader that exits on SIGTERM while a
     grandchild keeps running still gets the SIGKILL for the grandchild. The leader is reaped on each check, because
-    a zombie leader keeps its group alive.
+    a zombie leader keeps its group alive. A group that holds only zombies (an init that does not reap) also looks
+    alive, because signal 0 succeeds on a zombie; that kill waits out the grace and then sends a harmless SIGKILL.
+
+    Any exception during the grace, such as a second interrupt or abort signal, sends the SIGKILL before it
+    propagates, so a child that ignores SIGTERM cannot keep its lease because of an interrupt.
+
+    Only a group the child leads is signalled (see `_own_group`).
     """
     if not _own_group(proc.pid):
         return                                    # never signal a group that is not the child's own
@@ -149,24 +169,21 @@ def _kill_group(proc, term_grace_s: float = 5.0) -> None:
     except (ProcessLookupError, PermissionError):
         return                                    # no such group (already gone, or the pid belongs to someone else)
     deadline = time.monotonic() + term_grace_s
-    while True:
-        try:
-            proc.poll()                           # reaps the leader once it has exited
-        except Exception:
-            pass
-        if _group_gone(proc.pid):
-            return
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(min(TERM_POLL_S, max(0.0, deadline - time.monotonic())))
-    # No getpgid check here: the reaped leader no longer answers it, and the kernel keeps the group id reserved
-    # while any member lives, so the id still names our group. The first check at the top has already passed.
-    if not _signalable(proc.pid):
-        return
     try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        pass
+        while True:
+            try:
+                proc.poll()                       # reaps the leader once it has exited
+            except Exception:
+                pass
+            if _group_gone(proc.pid):
+                return
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(min(TERM_POLL_S, max(0.0, deadline - time.monotonic())))
+    except BaseException:
+        _sigkill_group(proc.pid)
+        raise
+    _sigkill_group(proc.pid)
 
 
 def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: float, poll_s: float = 1.0,
