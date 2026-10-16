@@ -151,7 +151,16 @@ def main(argv=None) -> int:
         return 4
     base.update(torch=torch.__version__, transformers=transformers.__version__)
     name = a.cls or (base["architectures"][0] if base["architectures"] else None)
-    cls = getattr(transformers, name, None) if name else None
+    if name is not None and not isinstance(name, str):
+        write(a.out, {**base, "skipped": f"the architecture name {name!r} is not a string"})
+        return 0
+    try:
+        # transformers is a lazy module: a lookup can raise when the model's backend fails to import
+        cls = getattr(transformers, name, None) if name else None
+    except Exception as exc:
+        write(a.out, {**base, "skipped": f"looking up {name!r} in transformers failed: "
+                                         f"{type(exc).__name__}: {str(exc)[:300]}"})
+        return 0
     if cls is None:
         write(a.out, {**base, "skipped": f"class {name!r} is not in the installed transformers {transformers.__version__}"})
         return 0

@@ -206,3 +206,35 @@ print(rc1, rc2)
     assert done.stdout.split()[-2:] == ["0", "0"]
     assert not marker.exists()
     assert "not a transformers model class" in json.loads(out.read_text())["skipped"]
+
+
+def _fake_stack(tmp_path):
+    """A stand-in torch and transformers on PYTHONPATH. The transformers stand-in raises on any attribute lookup it
+    does not define, as the real lazy module does when a backend import fails. Nothing real is imported."""
+    root = tmp_path / "fake-stack"
+    (root / "torch").mkdir(parents=True)
+    (root / "torch" / "__init__.py").write_text("__version__ = '0.0-fake'\n")
+    (root / "transformers").mkdir()
+    (root / "transformers" / "__init__.py").write_text(
+        "__version__ = '0.0-fake'\n"
+        "class PreTrainedModel:\n    pass\n"
+        "def __getattr__(name):\n"
+        "    raise RuntimeError(f'Failed to import transformers.models.{name} because of a backend error')\n")
+    return root
+
+
+@pytest.mark.parametrize("arch,words", [("BrokenForCausalLM", "RuntimeError"), (5, "not a string"),
+                                        ({"a": 1}, "not a string")])
+def test_a_class_lookup_that_raises_or_a_name_that_is_not_a_string_is_skipped(tmp_path, arch, words):
+    """S5. The lookup in transformers can raise (a lazy module whose backend import fails), and architectures[0] can
+    be any JSON value. Either ends in the skipped form, exit 0, with a message naming the problem."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({**QWEN3_TINY, "architectures": [arch]}))
+    out = tmp_path / "raw.json"
+    env = dict(os.environ, PYTHONPATH=str(_fake_stack(tmp_path)))
+    done = subprocess.run([sys.executable, str(TEMPLATE), "--model-dir", str(d), "--out", str(out)],
+                          capture_output=True, text=True, timeout=60, env=env)
+    assert done.returncode == 0, done.stderr
+    raw = json.loads(out.read_text())
+    assert words in raw["skipped"] and "ops" not in raw, raw["skipped"]
