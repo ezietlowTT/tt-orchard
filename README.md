@@ -1114,8 +1114,11 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
 - `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
   runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
   The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress
-  is stopped by the stall watcher (SIGTERM to the whole process group first, so `gozer run` can release its lease, then
-  SIGKILL after a grace period), the probe stops, and the command exits 5 with the report written for what ran.
+  is stopped by the stall watcher (SIGTERM to the whole process group first, then SIGKILL after a grace period of
+  120 s), the probe stops, and the command exits 5 with the report written for what ran. The grace covers gozer's
+  lease release, whose chip reset takes about 42 s, so a watcher stop normally ends with the lease released. Only
+  when gozer itself had to be killed after the grace can the lease be left under a dead process: look with
+  `gozer status` and use the gozer-gatekeeper skill.
 - Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
   attempts' results.
 - A run that stops early still writes its report from the attempts that finished, with the reason. An exception

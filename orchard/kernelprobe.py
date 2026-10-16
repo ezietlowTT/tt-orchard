@@ -73,6 +73,12 @@ OPS = defaults.KERNEL_PROBE_OPS
 # Provisional: none of these has been measured (spec section 5.3).
 BUDGET = {"max_turns": 40, "wall_s": 1800.0, "sim_timeout_s": 300.0, "hw_backstop_s": 600.0}
 GOZER_WHO = "claude:orchard-kernel-probe"
+# How long a `gozer run` gets after the watcher's SIGTERM before the SIGKILL. gozer forwards the SIGTERM to its child,
+# waits for it, and then releases its lease in a `finally`; the release resets the chip, measured at 41.7 s on this
+# box, and gozer also scans /proc and revalidates the lease. A grace shorter than that kills gozer during the reset and
+# leaves the lease under a dead pid. The watcher stops waiting as soon as the group is gone, so the normal path does
+# not wait out the whole grace.
+GOZER_TERM_GRACE_S = 120.0
 AGENT = "kernel-probe"
 # One shell command of the agent may run this long: one simulator check plus a margin. The wall budget is checked
 # between turns, so an attempt can overrun it by up to this much.
@@ -551,15 +557,19 @@ def smoke_test(*, env, shared_python, run_watched=run_watched) -> tuple[bool, li
     start = _size(log)
     argv = _gozer("kernel-probe smoke test", str(shared_python), str(Path(env.src_dir) / "examples" / "eltwise_add.py"))
     got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
-                      backstop_s=BUDGET["hw_backstop_s"])
+                      backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     text = _new_text(log, start)
     tail = text.splitlines()[-SMOKE_TAIL_LINES:]
     if got.killed:
-        # A hang blocks the probe. gozer was killed with the example, so its lease may outlive it.
+        # A hang blocks the probe. The watcher's SIGTERM reaches gozer too, and gozer normally releases its lease
+        # (with the chip reset) within GOZER_TERM_GRACE_S. Only a gozer that had to be killed after the grace can
+        # leave its lease under a dead process.
         hw = {"available": False, "hung": True, "reason": got.reason, "smoke_tail": tail}
         last = " / ".join(tail[-5:]) or "(no output)"
-        raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its last lines: {last}. Its lease may be held by a dead "
-                           "process: use gozer-gatekeeper or `gozer reconcile`, never reset by hand", hw=hw)
+        raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its last lines: {last}. The watcher stopped it, and "
+                           "gozer normally releases the lease when it stops. If gozer itself had to be killed after "
+                           f"the {GOZER_TERM_GRACE_S:.0f} s grace, the lease may still be held by a dead process: look "
+                           "with `gozer status` and use the gozer-gatekeeper skill. Never reset a chip by hand", hw=hw)
     return (got.returncode == 0 and "PASSED!" in text), tail
 
 
@@ -609,7 +619,7 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
                   "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
                   "--phase", "hw")
     got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
-                      backstop_s=BUDGET["hw_backstop_s"])
+                      backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     if got.killed:
         _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
                                    "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1)})

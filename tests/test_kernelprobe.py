@@ -608,6 +608,53 @@ def test_a_smoke_test_killed_by_the_watcher_blocks_the_probe(tmp_path, fake_kenv
     assert "the smoke test hung" in text and "stalled" in text and "gozer-gatekeeper" in text
 
 
+def test_both_gozer_commands_give_gozer_time_to_release_its_lease_and_the_simulator_check_does_not(tmp_path,
+                                                                                                     fake_kenv):
+    """C1. A watcher stop sends SIGTERM to the group and SIGKILL after the grace. `gozer run` releases its lease in a
+    `finally` after its child exits, and the release resets the chip (41.7 s measured here). A grace shorter than that
+    kills gozer in the middle of the reset and leaves the lease under a dead pid. The simulator check holds no lease, so
+    it keeps the short default."""
+    seen = []
+
+    def recorder(argv, **kw):
+        seen.append((list(argv), kw))
+        if "--out" in argv and argv[0] == "gozer":
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET]}))
+        elif "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps(NO_KERNEL))
+        else:
+            with open(kw["log_path"], "a") as f:
+                f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 1.0)
+
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=recorder)
+    gozer = [kw for argv, kw in seen if argv[0] == "gozer"]
+    assert len(gozer) == 2
+    assert all(kw.get("term_grace_s", 0) >= 100 for kw in gozer), [kw.get("term_grace_s") for kw in gozer]
+    assert kp.GOZER_TERM_GRACE_S >= 100
+
+    seen.clear()
+    adir2 = tmp_path / "probe2" / "add" / "attempt-1"
+    kp.prepare_attempt(adir2, op="add", env=fake_kenv, tt_lang=FACTS)
+    (adir2 / "kernel.py").write_text((KERNELS / "add_good.py").read_text())
+    kp.authoritative_check(adir2, op="add", env=fake_kenv, run_watched=recorder, tt_lang=FACTS)
+    (argv, kw), = seen
+    assert argv[0] != "gozer" and kw.get("term_grace_s", 5.0) < 100
+
+
+def test_a_hung_smoke_test_says_the_lease_is_normally_released(tmp_path, fake_kenv):
+    """C1. After a watcher stop gozer normally releases its lease. Only when gozer itself had to be killed after the
+    grace can the lease be left under a dead process, and the message says how to look."""
+    def hangs(argv, **kw):
+        return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
+    with pytest.raises(kp.ProbeBlocked) as info:
+        kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=hangs)
+    text = str(info.value)
+    assert "normally" in text and "gozer status" in text and "gozer-gatekeeper" in text
+    assert "Its lease may be held by a dead process" not in text
+
+
 def test_a_smoke_test_that_exits_non_zero_is_unavailable_without_blocking(tmp_path, fake_kenv):
     def fails(argv, **kw):
         with open(kw["log_path"], "a") as f:
