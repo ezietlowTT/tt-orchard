@@ -1,0 +1,265 @@
+# Kernel attempt: an op inventory and a tt-lang kernel probe
+
+Date: 2026-10-15. Status: draft for operator review. Branch: `kernel-attempt`.
+
+## 1. Purpose and scope
+
+Operator prompt: "What would it take for tt-orchard to take the initiative with models it can't find an
+equivalent for and attempt to write the kernels (in tt-lang for example, using the present skills) instead?"
+The operator then approved the first two steps, asked that this stay in step with the tt-model-manager branches,
+and said provenance metadata stays on the orchard side. Nothing goes upstream; any fix to tt-lang or
+tt-model-manager is local.
+
+This spec covers two parts and the environment they need:
+
+- **Part A, op inventory.** For a model with no nearest bundle, list the operations its reference code uses and say
+  which ones ttnn already offers. No hardware, no model.
+- **Part B, kernel probe.** A command that measures whether the local coder can write a tt-lang kernel that passes
+  a check, on operations whose right answer is known. Simulator first, one chip second.
+- **Environment.** A reproducible tt-lang simulator environment that includes a local fix for a packaging bug.
+
+Out of scope for this branch: kernels for a real model, stage-machine changes for kernel work (a later step, "C"),
+the `generic_op` export, any change to tt-model-manager or tt-lang, publishing.
+
+## 2. Facts this design rests on
+
+Each fact names where it was read. "Not run" means the source was read and nothing was executed.
+
+1. **A full-port route exists and has never run.** `orchard/classes.py` maps `full-port` and `unknown` to the
+   `full-port` path. Stages 3, 5 and 6 are its stages. An unattended retry of a full port always blocks (log,
+   2026-10-06).
+2. **tt-model-manager can ship custom code in a v6 thin bundle.** The installed `tt-model package-thin` takes
+   `--extra-code` (a pure-Python tree) and `--ops-wheel` (a `generic_op` wheel). The unmerged branch
+   `docs/v6-canonical-thin-path` names this the canonical shape: stock ttnn, the model's code in `extra_code/`,
+   custom kernels only as `generic_op` wheels. A new registered C++ ttnn op stays on v5 or v5.1, which orchard
+   refuses. (`feat/v6-extra-code-127` is not an ancestor of `main` by SHA, but `main` contains the feature.)
+3. **A tt-lang kernel has a route to `generic_op`.** tt-lang's `ttl-export` command exports a kernel as TT-Metal C++
+   kernels plus a Python runner that calls `ttnn.generic_op`. Not run. Its tools assume an SSH and docker remote,
+   so orchard needs its own local version (out of scope here).
+4. **ttnn op names cannot be read without importing it.** In the shared venv's installed ttnn there are no `.py` or
+   `.pyi` files naming `rms_norm`, `softmax`, `silu` or `add`. Importing ttnn opens the device (global CLAUDE.md).
+   The coverage list therefore comes from a recorded dump taken under a lease (section 4.3).
+5. **The tt-lang simulator wheel has a packaging bug.** `ttl/sim/diagnostics.py` loads
+   `sim_dir.parent / "ttl" / "diagnostics.py"`, a source-tree path. The wheel does not ship that file, so a
+   diagnosed kernel error ends as `FileNotFoundError`. Present in `tt-lang-sim` 1.1.6 (PyPI) and in a wheel built
+   from main at `9b7ad24` (v1.1.10 plus 23 commits). On upstream's four `examples/errors/*` cases the exit code was
+   non-zero before and after the fix, so the exit code cannot tell the bug from correct behaviour. After copying the
+   source `python/ttl/diagnostics.py` (stdlib imports only) into `site-packages/ttl/ttl/`, the simulator printed
+   the shape mismatch, both copy-lock errors and the deadlock, and `compiler_only_external_call.py` failed with
+   both strings upstream's test expects.
+6. **The reference venv's transformers (5.19.0) already ships** moshi, rwkv, mamba, mamba2, kyutai_speech_to_text,
+   whisper, sam and yolos, so refusing remote code (section 4.2) excludes none of the first candidates.
+7. **Versions on this box (2026-10-15).** Shared venv: `tt-lang 1.1.6` (latest on PyPI, published by Tenstorrent AI
+   ULC), `ttnn 0.65.1rc17.dev6200`. Whether that tt-lang and that ttnn run a kernel together has not been tested
+   (section 5.4 starts with that test).
+
+## 3. Environment: `orchard/ttlang_env.py`
+
+`tt-orchard kernel-env [--check]` builds or checks the simulator environment. It never touches the shared venv.
+
+Steps, each skipped when already true:
+
+1. Shallow clone of `https://github.com/tenstorrent/tt-lang.git` into `<orchard-src>/tt-lang` at the pinned SHA
+   (`defaults.TTLANG_PIN`, first value `9b7ad24d1…`), with no submodules. An existing directory at another SHA is
+   reported, never reset.
+2. A venv (`<venvs>/ttlang`, Python 3.12) with CPU torch from the PyTorch CPU index, installed first as
+   `setup_machine.py` does for the reference venv.
+3. The `tt-lang-sim` wheel built from `packaging/sim` with `TTLANG_VERSION_OVERRIDE=<tag>+g<sha>`, installed.
+4. The diagnostics fix: copy the clone's `python/ttl/diagnostics.py` to `site-packages/ttl/ttl/diagnostics.py`,
+   recording the sha256 of source and copy. The copy is a local patch of a vendor package and is labelled that way
+   in the output and in every probe report.
+5. Verification, which is the instrument check for the whole probe: run upstream's `examples/errors/eltwise_add_error.py`
+   and require the text `does not match Block shape`, and run `compiler_only_external_call.py` and require both
+   `ttl.call_extern_func is not supported by the Python simulator` and `use tt-lang-sim --backend=emule`. A bare
+   non-zero exit does not count.
+
+`--check` runs only step 5 plus a version read and exits 0 or 2. Paths come from `bringup.toml` keys with defaults
+under the operator's home, as the reference venv does. The command refuses `pip` into any other interpreter.
+
+## 4. Part A: op inventory
+
+### 4.1 Pieces
+
+- `orchard/skills/ops-inventory-templates/ops_inventory.py`: runs in `reference_python` (needs torch and
+  transformers). Reads `config.json`, builds the model on the `meta` device with the layer count reduced
+  (default 2), runs `torch.export` on a prefill-sized input (sequence length 8), and writes `raw-ops.json`:
+  every aten op with its count, one sample of input shapes and dtypes, and the module paths that call it.
+- `orchard/opinventory.py`: standard library only. Loads `raw-ops.json`, assigns statuses, scales counts by the
+  real layer count, adds the comparison with a nearest model, and writes `ops-inventory.json` and `.md`.
+- `orchard/data/aten_to_ttnn.json` and `orchard/data/decompositions.json`: hand-kept tables with a test per entry
+  that the aten name is real (checked against the raw ops of the fixture).
+- `tt-orchard inventory MODEL_DIR [--against DIR] [--layers N] [--out DIR]` and
+  `tt-orchard inventory refresh-ttnn` (section 4.3).
+
+### 4.2 What it will and will not load
+
+The architecture named in `config.json` must resolve to a class in the installed transformers, and `config.json`
+must have no `auto_map`. Anything else ends as `skipped: needs remote code` with exit 0 and an inventory that
+holds only that reason. A repo's own `modeling_*.py` is never imported (the same rule the triage template
+follows for `.py` files). An opt-in sandboxed mode is a later decision.
+
+A `torch.export` failure (data-dependent control flow, an op with no meta kernel) is recorded per module with
+the error text. There is no fallback tracer. The report says how many modules traced and how many did not, so a
+reader can see when an inventory is partial.
+
+### 4.3 Statuses and the ttnn dump
+
+`tt-orchard inventory refresh-ttnn` runs `import ttnn; dir(...)` for the public op namespaces under
+`gozer run --chips 1 --who "claude:orchard-inventory"`, and writes `orchard/data/ttnn_ops-<ttnn version>.json`
+with the version, the dump's sha256 and the names. It is a command the operator runs; the supervisor never
+calls it.
+
+| Status | Meaning |
+| --- | --- |
+| `mapped` | the mapping table names a ttnn op and the dump contains that name |
+| `composable` | a decomposition exists and every leaf is `mapped` |
+| `unmapped` | neither |
+| `unchecked` | no dump for the installed ttnn, so nothing is claimed |
+
+`mapped` means "the name exists in the dump of ttnn X". It does not say the op supports the shape, dtype or layout
+the model needs. The report states this in its header, and every row carries the dump's version.
+
+### 4.4 Output
+
+`ops-inventory.json` holds: schema version, model id and architecture, transformers and torch versions, what was
+traced (`prefill`, layers traced, layers in the real config, sequence length), the dump used or `null`, the ops
+(aten name, count, scaled count, shapes sample, dtypes, modules, status, ttnn name, decomposition leaves),
+a summary by status, the trace failures, and a `label` block saying which fields are measured and which are
+tables. With `--against`, each op also says whether the nearest model's inventory has it.
+
+Decode-time structure (KV cache update, recurrent state update) is not traced in this version. For RWKV and
+Mamba, the slow reference path unrolls the recurrence over the 8 input positions, so the scan's ops appear, and
+the report says `traced: prefill, recurrence unrolled over 8 positions`.
+
+### 4.5 Stage 0 hook (last task, additive)
+
+When `reference_python` is set, stage 0's skill runs the template after the triage draft and records the
+summary under `inventory` in `delta.json`. No gate changes. When the inventory has `unmapped` ops and stage 0's
+measured class is `weights-only`, the finding says so; the measured class still decides, as with the base
+research.
+
+## 5. Part B: kernel probe
+
+### 5.1 Command and layout
+
+`tt-orchard kernel-probe --op NAME [--attempts 5] [--phase sim|hw] [--out DIR]`. It is a command with no
+stage. Each attempt gets `DIR/<op>/attempt-<n>/` with `kernel.py` (the only file the agent writes),
+`check.json`, the agent log, and a copy of the spec. `DIR/kernel-probe-report.json` and `.md` summarise.
+
+Ops (`orchard/skills/kernel-loop-templates/ops/<op>.json`), easiest first:
+
+| Op | Why |
+| --- | --- |
+| `silu_mul` | elementwise, two inputs; the simplest fused op |
+| `rmsnorm` | a reduction plus elementwise; ttnn has the op, so the answer is known |
+| `linear_scan` | a first-order recurrence over a sequence (`h[t] = a[t]*h[t-1] + b[t]`), the shape RWKV and Mamba need |
+
+Each spec holds shapes (tile aligned), dtype, the reference function (a name in a fixed table in the template's
+`references.py`; the spec cannot name arbitrary code), the correlation bars and the input sets. Inputs are
+seeded random values plus a heavy-tailed set (a few scaled outliers), because a norm on unit-normal inputs is
+easy. Activations captured from a real model are a later addition and the report says the sets are synthetic.
+
+### 5.2 The check
+
+`kernel_check.py` (template, run by the agent as a shell command) imports `kernel.py`, runs it on the simulator
+through the ttlang venv's `tt-lang-sim`, compares with the torch reference by Pearson correlation (PCC) and max
+absolute error, and writes `check.json`. `check.json` records the sha256 of `kernel_check.py` and the spec. The
+probe command refuses a `check.json` whose hashes differ from the shipped template's, because the agent's shell
+can write any file in its directory. Failure categories come from the simulator's own diagnostic text, which is
+valid only because section 3 step 5 passed:
+
+`no_kernel`, `import_error`, `tt_lang_error` (with the diagnostic's first line), `shape_mismatch`,
+`numeric_mismatch`, `timeout`, `compile_error`, `hang`, `hw_numeric_mismatch`.
+
+Provisional bars (to be replaced by the first measurements, and labelled provisional in every report):
+simulator PCC at least 0.999; hardware PCC at least 0.99 in bf16.
+
+### 5.3 The agent
+
+`AgentStep` on the configured coder tier with a new skill, `orchard/skills/kernel-probe.md`. The skill says:
+write `kernel.py` only, run `kernel_check.py`, read the first diagnostic line, change one thing, never read the
+ledger or transcripts. The runner's rules apply unchanged (no `pip`, no gozer writes, no resets, no uploads).
+Allowed new commands: `kernel_check.py` and `tt-lang-sim` from the ttlang venv. Budget per attempt: 40 turns,
+30 minutes wall time, 300 s per simulator run (all provisional).
+
+Attempts are independent draws from a server that may not accept a seed. The report says so and gives counts and no
+rates or intervals.
+
+### 5.4 Hardware phase
+
+Before the first hardware attempt the probe runs a smoke test: upstream's `examples/eltwise_add.py` with the shared
+venv's tt-lang and ttnn, under `gozer run --chips 1 --exact 1 --who "claude:orchard-kernel-probe"`. If it fails,
+the report says `hw: unavailable` with the output's last lines, and the probe ends after the simulator phase.
+Each hardware run has a 600 s deadline and a process-group kill. A hang ends the probe with a `blocked` outcome
+that names the attempt. The probe never resets a chip; the lease release does, as everywhere else in orchard.
+
+### 5.5 Report
+
+Per op and attempt: simulator pass, hardware pass or `null`, PCC values, turns, wall time, failure category and
+first diagnostic line. Per op: attempts to first pass. The header lists the tt-lang versions, the source SHA, the
+diagnostics patch hashes, the coder's model id and the provisional bars.
+
+## 6. Provenance metadata (orchard side)
+
+Each op in an inventory, and each probe attempt, carries a `provenance` block: `origin` (`existing`, `composed` or
+`kernel`), evidence file sha256 values, tt-lang version and source SHA, whether the diagnostics patch was applied,
+simulator and hardware PCC, the coder's model id, and the run or probe id. Stage 8's bundle shows it in
+`RESULTS.md`. Nothing is written into tt-model-manager's manifest.
+
+## 7. Tests and instrument checks
+
+Test first, one commit per change, a mutation per guard (the repo's practice). The checks that matter most:
+
+- **Environment.** A fake machine with every call logged, as in `test_setup_machine`. Mutations: no diagnostics
+  copy, a copy of the wrong file, an exit-code-only verification. The first mutation must make the verification
+  fail.
+- **Inventory.** The fixture is a recorded `raw-ops.json` from a real trace of an installed transformers
+  architecture (no hand-made list), with its hash noted, so the suite needs no torch. An opt-in live test
+  (`ORCHARD_LIVE_INVENTORY=1`) re-traces. Mutations: remote code accepted, `unchecked` reported as `mapped`, a dump
+  for a different ttnn version accepted, a decomposition with an unmapped leaf counted as `composable`, layer
+  scaling off.
+- **Probe.** For each op, a deliberately wrong kernel fixture (a norm with the wrong epsilon, a scan with the
+  wrong carry) must come back `numeric_mismatch`; a test that has not been seen to fail proves nothing. Mutations:
+  template hash not checked, category taken from the exit code, hardware phase without a lease (a tripwire gozer
+  fails any call), no smoke test, no deadline.
+- **No network and no device.** Inventory and probe tests run with sockets blocked and with the no-chip device
+  mask.
+
+## 8. Risks and limits
+
+- The simulator may support less than the compiler (tt-lang's functionality matrix says which), so a simulator
+  pass does not promise a hardware pass.
+- The shared venv's tt-lang 1.1.6 and ttnn 0.65.1rc17 may not work together; section 5.4 finds out.
+- The local coder has not been shown to write tt-lang. Part B exists to measure that.
+- `mapped` is a name match. The inventory can understate what is missing.
+- Prefill-only tracing leaves out cache and state updates.
+- Synthetic inputs can pass a kernel that fails on real activations.
+- A v6 bundle cannot carry a new registered C++ op.
+- The diagnostics patch edits a vendor package in our venv. A tt-lang release that ships the file makes the
+  patch redundant; step 5 of the environment check still passes then.
+
+## 9. Success criteria and what comes next
+
+**A:** `tt-orchard inventory` runs, with no hardware, on Moshi, RWKV and Mamba2 from the installed transformers,
+produces every field in section 4.4 in minutes, and the Qwen3 fixture comes out with no `unmapped` ops once a
+dump exists.
+
+**B:** `tt-orchard kernel-probe` produces a table of attempts per op, on the simulator at least, and on one chip if
+the smoke test passes.
+
+**C (not in this branch):** wire a kernel loop into the full-port stages. The operator decides from B's table.
+A proposal for the go/no-go: at least 3 of 5 attempts pass on `silu_mul` and `rmsnorm` in the simulator and at
+least 1 of 5 on `linear_scan`.
+
+## 10. Appendix: gaps in tt-model-manager's metadata (for the operator to raise)
+
+Read from `docs/thin_packages.md` on `origin/docs/v6-canonical-thin-path` (unmerged) and `src/tt_kernel/manifest.py`.
+
+- `deps.custom_ops` lists only wheels passed with `--ops-wheel` whose ops `model.py` imports statically.
+- Pure-Python ops in `extra_code/`, ops called by name through `ttnn.generic_op`, and ops imported from a helper
+  module are shipped and not recorded.
+- The manifest has no field for how an op was made (composed or written), by what, or what it was checked against.
+- The `generic_op` route for a tt-lang kernel (fact 3) is not mentioned in tt-model-manager's docs; a search of `origin/main` and the docs branch
+  found no mention of tt-lang.
+- Unmerged branches seen on 2026-10-15 that touch this: `docs/v6-canonical-thin-path`, `feat/v6-extra-code-127`,
+  `fix/v6-reproducible-install`, `feat/auxiliary-weights`, `raahem/renumber-scoped-devices`.

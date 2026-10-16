@@ -1143,3 +1143,27 @@ Prompt (operator): "get the new screenshot". No browser tool was available in th
   Page text now reads "The song ended at 5.2 s, before the 20 s asked for: the lyrics were finished." The README and the card say the page explains an early end again.
 - Pushed to GitHub (`2f8c3d5`) and re-uploaded to the Hugging Face companion repo. The page running under tt-disco on 7871 still has the old code, so it has the blank-steps
   bug until it is restarted from the catalog. The weights upload was at 7.6 GB; `finish_weights.sh` has not run yet.
+
+## 2026-10-15: design for attempting kernels when no equivalent model exists (branch `kernel-attempt`)
+Prompt (operator): "What would it take for tt-orchard to take the initiative with models it can't find an equivalent for and
+attempt to write the kernels (in tt-lang for example, using the present skills) instead?" Then: go with the op inventory and
+the kernel probe, keep in step with the tt-model-manager branches ("metadata being part of what we need clarity on"), keep
+provenance orchard-side, "don't draft an upstream fix. fix for yourself for now only. the goal is to get a branch where this
+logic is in place." Spec: `docs/superpowers/specs/2026-10-15-kernel-attempt-design.md`. No product code yet; the spec waits for
+the operator's review, then a plan.
+- Corrected my own first answer: handing over agent-written ops is mostly possible already. The installed `tt-model package-thin`
+  takes `--extra-code` and `--ops-wheel` (generic_op wheels); a new registered C++ ttnn op still needs v5 or v5.1, which orchard
+  refuses. tt-model-manager's `deps.custom_ops` records only `--ops-wheel` wheels that `model.py` imports statically.
+- ttnn op names are not readable without importing ttnn (zero hits in its `.py` files), and importing opens the device. The
+  coverage list is a dump taken under a lease and stamped with the ttnn version. My first plan, an `ast` scan, would not have worked.
+- tt-lang: the shared venv's `tt-lang 1.1.6` is the latest on PyPI; the repo is at v1.1.10 plus 23 commits. A simulator venv
+  (`~/orchard-venvs/ttlang`) and a clean clone (`~/orchard-src/tt-lang`) were built outside the repo. The operator's own
+  `~/code/tt-lang` (85 commits behind, edited submodule, 22 GB of builds) was left alone.
+- Bug found in the tt-lang-sim wheel (1.1.6 and main): it loads `ttl/ttl/diagnostics.py`, a source-tree path the wheel does not
+  ship, so a diagnosed kernel error becomes `FileNotFoundError`. Upstream's negative examples exit non-zero both with and
+  without the bug, so an exit code cannot show it. Copying the source `diagnostics.py` into the venv fixes it locally; the
+  environment command in the spec does that and then checks for the named diagnostic text. Not reported upstream, by decision.
+- Process slips: my first run of all upstream examples used a launch setup unlike upstream's tests and gave 7 of 20; the second,
+  with the source `python/` directory on the path, failed all 25 identically because it shadowed the wheel's `ttl` with an
+  uncompiled one. Neither result was evidence about the simulator. The third run (helper package only) gave 12 of 25, and the
+  causes of the 13 failures are listed in the memory note, partly unverified.
