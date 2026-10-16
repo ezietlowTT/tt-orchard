@@ -10,6 +10,7 @@
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
+    tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -137,6 +138,14 @@ def _parser() -> argparse.ArgumentParser:
     from orchard import kept_coder as _kept
     sub.add_parser("coder", parents=[common, _kept.parser(add_help=False)],
                    help="show or stop the coder a lab run kept up ([coder] keep_up)")
+    k = sub.add_parser("kernel-env", parents=[common],
+                       help="build or check the tt-lang simulator environment that kernel-probe uses")
+    k.add_argument("--check", action="store_true",
+                   help="change nothing; report each step and exit 2 if one is missing or failed")
+    k.add_argument("--src-dir", help="where the tt-lang checkout lives (default ~/orchard-src/tt-lang, or "
+                                     "$ORCHARD_TTLANG_SRC)")
+    k.add_argument("--venv-dir", help="where the simulator venv lives (default ~/orchard-venvs/ttlang, or "
+                                      "$ORCHARD_TTLANG_VENV)")
     return p
 
 
@@ -410,6 +419,9 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)), \
             find_config(getattr(args, "config", None), env, CHECKOUT, home)
 
+    if args.cmd == "kernel-env":
+        from orchard import ttlang_env
+        return ttlang_env.main(args, out=out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
     if args.cmd == "caches":

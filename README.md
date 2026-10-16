@@ -1025,6 +1025,25 @@ tt-orchard coder status        # the kept coder, its lease, and whether it serve
 tt-orchard coder stop          # stop it and free its chips (asks first; --yes to skip)
 ```
 
+### 5.9a Kernel environment
+
+```bash
+tt-orchard kernel-env --check     # report each step; change nothing; exit 2 if one is missing or failed
+tt-orchard kernel-env             # build whatever is missing
+```
+
+This builds the tt-lang simulator environment that the kernel probe uses: a tt-lang checkout and a Python
+venv with the simulator wheel. It needs no `bringup.toml`, so it can run on a machine that is not set up yet.
+The simulator wheel does not ship `diagnostics.py`, so a diagnosed kernel error ends as a
+`FileNotFoundError`. The command copies the checkout's file into the venv. This is a local patch of a
+vendor package and is labelled as a patch wherever the probe reports tt-lang versions.
+
+Flags:
+
+- `--check`: change nothing. Report each step and exit 2 if one is missing or failed.
+- `--src-dir`: where the tt-lang checkout lives (default `~/orchard-src/tt-lang`, or `$ORCHARD_TTLANG_SRC`).
+- `--venv-dir`: where the simulator venv lives (default `~/orchard-venvs/ttlang`, or `$ORCHARD_TTLANG_VENV`).
+
 ### 5.10 Tensor caches and disk
 
 Each chip configuration keeps a tensor cache under `cache_root`, named by model and package

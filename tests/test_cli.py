@@ -715,3 +715,26 @@ def test_caches_takes_its_own_flags(conf, tmp_path):
 def test_coder_status_with_nothing_kept(conf, tmp_path):
     code, out, rec = run(conf, ["coder", "status"])
     assert code == 0 and "no coder is kept up" in out and rec.argv is None
+
+
+def test_kernel_env_check_runs_the_check_and_returns_its_exit_code(tmp_path, monkeypatch):
+    from orchard import cli, ttlang_env
+    seen = {}
+
+    def fake_main(args, *, env=None, out=None, run=None):
+        seen["check"], seen["src"], seen["venv"] = args.check, args.src_dir, args.venv_dir
+        return 2
+
+    monkeypatch.setattr(ttlang_env, "main", fake_main)
+    out = io.StringIO()
+    code = cli.main(["kernel-env", "--check", "--src-dir", str(tmp_path / "s"), "--venv-dir", str(tmp_path / "v")],
+                    stdout=out)
+    assert code == 2 and seen == {"check": True, "src": str(tmp_path / "s"), "venv": str(tmp_path / "v")}
+
+
+def test_kernel_env_needs_no_bringup_config(tmp_path, monkeypatch):
+    """The command must work on a machine with no bringup.toml: it is how a machine gets ready."""
+    from orchard import cli, ttlang_env
+    monkeypatch.setattr(ttlang_env, "main", lambda args, **kw: 0)
+    monkeypatch.setenv("ORCHARD_BRINGUP_CONFIG", str(tmp_path / "does-not-exist.toml"))
+    assert cli.main(["kernel-env", "--check"], stdout=io.StringIO()) == 0
