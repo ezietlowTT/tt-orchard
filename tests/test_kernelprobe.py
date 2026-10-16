@@ -2201,3 +2201,26 @@ def test_an_os_error_inside_the_lock_is_a_plain_refusal(tmp_path, fake_kenv, env
                    run_watched_fn=no_run)
     err = capsys.readouterr().err
     assert code == kp.EXIT_REFUSED and seen == [] and "Traceback" not in err and "Input/output error" in err
+
+
+# ---- sampling (B2 to B4) ----------------------------------------------------------------------------------------------
+
+
+def test_run_attempt_sends_and_records_its_sampling(tmp_path, fake_kenv):
+    with FakeModel(scripted(final("done"))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL),
+                              temperature=0.7, top_p=0.9, seed=11)
+        sent = server.requests[0]
+    want = {"temperature": 0.7, "top_p": 0.9, "seed": 11}
+    assert (sent["temperature"], sent["top_p"], sent["seed"]) == (0.7, 0.9, 11)
+    assert attempt["sampling"] == want and attempt["provenance"]["sampling"] == want
+    on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text())
+    assert on_disk["sampling"] == want
+
+
+def test_run_attempt_is_greedy_by_default(tmp_path, fake_kenv):
+    with FakeModel(scripted(final("done"))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL))
+        sent = server.requests[0]
+    assert sent["temperature"] == 0 and "seed" not in sent and "top_p" not in sent
+    assert attempt["sampling"] == {"temperature": 0.0, "top_p": None, "seed": None}

@@ -362,10 +362,12 @@ def set_measures(sets: list) -> dict:
             "rel_l2_max": max(rel) if rel else None}
 
 
-def provenance(*, kernel_sha256, tt_lang, coder_model, probe_id, simulator_pcc_min, hardware_pcc_min=None) -> dict:
-    """The provenance block of a probe attempt (spec section 6)."""
+def provenance(*, kernel_sha256, tt_lang, coder_model, probe_id, simulator_pcc_min, hardware_pcc_min=None,
+               sampling: dict | None = None) -> dict:
+    """The provenance block of a probe attempt (spec section 6), with the sampling the coder was asked for."""
     return {"origin": "kernel", "kernel_sha256": kernel_sha256, "tt_lang": tt_lang, "coder_model": coder_model,
-            "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min}
+            "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min,
+            "sampling": sampling}
 
 
 def _shipped_hashes(op: str) -> dict:
@@ -677,8 +679,11 @@ def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
 
 def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, max_turns=BUDGET["max_turns"],
                 wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
-                tt_lang: dict | None = None) -> dict:
-    """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json."""
+                tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
+                seed: int | None = None) -> dict:
+    """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
+    The sampling (temperature, top_p, seed) goes to the coder and into the record as `sampling`."""
+    sampling = {"temperature": temperature, "top_p": top_p, "seed": seed}
     adir = Path(probe_dir) / op / f"attempt-{n}"
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
     prepare_attempt(adir, op=op, env=env, tt_lang=facts)
@@ -690,7 +695,8 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         step = AgentStep(agent=AGENT, endpoint=endpoint, model=model, tools=attempt_tools(adir), ledger=ledger,
                          stage=0, phase="probe", feed=dog.feed, control=control, run_dir=adir,
                          evidence_dir=adir / "evidence", log_path=adir / "log" / "probe-00001.jsonl", http=http,
-                         clock=clock, guard=RetryGuard(), max_turns=max_turns)
+                         clock=clock, guard=RetryGuard(), max_turns=max_turns, temperature=temperature, top_p=top_p,
+                         seed=seed)
         user = (f"Write kernel.py for the op `{op}` in kernel_spec.json. "
                 "Start by reading kernel_spec.json and reference/eltwise_add.py.")
         outcome = step.run(SKILL.read_text(encoding="utf-8"), user)
@@ -709,9 +715,10 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
-        "swept": swept,
+        "swept": swept, "sampling": dict(sampling),
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
-                                 coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"]),
+                                 coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
+                                 sampling=dict(sampling)),
     }
     _save_attempt(adir, attempt)
     return attempt
