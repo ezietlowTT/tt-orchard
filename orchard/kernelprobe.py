@@ -1185,6 +1185,9 @@ def _hw_line(a: dict) -> str:
 
 
 MAX_TEMPERATURE = 2.0
+MAX_TEMPERATURES = 10        # choice: a plan larger than this is more likely a typo than a measurement
+MAX_TOTAL_ATTEMPTS = 200     # choice: attempts x temperatures; at about 200 s an attempt this is 11 hours
+SEED_MAX = 2 ** 63 - 1       # the largest seed an OpenAI-compatible server takes (a signed 64-bit integer)
 
 
 def _number(text, flag: str) -> float:
@@ -1195,13 +1198,15 @@ def _number(text, flag: str) -> float:
     return value
 
 
-def parse_sampling(args) -> dict:
+def parse_sampling(args, attempts: int = 1) -> dict:
     """The run's sampling from --temperature, --temperatures, --top-p and --seed, checked; raises _Refused.
 
     {"temperatures": [...], "top_p": float or None, "seed": int or None}. The default is one group at temperature 0
     (the server is asked for greedy decoding; attempts often repeat each other but are not guaranteed to be identical).
     Every temperature must be in [0, 2] and
-    listed once, top-p in (0, 1], and the seed a whole number of 0 or more."""
+    listed once, at most MAX_TEMPERATURES of them, with at most MAX_TOTAL_ATTEMPTS attempts in all (`attempts` per
+    temperature); top-p in (0, 1]; the seed a whole number of 0 or more whose last attempt (base + total) is at most
+    2**63 - 1."""
     one, many = getattr(args, "temperature", None), getattr(args, "temperatures", None)
     if one is not None and many is not None:
         raise _Refused("give --temperature or --temperatures, not both")
@@ -1214,6 +1219,12 @@ def parse_sampling(args) -> dict:
         if t in temperatures:
             raise _Refused(f"temperature {t:g} is listed twice")
         temperatures.append(t)
+    if len(temperatures) > MAX_TEMPERATURES:
+        raise _Refused(f"at most {MAX_TEMPERATURES} temperatures (got {len(temperatures)})")
+    total = attempts * len(temperatures)
+    if total > MAX_TOTAL_ATTEMPTS:
+        sum_text = f"{attempts} x {len(temperatures)} = {total}" if len(temperatures) > 1 else f"{total}"
+        raise _Refused(f"at most {MAX_TOTAL_ATTEMPTS} attempts in total ({sum_text})")
     top_p = getattr(args, "top_p", None)
     if top_p is not None:
         try:
@@ -1230,6 +1241,9 @@ def parse_sampling(args) -> dict:
             raise _Refused(f"--seed: {seed!r} is not a whole number") from None
         if seed < 0:
             raise _Refused(f"--seed {seed} is below 0")
+        if seed + total > SEED_MAX:
+            raise _Refused(f"--seed {seed}: the last attempt would send {seed} + {total}, above the largest seed "
+                           f"2**63 - 1 ({SEED_MAX})")
     return {"temperatures": temperatures, "top_p": top_p, "seed": seed}
 
 
@@ -1395,7 +1409,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     if attempts < 1:
         return refuse("--attempts must be at least 1")
     try:
-        plan = parse_sampling(args)
+        plan = parse_sampling(args, attempts)
     except _Refused as exc:
         return refuse(str(exc))
     env = env or default_env(args)

@@ -2370,3 +2370,42 @@ def test_the_same_kernel_warning_above_temperature_0_names_the_likely_causes(tmp
     flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.7, "a" * 64), _sampled(2, 0.7, "a" * 64)]).split())
     assert ("All 2 attempts that wrote a kernel produced the same kernel at temperature 0.7: the temperature may be "
             "too low for this prompt, or the server may be ignoring it.") in flat
+
+
+SEED_MAX = 2 ** 63 - 1
+
+
+@pytest.mark.parametrize("flags,words", [
+    ({"seed": str(SEED_MAX), "attempts": 1}, str(SEED_MAX)),
+    ({"seed": str(SEED_MAX - 4), "attempts": 5}, "2**63 - 1"),
+    ({"seed": True}, "--seed"),
+    ({"temperature": "inf"}, "between 0 and 2"),
+    ({"temperature": "-inf"}, "between 0 and 2"),
+    ({"temperatures": ",".join(str(i / 10) for i in range(11))}, "at most 10 temperatures (got 11)"),
+    ({"attempts": 201}, "at most 200 attempts in total (201)"),
+    ({"attempts": 101, "temperatures": "0,1"}, "at most 200 attempts in total (101 x 2 = 202)"),
+], ids=["seed-max-1", "seed-max-5", "seed-bool", "inf", "minus-inf", "eleven-temps", "201", "101x2"])
+def test_seeds_out_of_range_and_oversized_plans_are_refused(tmp_path, fake_kenv, env_ready, monkeypatch, capsys,
+                                                            flags, words):
+    """W2. A seed whose last attempt would pass 2**63 - 1 would fail on every request at run time; the plan is capped
+    at 10 temperatures and 200 attempts in total. Each is refused with exit 2 before anything runs."""
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, **flags), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == kp.EXIT_REFUSED and seen == [] and words in err, err
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_largest_seed_whose_last_attempt_fits_is_accepted(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=5, temperature="0.5", seed=str(SEED_MAX - 5)), env=fake_kenv,
+                   out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and seen[-1][3] == SEED_MAX
+
+
+def test_ten_temperatures_and_200_attempts_are_accepted(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=20, temperatures=",".join(str(i / 10) for i in range(10))),
+                   env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and len(seen) == 200
