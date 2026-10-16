@@ -635,6 +635,8 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
                 pass
 
         def kill_pass() -> None:
+            """The second scan and the SIGKILLs. Every step has its own guard, so this never raises: an error here
+            cannot replace an interrupt that is on its way out."""
             try:
                 note(found())                            # a second scan: new processes started during the grace
             except Exception:
@@ -654,10 +656,7 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
             while clock() < deadline and any(_environ_has(proc_root, pid, entry) for pid in targets):
                 sleep(SWEEP_POLL_S)
         except BaseException:
-            try:
-                kill_pass()                              # an interrupt must not skip the SIGKILL
-            except Exception:
-                pass                                     # and an error in it must not replace the interrupt
+            kill_pass()                                  # never raises; an interrupt must not skip the SIGKILL
             raise
         kill_pass()
         deadline = clock() + 1.0                         # a killed process leaves /proc within moments
