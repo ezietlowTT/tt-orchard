@@ -186,3 +186,19 @@ PACKAGE_HEALTH_TIMEOUT_S = 3300.0   # how long the boot check waits for /health.
                                     # same value as the swap template's HEALTH_TIMEOUT_S
 PACKAGE_VERIFY_DEADLINE_S = 4200.0  # choice: the boot check's hardware deadline: the health wait, 33
                                     # short requests, and the server's stop
+
+# ---- tt-lang, for `tt-orchard kernel-env` and `kernel-probe` (spec 2026-10-15-kernel-attempt-design.md) ----
+TTLANG_URL = "https://github.com/tenstorrent/tt-lang.git"
+TTLANG_PIN = "9b7ad24d1bd6a89dc1f8f885686bc4db86ac7244"   # choice: v1.1.10 plus 23 commits, read 2026-10-15
+TTLANG_VERSION_TAG = "1.1.10"                             # the tag TTLANG_PIN is counted from
+# sha256 of python/ttl/diagnostics.py at TTLANG_PIN. The tt-lang-sim wheel looks for this file at
+# site-packages/ttl/ttl/diagnostics.py and does not ship it, so a diagnosed kernel error ends as
+# FileNotFoundError. kernel-env copies the file there, and refuses to if the file at the pin has changed.
+TTLANG_DIAGNOSTICS_SHA256 = "e3964f222cc5dc253157f97645a914f8751ab613f0fa82eb334e97046da8f84f"
+# (example path under tt-lang's examples/, text that must appear in the simulator's output). A bare
+# non-zero exit proves nothing here: the wheel's bug also ends these examples with a non-zero exit.
+TTLANG_NEGATIVE_EXAMPLES = (
+    ("errors/eltwise_add_error.py", ("does not match Block shape",)),
+    ("compiler_only_external_call.py", ("ttl.call_extern_func is not supported by the Python simulator",
+                                        "use tt-lang-sim --backend=emule")),
+)
