@@ -1107,9 +1107,11 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   is never believed; when it disagrees, the report marks it `agent_check_untrusted`. Before that re-check, the probe
   stops every process the agent left running (found by the `ORCHARD_RUN_DIR` value each agent process carries), and
   the report counts them. This boundary is best effort against shortcuts and accidents.
-- The check needs more than PCC. A static gate on `kernel.py` runs first (imports limited to `ttl`, `ttnn` and `math`, with `__future__`, `typing` and aliases of the three
-  accepted; no `import torch` or host code; `OPERATION` a top-level `def` decorated with `@ttl.operation`) and reports every violation
-  with a remedy. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
+- The check needs more than PCC. A static gate on `kernel.py` runs first and reports every violation with a remedy.
+  Imports are limited to `ttl`, `ttnn` and `math` (aliases of the three accepted), plus a listed set of names from
+  `typing` (such as `Any` and `Optional`) and from `__future__` (such as `annotations`). Forbidden names such as
+  `open`, `os` and `sys` are refused as a name, an attribute or an import, also under an alias. There is no
+  `import torch` or host code, and `OPERATION` is a top-level `def` decorated with `@ttl.operation`. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
   every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
   `harness_error` (a fault in the templates or the environment, including the setup phase).
 - The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
@@ -1120,8 +1122,9 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   is stopped by the stall watcher (SIGTERM to the whole process group first, then SIGKILL after a grace period of
   120 s), the probe stops, and the command exits 5 with the report written for what ran. The grace covers gozer's
   lease release, whose chip reset takes about 42 s, so a watcher stop normally ends with the lease released. Only
-  when gozer itself had to be killed after the grace can the lease be left under a dead process: look with
-  `gozer status` and use the gozer-gatekeeper skill. The watcher's limits on hardware (60 s with no output and no
+  when gozer itself had to be killed can the lease be left under a dead process: after the grace, or at once when a
+  second interrupt (another Ctrl-C or SIGTERM) arrives during the grace. Then look with `gozer status` and use the
+  gozer-gatekeeper skill. The watcher's limits on hardware (60 s with no output and no
   CPU use, 20 repeats of one line) are not measured. For the smoke test and each hardware run the report gives the
   longest quiet stretch and the longest repeat the watcher saw, and a stopped run's first line names the rule
   that stopped it (`backstop`, `stalled` or `repeating`).

@@ -652,6 +652,7 @@ def test_a_hung_smoke_test_says_the_lease_is_normally_released(tmp_path, fake_ke
         kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=hangs)
     text = str(info.value)
     assert "normally" in text and "gozer status" in text and "gozer-gatekeeper" in text
+    assert "second interrupt" in text
     assert "Its lease may be held by a dead process" not in text
 
 

@@ -738,9 +738,10 @@ def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | No
         hw = {"available": False, "hung": True, "reason": got.reason, "smoke_tail": tail, "watch": _watch_facts(got)}
         last = " / ".join(tail[-5:]) or "(no output)"
         raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its last lines: {last}. The watcher stopped it, and "
-                           "gozer normally releases the lease when it stops. If gozer itself had to be killed after "
-                           f"the {GOZER_TERM_GRACE_S:.0f} s grace, the lease may still be held by a dead process: look "
-                           "with `gozer status` and use the gozer-gatekeeper skill. Never reset a chip by hand", hw=hw)
+                           "gozer normally releases the lease when it stops. If gozer itself had to be killed (after "
+                           f"the {GOZER_TERM_GRACE_S:.0f} s grace, or at once by a second interrupt during the grace), "
+                           "the lease may still be held by a dead process: look with `gozer status` and use the "
+                           "gozer-gatekeeper skill. Never reset a chip by hand", hw=hw)
     return (got.returncode == 0 and "PASSED!" in text), tail
 
 
