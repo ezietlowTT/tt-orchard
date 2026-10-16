@@ -738,3 +738,45 @@ def test_kernel_env_needs_no_bringup_config(tmp_path, monkeypatch):
     monkeypatch.setattr(ttlang_env, "main", lambda args, **kw: 0)
     monkeypatch.setenv("ORCHARD_BRINGUP_CONFIG", str(tmp_path / "does-not-exist.toml"))
     assert cli.main(["kernel-env", "--check"], stdout=io.StringIO()) == 0
+
+
+# ---------------------------------------------------------------- inventory
+
+def _fake_inventory(monkeypatch):
+    """Replace both back ends with recorders, so no test traces a model or takes a lease."""
+    from orchard import opinventory, ttnn_dump
+    calls = {"dump": [], "inv": []}
+    monkeypatch.setattr(ttnn_dump, "main", lambda python, **kw: calls["dump"].append(python) or 0)
+    monkeypatch.setattr(opinventory, "run_inventory", lambda model_dir, **kw: calls["inv"].append((model_dir, kw)) or 0)
+    return calls
+
+
+def test_inventory_refresh_ttnn_calls_the_dump_with_the_ttnn_python_and_never_the_inventory(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", "refresh-ttnn", "--ttnn-python", "/t/py"], env={"HOME": str(tmp_path)},
+                    stdout=io.StringIO())
+    assert code == 0 and calls["dump"] == ["/t/py"] and calls["inv"] == []
+
+
+def test_inventory_of_a_model_directory_uses_the_python_given(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", str(tmp_path / "m"), "--python", "/r/py", "--layers", "3"],
+                    env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 0 and calls["dump"] == []
+    model, kw = calls["inv"][0]
+    assert model == str(tmp_path / "m") and kw["python"] == "/r/py" and kw["layers"] == 3
+    assert kw["ttnn_python"] == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
+
+
+def test_inventory_reads_the_interpreter_from_the_environment(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    cli.main(["inventory", "somedir"], env={"HOME": str(tmp_path), "ORCHARD_REFERENCE_PYTHON": "/e/py"},
+             stdout=io.StringIO())
+    assert calls["inv"][0][1]["python"] == "/e/py"
+
+
+def test_inventory_with_no_interpreter_anywhere_refuses_and_calls_neither(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", "somedir", "--config", str(tmp_path / "missing.toml")],
+                    env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 2 and calls == {"dump": [], "inv": []}

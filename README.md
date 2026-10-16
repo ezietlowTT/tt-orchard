@@ -1044,6 +1044,33 @@ Flags:
 - `--src-dir`: where the tt-lang checkout lives (default `~/orchard-src/tt-lang`, or `$ORCHARD_TTLANG_SRC`).
 - `--venv-dir`: where the simulator venv lives (default `~/orchard-venvs/ttlang`, or `$ORCHARD_TTLANG_VENV`).
 
+### 5.9b Op inventory
+
+```bash
+tt-orchard inventory /path/to/model-dir      # trace the model's reference code, write ops-inventory/
+tt-orchard inventory refresh-ttnn            # record ttnn's op names; takes a one-chip gozer lease
+```
+
+`inventory DIR` traces the model's reference code on the meta device with torch (2 layers by default) and
+lists the ops it uses. Each op gets a status. `mapped` means the mapping table names a ttnn op and the
+recorded dump for the installed ttnn contains that name. It is a name match and does not say the op
+supports the model's shape, dtype or layout. `composable` means a decomposition exists whose leaves are all
+`mapped`. `unmapped` means neither. `ignored` marks metadata-only ops. `unchecked` means no dump exists for the
+installed ttnn version, so nothing is claimed.
+
+`refresh-ttnn` imports ttnn, which opens the device, so it runs under a one-chip gozer lease and writes
+`orchard/data/ttnn_ops-<version>.json`. Run it once per ttnn version. The supervisor never runs it.
+
+Flags:
+
+- `--python`: interpreter with torch and transformers (default `$ORCHARD_REFERENCE_PYTHON`, then `reference_python` in `bringup.toml`).
+- `--ttnn-python`: interpreter whose installed ttnn version is read, and that `refresh-ttnn` runs (default `~/.tenstorrent-venv/bin/python`).
+- `--against`: an `ops-inventory.json` of a nearest model, to mark the ops both models use.
+- `--layers`: layers to trace (default 2).
+- `--seq`: sequence length to trace (default 8).
+- `--class`: the transformers class to trace, when it is not the first architecture in `config.json`.
+- `--out`: output directory (default `./ops-inventory`).
+
 ### 5.10 Tensor caches and disk
 
 Each chip configuration keeps a tensor cache under `cache_root`, named by model and package
