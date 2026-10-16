@@ -135,9 +135,10 @@ class ReadOnlyRunner:
     A call marked `network` fails at once (no process starts) when the runner is offline or the budget is spent; its
     timeout is the smaller of CALL_TIMEOUT_S and the budget left. An exception from `run` is a failure (127)."""
 
-    def __init__(self, run: Callable = _raw_run, *, budget_s: float = BUDGET_S, offline: bool = False,
+    def __init__(self, run: Callable | None = None, *, budget_s: float = BUDGET_S, offline: bool = False,
                  clock: Callable = time.monotonic, environ: dict | None = None):
-        self.run, self.budget_s, self.offline, self.clock = run, budget_s, offline, clock
+        # _raw_run is looked up here, not bound as a default, so the test suite's tripwire (conftest.py) replaces it.
+        self.run, self.budget_s, self.offline, self.clock = run or _raw_run, budget_s, offline, clock
         self.started: float | None = None
         base = dict(os.environ if environ is None else environ)
         base.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GH_HOST": "github.com",

@@ -327,9 +327,34 @@ def read_references(env: KEnv, skill_dir: Path) -> tuple[list[dict], list[str]]:
     return files, problems
 
 
+def skills_status(env: KEnv, skill_dir: Path, *, write_cache: bool = True) -> list:
+    """The tt-lang checkout and the installed tt-lang skill compared with upstream (orchard/skillsfresh.py): a list of
+    Freshness results. Read only; `write_cache` False keeps the result cache in memory."""
+    from orchard import skillsfresh
+    return skillsfresh.check_kernel_sources(env.src_dir, skill_dir, cache=skillsfresh.Cache(write=write_cache))
+
+
+def skills_lines(results) -> list[str]:
+    """One line per source for the terminal: ok, or fail with what to run to update."""
+    lines = []
+    for r in results:
+        status = FAIL if r.stale else OK
+        text = f"{status:5s} skills: {r.line()}"
+        if r.stale:
+            text += f" To update: {r.update}." if r.update else " Compare again when GitHub answers."
+        lines.append(text)
+    return lines
+
+
 def main(args, *, env: KEnv | None = None, out=None, run=None) -> int:
-    """`tt-orchard kernel-env [--check] [--src-dir D] [--venv-dir D]`. Exit 0 when every step is ok, 2 when a step
-    failed or (with --check) is still to do."""
+    """`tt-orchard kernel-env [--check] [--src-dir D] [--venv-dir D] [--tt-lang-skill-dir D] [--allow-stale-skills]`.
+    Exit 0 when every step is ok, 2 when a step failed or (with --check) is still to do.
+
+    With --check it also checks what the kernel probe gives the coder: the reference files must be readable, and the
+    tt-lang checkout and the installed tt-lang skill must be the latest upstream has (skills_status, with the result
+    cache kept in memory, so --check still changes nothing). A stale source fails the check unless
+    --allow-stale-skills is given. Without --check nothing is compared with upstream: the build never updates a
+    source to the latest, and the probe makes its own check before it starts."""
     say = (lambda line: print(line, file=out)) if out is not None else print
     home = Path.home()
     env = env or KEnv(
@@ -338,4 +363,19 @@ def main(args, *, env: KEnv | None = None, out=None, run=None) -> int:
         scratch_dir=Path(os.environ.get("ORCHARD_SCRATCH") or home / "orchard-src" / "scratch"),
         run=run or real_run, environ=dict(os.environ))
     results = ensure(env, check_only=args.check, say=say)
-    return 0 if all(r.status == OK for r in results) else 2
+    ok = all(r.status == OK for r in results)
+    if args.check:
+        skill_dir = skill_dir_from(args)
+        _, problems = read_references(env, skill_dir)
+        for p in problems:
+            say(f"{FAIL:5s} references: {p}")
+        fresh = skills_status(env, skill_dir, write_cache=False)
+        for line in skills_lines(fresh):
+            say(line)
+        stale = [r for r in fresh if r.stale]
+        if stale and getattr(args, "allow_stale_skills", False):
+            say(f"{OK:5s} skills: stale skills allowed (--allow-stale-skills): "
+                + ", ".join(r.source for r in stale))
+            stale = []
+        ok = ok and not problems and not stale
+    return 0 if ok else 2

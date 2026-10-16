@@ -812,6 +812,23 @@ def test_kernel_probe_passes_the_parsed_flags_to_kernelprobe_main(monkeypatch, t
     assert kw["tier_config"] is None                       # both flags given: no config is read
 
 
+def test_kernel_probe_and_kernel_env_take_the_skill_flags(monkeypatch, tmp_path):
+    from orchard import ttlang_env
+    calls = _fake_probe_main(monkeypatch)
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m",
+              "--tt-lang-skill-dir", "/sk", "--allow-stale-skills"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    args, _ = calls[0]
+    assert args.tt_lang_skill_dir == "/sk" and args.allow_stale_skills is True
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m"],
+             env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    args, _ = calls[1]
+    assert args.tt_lang_skill_dir is None and args.allow_stale_skills is False
+    seen = []
+    monkeypatch.setattr(ttlang_env, "main", lambda a, **kw: seen.append(a) or 0)
+    cli.main(["kernel-env", "--check", "--tt-lang-skill-dir", "/sk", "--allow-stale-skills"], stdout=io.StringIO())
+    assert seen[0].tt_lang_skill_dir == "/sk" and seen[0].allow_stale_skills is True
+
+
 def test_kernel_probe_defaults(monkeypatch, tmp_path):
     calls = _fake_probe_main(monkeypatch)
     cli.main(["kernel-probe", "--op", "add", "--config", str(tmp_path / "missing.toml")], env={"HOME": str(tmp_path)},

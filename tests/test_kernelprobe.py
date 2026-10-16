@@ -59,6 +59,27 @@ def ttlang_skill(tmp_path, monkeypatch):
     return d
 
 
+def _fresh(source, state, **kw):
+    from orchard import skillsfresh as sf
+    return sf.Freshness(source, f"/x/{source}", state, kw.pop("detail", f"{source} is {state}."),
+                        local="1" * 40, remote="2" * 40, **kw)
+
+
+@pytest.fixture(autouse=True)
+def skills_current(monkeypatch):
+    """The skills freshness check answers "current" for both kernel sources unless a test says otherwise. The calls
+    are recorded (skill directory and whether the cache may be written)."""
+    from orchard import skillsfresh as sf
+    state = {"results": [_fresh(sf.SOURCE_TTLANG, sf.CURRENT), _fresh(sf.SOURCE_TTLANG_SKILL, sf.CURRENT)],
+             "calls": [], "real": ttlang_env.skills_status}
+
+    def fake(env, skill_dir, *, write_cache=True):
+        state["calls"].append({"skill_dir": Path(skill_dir), "write_cache": write_cache})
+        return list(state["results"])
+    monkeypatch.setattr(ttlang_env, "skills_status", fake)
+    return state
+
+
 FACTS = {"sim_version": "1.1.10+gtest", "source_sha": "a" * 40, "diagnostics_patched": True, "patch_sha256": "b" * 64}
 
 
@@ -2724,3 +2745,135 @@ def test_the_skills_api_rules_match_the_simulator_at_the_pin():
     assert "block_count" in re.search(r"def make_dataflow_buffer_like\(([^)]*)\)",
                                       (SIM / "dfb.py").read_text()).group(1)
     assert "def broadcast(" not in (SIM / "math.py").read_text()
+
+
+# ---- the latest skills (Task 14: "WE USE THE LATEST tenstorrent/skills and tt-lang skills available") -----------
+
+def _behind_ttlang():
+    from orchard import skillsfresh as sf
+    return _fresh(sf.SOURCE_TTLANG, sf.BEHIND, behind=1, detail="HEAD 9b7ad24 is 1 commit behind upstream main.",
+                  update="set TTLANG_PIN ... and run `tt-orchard kernel-env`")
+
+
+def test_main_checks_the_skills_of_the_skill_directory_it_uses_and_may_write_the_cache(tmp_path, fake_kenv, env_ready,
+                                                                                       skills_current, ttlang_skill):
+    with FakeModel(lambda r: final("nothing")) as server:
+        assert kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: True, run_watched_fn=no_run) == 0
+    assert skills_current["calls"] == [{"skill_dir": ttlang_skill, "write_cache": True}]
+
+
+def test_a_stale_source_refuses_the_probe_with_the_update_command_and_starts_nothing(tmp_path, fake_kenv, env_ready,
+                                                                                    skills_current, capsys):
+    from orchard import skillsfresh as sf
+    skills_current["results"] = [_behind_ttlang(), _fresh(sf.SOURCE_TTLANG_SKILL, sf.CURRENT)]
+    asked = []
+    code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: asked.append(1) or True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == 2 and asked == [] and not (tmp_path / "out").exists()
+    assert "1 commit behind" in err and "tt-orchard kernel-env" in err and "--allow-stale-skills" in err
+
+
+def test_an_unknown_comparison_without_a_recent_current_check_refuses_the_probe(tmp_path, fake_kenv, env_ready,
+                                                                               skills_current, capsys):
+    from orchard import skillsfresh as sf
+    skills_current["results"] = [_fresh(sf.SOURCE_TTLANG, sf.CURRENT),
+                                 _fresh(sf.SOURCE_TTLANG_SKILL, sf.UNKNOWN, detail="It could not be compared.")]
+    code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == 2 and "could not be compared" in capsys.readouterr().err
+
+
+def test_an_unknown_comparison_covered_by_a_recent_current_check_runs(tmp_path, fake_kenv, env_ready, skills_current):
+    from orchard import skillsfresh as sf
+    skills_current["results"] = [_fresh(sf.SOURCE_TTLANG, sf.CURRENT),
+                                 _fresh(sf.SOURCE_TTLANG_SKILL, sf.UNKNOWN, cached={"state": sf.CURRENT})]
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0
+
+
+def test_allow_stale_skills_runs_and_the_report_records_it_with_the_shas(tmp_path, fake_kenv, env_ready,
+                                                                         skills_current):
+    from orchard import skillsfresh as sf
+    skills_current["results"] = [_behind_ttlang(), _fresh(sf.SOURCE_TTLANG_SKILL, sf.CURRENT)]
+    out = io.StringIO()
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, allow_stale_skills=True), env=fake_kenv,
+                       out=out, probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0 and "stale skills allowed" in out.getvalue()
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    skills = data["header"]["skills"]
+    assert skills["stale_allowed"] is True and skills["stale"] == [sf.SOURCE_TTLANG]
+    (row,) = [f for f in skills["freshness"] if f["source"] == sf.SOURCE_TTLANG]
+    assert row["local"] == "1" * 40 and row["remote"] == "2" * 40 and row["behind"] == 1 and row["stale"] is True
+    for a in data["attempts"]:
+        assert a["provenance"]["skills"]["stale_allowed"] is True
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "## Skill sources" in md and "Stale skills allowed (--allow-stale-skills)" in md
+    assert "1" * 40 in md and "2" * 40 in md
+
+
+def test_current_skills_are_recorded_and_not_called_stale(tmp_path, fake_kenv, env_ready, skills_current):
+    with FakeModel(lambda r: final("nothing")) as server:
+        kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                probe=lambda e, m: True, run_watched_fn=no_run)
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["skills"]["stale_allowed"] is False and data["header"]["skills"]["stale"] == []
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "## Skill sources" in md and "Stale skills allowed" not in md
+
+
+def test_the_real_skills_status_checks_the_checkout_and_the_skill(fake_kenv, ttlang_skill, monkeypatch, skills_current):
+    """ttlang_env.skills_status (not the fixture's fake) hands the checkout, the skill directory and the cache rule to
+    skillsfresh."""
+    from orchard import skillsfresh as sf
+    seen = {}
+
+    def fake(src, skill, *, cache=None, **kw):
+        seen.update(src=src, skill=skill, write=cache.write)
+        return []
+    monkeypatch.setattr(sf, "check_kernel_sources", fake)
+    skills_current["real"](fake_kenv, ttlang_skill, write_cache=False)
+    assert seen == {"src": fake_kenv.src_dir, "skill": ttlang_skill, "write": False}
+
+
+# kernel-env --check reports the same sources and changes nothing
+
+def env_check_args(**kw):
+    from types import SimpleNamespace
+    base = dict(check=True, src_dir=None, venv_dir=None, tt_lang_skill_dir=None, allow_stale_skills=False)
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_kernel_env_check_fails_on_a_stale_source_and_names_the_update(fake_kenv, env_ready, skills_current):
+    from orchard import skillsfresh as sf
+    skills_current["results"] = [_behind_ttlang(), _fresh(sf.SOURCE_TTLANG_SKILL, sf.CURRENT)]
+    out = io.StringIO()
+    assert ttlang_env.main(env_check_args(), env=fake_kenv, out=out) == 2
+    text = out.getvalue()
+    assert "1 commit behind" in text and "tt-orchard kernel-env" in text
+    assert skills_current["calls"][-1]["write_cache"] is False
+
+
+def test_kernel_env_check_passes_with_current_sources_or_the_override(fake_kenv, env_ready, skills_current):
+    from orchard import skillsfresh as sf
+    assert ttlang_env.main(env_check_args(), env=fake_kenv, out=io.StringIO()) == 0
+    skills_current["results"] = [_behind_ttlang(), _fresh(sf.SOURCE_TTLANG_SKILL, sf.CURRENT)]
+    out = io.StringIO()
+    assert ttlang_env.main(env_check_args(allow_stale_skills=True), env=fake_kenv, out=out) == 0
+    assert "stale skills allowed" in out.getvalue()
+
+
+def test_kernel_env_check_fails_when_the_skill_files_are_missing(fake_kenv, env_ready, tmp_path):
+    out = io.StringIO()
+    assert ttlang_env.main(env_check_args(tt_lang_skill_dir=str(tmp_path / "none")), env=fake_kenv, out=out) == 2
+    assert "does not exist" in out.getvalue()
+
+
+def test_kernel_env_without_check_does_not_compare_with_upstream(fake_kenv, env_ready, skills_current):
+    ttlang_env.main(env_check_args(check=False), env=fake_kenv, out=io.StringIO())
+    assert skills_current["calls"] == []

@@ -10,11 +10,12 @@
     tt-orchard lab setup [--model ORG/NAME]... [--yes] [--check]
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
-    tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR]
+    tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
-                            [--src-dir D] [--venv-dir D] [--shared-python P]
+                            [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
+                            [--allow-stale-skills]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -150,6 +151,12 @@ def _parser() -> argparse.ArgumentParser:
                                      "$ORCHARD_TTLANG_SRC)")
     k.add_argument("--venv-dir", help="where the simulator venv lives (default ~/orchard-venvs/ttlang, or "
                                       "$ORCHARD_TTLANG_VENV)")
+    k.add_argument("--tt-lang-skill-dir", help="the installed tt-lang skill whose guide and examples the probe gives "
+                                               "the coder (default ~/.claude/skills/ttm-tt-lang, or "
+                                               "$ORCHARD_TTLANG_SKILL)")
+    k.add_argument("--allow-stale-skills", action="store_true",
+                   help="with --check: a tt-lang checkout or tt-lang skill that is not the latest upstream has does "
+                        "not fail the check")
     inv = sub.add_parser("inventory", parents=[common],
                          help="list the ops a model's reference code uses and which ones ttnn has; "
                               "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease)")
@@ -193,6 +200,12 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--venv-dir", help="the simulator venv (default ~/orchard-venvs/ttlang, or $ORCHARD_TTLANG_VENV)")
     kp.add_argument("--shared-python", help="the interpreter with ttnn and tt-lang that the hardware phase runs "
                                             "(default ~/.tenstorrent-venv/bin/python)")
+    kp.add_argument("--tt-lang-skill-dir", help="the installed tt-lang skill whose guide.md and examples.md go into "
+                                                "each attempt's reference/ (default ~/.claude/skills/ttm-tt-lang, or "
+                                                "$ORCHARD_TTLANG_SKILL)")
+    kp.add_argument("--allow-stale-skills", action="store_true",
+                    help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
+                         "could not be compared; the report records it with the shas")
     return p
 
 

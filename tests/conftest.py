@@ -47,3 +47,13 @@ def pytest_runtest_makereport(item, call):
     report = outcome.get_result()
     if report.when == "call" and report.failed and item.module.__name__ == "test_gozer_contract":
         report.sections.append(("gozer under test", item.module.gozer_identity()))
+
+
+@pytest.fixture(autouse=True)
+def no_skills_network(monkeypatch):
+    """No test may run real git or gh for the skills freshness check (orchard/skillsfresh.py). Its process runner is
+    replaced with one that answers every call with a failure, so a code path that reaches it reports `unknown`
+    without touching the network. Tests of the check itself hand it a fake runner."""
+    from orchard import skillsfresh
+    monkeypatch.setattr(skillsfresh, "_raw_run",
+                        lambda argv, timeout, env=None: (127, "", "the test suite makes no git or gh call"))

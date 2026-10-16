@@ -387,12 +387,13 @@ def set_measures(sets: list) -> dict:
 
 
 def provenance(*, kernel_sha256, tt_lang, coder_model, probe_id, simulator_pcc_min, hardware_pcc_min=None,
-               sampling: dict | None = None, references: list[dict] | None = None) -> dict:
-    """The provenance block of a probe attempt (spec section 6), with the sampling the coder was asked for and the
-    reference files it was given (name, source, path and sha256 of each)."""
+               sampling: dict | None = None, references: list[dict] | None = None, skills: dict | None = None) -> dict:
+    """The provenance block of a probe attempt (spec section 6), with the sampling the coder was asked for, the
+    reference files it was given (name, source, path and sha256 of each) and the skills freshness check (each
+    source's state and shas, and whether a stale source was allowed)."""
     return {"origin": "kernel", "kernel_sha256": kernel_sha256, "tt_lang": tt_lang, "coder_model": coder_model,
             "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min,
-            "sampling": sampling, "references": references}
+            "sampling": sampling, "references": references, "skills": skills}
 
 
 def _shipped_hashes(op: str) -> dict:
@@ -704,7 +705,7 @@ def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
 def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, max_turns=BUDGET["max_turns"],
                 wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
                 tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
-                seed: int | None = None, references: list[dict] | None = None) -> dict:
+                seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
     The sampling (temperature, top_p, seed) goes to the coder and into the record as `sampling`; the reference files
     written into the attempt (with their sha256) go into the provenance block."""
@@ -744,7 +745,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         "swept": swept, "sampling": dict(sampling),
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
-                                 sampling=dict(sampling), references=copied or None),
+                                 sampling=dict(sampling), references=copied or None, skills=skills),
     }
     _save_attempt(adir, attempt)
     return attempt
@@ -1067,6 +1068,25 @@ def _distinct_lines(g: dict) -> list[str]:
     return lines
 
 
+def _skills_lines(header: dict) -> list[str]:
+    """The report's section on the skill sources: each one's state against upstream with both shas, and a line when a
+    stale source was allowed."""
+    sk = header.get("skills")
+    if not isinstance(sk, dict) or not isinstance(sk.get("freshness"), list):
+        return []
+    lines = ["## Skill sources", ""]
+    if sk.get("stale_allowed"):
+        lines += [f"Stale skills allowed (--allow-stale-skills): {', '.join(str(x) for x in sk.get('stale') or [])}. "
+                  "The coder was given sources that are not the latest upstream has.", ""]
+    for f in sk["freshness"]:
+        if isinstance(f, dict):
+            lines.append(f"- {f.get('source')} ({f.get('path')}): {f.get('state')}; local {f.get('local')}, "
+                         f"upstream {f.get('remote')}. {f.get('detail')}")
+            for w in f.get("warnings") or []:
+                lines.append(f"  - warning: {w}")
+    return lines + [""]
+
+
 def _reference_lines(header: dict) -> list[str]:
     """The report's list of the files the coder was given, each with its source and sha256."""
     refs = header.get("references")
@@ -1120,6 +1140,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
              f"- source SHA: {t.get('source_sha')}",
              f"- diagnostics patch applied: {'yes' if t.get('diagnostics_patched') else 'no'} "
              f"(a local patch of the tt-lang-sim wheel; patch sha256 {t.get('patch_sha256')})", "",
+             *_skills_lines(header),
              *_reference_lines(header),
              "## Bars (provisional: none has been measured)", ""]
     for op, b in (header.get("bars") or {}).items():
@@ -1432,7 +1453,9 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     [--src-dir D] [--venv-dir D] [--shared-python P]`.
 
     Order: the op is checked; the simulator environment must pass `ttlang_env.ensure(check_only=True)`; the coder's
-    endpoint and model are resolved and must answer `probe`. Each refusal returns 2 before any attempt directory
+    reference files must all be readable (ttlang_env.read_references); the tt-lang checkout and the tt-lang skill must
+    be the latest upstream has (ttlang_env.skills_status; --allow-stale-skills runs anyway and the report records
+    it); the coder's endpoint and model are resolved and must answer `probe`. Each refusal returns 2 before any attempt directory
     exists. Then N attempts run one after another, each printing one line as it ends. With --phase hw, run_hardware
     runs one smoke test and then each attempt that passed the simulator, each on one leased chip. The report is
     written from the records this run's attempts returned. `tier_config` is the TierConfig the coder comes from when a
@@ -1473,6 +1496,22 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                       f"{ttlang_env.TTLANG_SKILL_ENV}")
     reference_record = [{"name": f"reference/{r['name']}", "source": r["source"], "path": r["path"],
                          "sha256": r["sha256"]} for r in references]
+    # The operator's rule: the probe uses the latest tt-lang checkout and tt-lang skill upstream has. A stale source
+    # (or one that could not be compared and has no recent current check) refuses the probe unless overridden.
+    fresh = ttlang_env.skills_status(env, skill_dir)
+    for line in ttlang_env.skills_lines(fresh):
+        say(line)
+    stale = [f for f in fresh if f.stale]
+    allow_stale = bool(getattr(args, "allow_stale_skills", False))
+    if stale and not allow_stale:
+        return refuse("these sources are not the latest upstream has: " + " ".join(
+            f"{f.source} ({f.path}): {f.detail}" + (f" To update: {f.update}." if f.update else
+                                                     " Compare again when GitHub answers.")
+            for f in stale) + " Pass --allow-stale-skills to run anyway; the report then records it")
+    if stale:
+        say("stale skills allowed (--allow-stale-skills): " + ", ".join(f.source for f in stale))
+    skills_record = {"freshness": [f.to_dict() for f in fresh], "stale": [f.source for f in stale],
+                     "stale_allowed": bool(stale)}
     try:
         endpoint, model = coder_endpoint(args, tier_config, probe)
     except _Refused as exc:
@@ -1518,7 +1557,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                                          model=model, coder_model=model, probe_id=probe_id, http=http,
                                          run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
                                          top_p=plan["top_p"], seed=attempt_seed(base, n, temperature),
-                                         references=references)
+                                         references=references, skills=skills_record)
                     records.append(record)
                     say(_attempt_line(record))
                 if getattr(args, "phase", "sim") == "hw":
@@ -1558,6 +1597,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             header["sampling"] = sampling
             header["tt_lang_skill_dir"] = str(skill_dir)
             header["references"] = reference_record
+            header["skills"] = skills_record
             write_report(probe_dir, records, header)
             say(f"report: {probe_dir / 'kernel-probe-report.md'}")
             if stopped:
