@@ -2463,3 +2463,26 @@ def test_minus_zero_is_temperature_0(tmp_path, fake_kenv, env_ready, monkeypatch
     code = kp.main(probe_args(tmp_path / "b", attempts=1, temperatures="-0,0"), env=fake_kenv, out=io.StringIO(),
                    probe=lambda e, m: True, run_watched_fn=no_run)
     assert code == kp.EXIT_REFUSED and "twice" in capsys.readouterr().err
+
+
+def test_phase_hw_with_two_temperatures_runs_one_smoke_test_and_every_sim_pass(tmp_path, fake_kenv, env_ready):
+    """W11. Attempts 1 and 2 run at temperature 0, 3 and 4 at 0.7; attempts 1 and 3 write the good kernel. One smoke
+    test runs, then a hardware run for each simulator pass, in both groups."""
+    good = (KERNELS / "add_good.py").read_text()
+    script = scripted(call("write_file", path="kernel.py", content=good), final("done"), final("done"),
+                      call("write_file", path="kernel.py", content=good), final("done"), final("done"))
+    gozer_calls = []
+    with FakeModel(script) as server:
+        code = kp.main(probe_args(tmp_path, attempts=2, temperatures="0,0.7", endpoint=server.endpoint, phase="hw"),
+                       env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=passing_check(gozer_calls))
+    assert code == 0
+    smoke = [c for c in gozer_calls if "--out" not in c]
+    kernels = [c for c in gozer_calls if "--out" in c]
+    assert len(smoke) == 1 and len(kernels) == 2
+    assert gozer_calls.index(smoke[0]) == 0                       # the smoke test comes first
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    by_n = {a["attempt"]: a for a in data["attempts"]}
+    assert by_n[1]["hw"]["passed"] is True and by_n[3]["hw"]["passed"] is True
+    assert by_n[2]["hw"] is None and by_n[4]["hw"] is None
+    assert by_n[3]["sampling"]["temperature"] == 0.7
