@@ -365,11 +365,12 @@ Each item changes or adds to the approved design above. Reasons come from the im
     is sent at temperature 0. Above 0, attempt k (counting every attempt of the run) sends base + k; without `--seed` the base comes
     from the probe id and the report records it. A seed repeats a sampled run only if the server honours it, which is not verified.
     `AgentStep` takes the same three options; its default request is unchanged (`temperature: 0`, no other sampling key), so the
-    supervisor is unchanged. The default stays greedy because a repeatable attempt is what calibration and regression checks need;
-    the operator asked for determinism where it is useful and an easy way to raise the temperature to find wild or ingenious kernels.
-27. **The report counts distinct kernels.** The claim that attempts are independent draws was false at temperature 0: the server
-    decodes greedily, and the live probe gave 1 distinct kernel in 3 attempts of `add` and 1 in 5 of `linear_scan` (the five
-    `linear_scan` attempts each took 9 turns and 198 s), while `silu_mul` gave 5 distinct kernels in 5. Each op is now split by
+    supervisor is unchanged. The default stays greedy: the operator asked for determinism where it is useful and an easy way to
+    raise the temperature to find wild or ingenious kernels. Greedy decoding makes repeats common; it does not make a kernel
+    reproducible (see item 27).
+27. **The report counts distinct kernels.** The claim that attempts are independent draws did not hold at temperature 0, where
+    the server is asked for greedy decoding. The live probe gave 1 distinct kernel in 3 attempts of `add` and 1 in 5 of
+    `linear_scan` (the five `linear_scan` attempts each took 9 turns and 198 s), 3 in 5 of `rmsnorm`, and 5 in 5 of `silu_mul`
+    (why `silu_mul` diverged was not measured). Repeats are common at temperature 0 and not guaranteed. Each op is now split by
     temperature, each group says "distinct kernels: N of M attempts" by kernel sha256 (attempts that wrote no kernel are counted
-    apart), and a warning follows when more than one attempt wrote a kernel and all wrote the same one. The header says attempts
-    at temperature 0 can repeat each other.
+    apart), and a warning follows when more than one attempt wrote a kernel and all wrote the same one.

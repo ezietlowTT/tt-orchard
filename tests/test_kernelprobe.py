@@ -460,7 +460,7 @@ def test_the_report_header_lists_versions_patch_hashes_coder_and_provisional_bar
     kp.write_report(tmp_path / "probe", [], header)
     md = (tmp_path / "probe" / "kernel-probe-report.md").read_text()
     for needle in ("1.1.10+gfake", "c" * 40, kp.defaults.TTLANG_DIAGNOSTICS_SHA256, "qwen3-coder-next", "provisional",
-                   "pcc >= 0.999", "pcc >= 0.99", "independent draws", "synthetic", "diagnostics patch applied: no"):
+                   "pcc >= 0.999", "pcc >= 0.99", "greedy decoding", "synthetic", "diagnostics patch applied: no"):
         assert needle in md, needle
     data = json.loads((tmp_path / "probe" / "kernel-probe-report.json").read_text())
     assert data["header"] == header and data["attempts"] == []
@@ -2343,9 +2343,30 @@ def test_the_same_kernel_warning_needs_more_than_one_attempt_with_a_kernel(tmp_p
     assert ("produced the same kernel" in md_text) is warn
 
 
-def test_the_header_says_greedy_attempts_can_repeat_each_other(tmp_path):
+def test_the_header_says_greedy_attempts_often_repeat_and_are_not_guaranteed_identical(tmp_path):
+    """W1. The live batch gave 5 distinct kernels in 5 attempts of silu_mul at temperature 0, so the report may not
+    call greedy attempts repeatable; it says they often repeat and are not guaranteed to be identical."""
     flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.0, "a" * 64)]).split())
-    assert "Attempts at temperature 0 are repeatable and can repeat each other." in flat
-    assert ("Attempts at temperature above 0 are independent draws only if the server honours the seed or no seed "
-            "is sent; honouring the seed is not verified.") in flat
-    assert "Attempts are independent draws from a model server" not in flat
+    assert ("Temperature 0 asks the server for greedy decoding. Attempts then often repeat each other (the report "
+            "counts distinct kernels) but are not guaranteed to be identical.") in flat
+    assert ("Attempts at temperature above 0 with different seeds sample independently, if the server honours the "
+            "temperature.") in flat
+    assert "repeatable" not in flat and "independent draws" not in flat
+
+
+def test_no_text_calls_greedy_attempts_repeatable():
+    """W1. The help, the README, the module docstring and parse_sampling make no claim that a kernel is reproducible."""
+    from orchard import cli
+    help_text = " ".join(cli._parser()._subparsers._group_actions[0].choices["kernel-probe"].format_help().split())
+    readme = " ".join((REPO / "README.md").read_text().split())
+    probe_part = readme[readme.index("tt-orchard kernel-probe"):][:12000]
+    for name, text in (("help", help_text), ("README", probe_part), ("module", " ".join(kp.__doc__.split())),
+                       ("parse_sampling", " ".join(kp.parse_sampling.__doc__.split()))):
+        assert "repeatable" not in text and "reproducib" not in text, name
+    assert "not guaranteed to be identical" in probe_part
+
+
+def test_the_same_kernel_warning_above_temperature_0_names_the_likely_causes(tmp_path):
+    flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.7, "a" * 64), _sampled(2, 0.7, "a" * 64)]).split())
+    assert ("All 2 attempts that wrote a kernel produced the same kernel at temperature 0.7: the temperature may be "
+            "too low for this prompt, or the server may be ignoring it.") in flat

@@ -171,16 +171,17 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--attempts", type=int, default=5,
                     help="attempts per temperature, each a fresh conversation (default 5)")
     kp.add_argument("--temperature", metavar="T",
-                    help="sampling temperature, 0 to 2 (default 0: greedy and repeatable, good for calibration and "
-                         "regression checks; raise it to explore wilder or more ingenious kernels)")
+                    help="sampling temperature, 0 to 2 (default 0: asks the server for greedy decoding; attempts then "
+                         "often repeat each other but are not guaranteed to be identical. Raise it to explore wilder "
+                         "or more ingenious kernels)")
     kp.add_argument("--temperatures", metavar="T1,T2,...",
                     help="several temperatures, comma-separated (for example 0,0.5,1.0); --attempts runs at each. "
                          "Not with --temperature")
     kp.add_argument("--top-p", dest="top_p", metavar="P", help="nucleus sampling, 0 < P <= 1 (default: not sent)")
     kp.add_argument("--seed", metavar="N",
                     help="a base seed: above temperature 0, attempt k sends N + k (default: derived from the probe id "
-                         "and recorded in the report). It makes a sampled run repeatable only if the server honours "
-                         "seeds, which is not verified")
+                         "and recorded in the report). A seed makes the request the same on a rerun; whether the server "
+                         "honours it is not verified")
     kp.add_argument("--phase", choices=("sim", "hw"), default="sim",
                     help="sim (default): the simulator only. hw: then a smoke test and each simulator pass on one "
                          "chip, under `gozer run --chips 1`")

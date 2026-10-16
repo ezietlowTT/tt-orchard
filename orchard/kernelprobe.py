@@ -37,9 +37,9 @@ longer holds the value (an exec with a new environment, or a program that overwr
 and can write anywhere the operator can, including the `.verdict` directory. The static gate and this boundary are
 best effort.
 
-The budget (BUDGET) and the watchdog's detectors bound each attempt. Attempts at temperature 0 (the default, greedy
-decoding) can repeat each other, so the report counts the distinct kernels per op and temperature; it gives counts
-with no rates.
+The budget (BUDGET) and the watchdog's detectors bound each attempt. Temperature 0 (the default) asks the server for
+greedy decoding. Attempts then often repeat each other but are not guaranteed to be identical, so the report counts
+the distinct kernels per op and temperature; it gives counts with no rates.
 
 `main` is the command `tt-orchard kernel-probe`. It starts no model server: the coder must already answer at its
 endpoint (starting it is `tt-orchard bringup`'s job), and the simulator environment must pass
@@ -1029,8 +1029,9 @@ def _distinct_lines(g: dict) -> list[str]:
                          "greedily, so repeated attempts at one prompt can be one sample. Raise --temperature to "
                          "explore.")
         else:
-            lines.append(f"All {g['with_kernel']} attempts produced the same kernel at temperature "
-                         f"{g['temperature']:g}: the server may ignore the temperature or the seed.")
+            lines.append(f"All {g['with_kernel']} attempts that wrote a kernel produced the same kernel at temperature "
+                         f"{g['temperature']:g}: the temperature may be too low for this prompt, or the server may be "
+                         "ignoring it.")
     return lines
 
 
@@ -1053,9 +1054,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     t = header.get("tt_lang") or {}
     lines = ["# Kernel probe report", "",
              f"Probe id: {header.get('probe_id')}. Coder model: {header.get('coder_model')}.", "",
-             "Attempts at temperature 0 are repeatable and can repeat each other. Attempts at temperature above 0 "
-             "are independent draws only if the server honours the seed or no seed is sent; honouring the seed is "
-             "not verified. The report gives counts and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
+             "Temperature 0 asks the server for greedy decoding. Attempts then often repeat each other (the report "
+             "counts distinct kernels) but are not guaranteed to be identical. Attempts at temperature above 0 with "
+             "different seeds sample independently, if the server honours the temperature. The report gives counts and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
              "outliers. A kernel that passes them can still fail on real activations.", "",
              "The simulator promotes bf16 to f32 (tt-lang-sim's default) and the references compute in f32, so on a "
              "simple op a correct kernel shows a max_abs_err of 0.0 and a PCC of 1.0. Rounding on hardware is "
@@ -1198,7 +1199,8 @@ def parse_sampling(args) -> dict:
     """The run's sampling from --temperature, --temperatures, --top-p and --seed, checked; raises _Refused.
 
     {"temperatures": [...], "top_p": float or None, "seed": int or None}. The default is one group at temperature 0
-    (greedy decoding: repeatable, good for calibration and regression checks). Every temperature must be in [0, 2] and
+    (the server is asked for greedy decoding; attempts often repeat each other but are not guaranteed to be identical).
+    Every temperature must be in [0, 2] and
     listed once, top-p in (0, 1], and the seed a whole number of 0 or more."""
     one, many = getattr(args, "temperature", None), getattr(args, "temperatures", None)
     if one is not None and many is not None:

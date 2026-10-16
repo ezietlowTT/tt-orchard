@@ -1115,8 +1115,9 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
   `harness_error` (a fault in the templates or the environment, including the setup phase).
 - The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
-  set). The report gives counts and no rates. At temperature 0 (the default) attempts can repeat each other, so for
-  each op and temperature the report counts the distinct kernels and warns when every attempt wrote the same one.
+  set). The report gives counts and no rates. Temperature 0 (the default) asks the server for greedy decoding.
+  Attempts then often repeat each other but are not guaranteed to be identical, so for each op and temperature the
+  report counts the distinct kernels and warns when every attempt that wrote a kernel wrote the same one.
 - `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
   runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
   The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress
@@ -1138,15 +1139,16 @@ Flags:
 
 - `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`). Required.
 - `--attempts`: attempts per temperature, each a fresh conversation (default 5).
-- `--temperature`: the sampling temperature, 0 to 2 (default 0). Temperature 0 is greedy decoding: repeatable, and
-  good for calibration and regression checks, but repeated attempts at one prompt can be the same sample. Raise it
-  to explore wild or ingenious kernels.
+- `--temperature`: the sampling temperature, 0 to 2 (default 0). Temperature 0 asks the server for greedy decoding.
+  Attempts then often repeat each other but are not guaranteed to be identical (the live probe at temperature 0
+  gave 1 distinct kernel in 5 attempts of `linear_scan` and 5 in 5 of `silu_mul`). Raise it to explore wild or
+  ingenious kernels.
 - `--temperatures`: several temperatures, comma-separated (for example `0,0.5,1.0`); `--attempts` runs at each, so
   `--attempts 3 --temperatures 0,0.7` runs 6. Not with `--temperature`.
 - `--top-p`: nucleus sampling, above 0 and at most 1 (default: not sent).
 - `--seed`: a base seed. Above temperature 0, attempt k sends the base plus k; without `--seed` the base comes from
-  the probe id and the report records it. A seed makes a sampled run repeatable only if the server honours it,
-  which is not verified.
+  the probe id and the report records it. A seed makes the request the same on a rerun; whether the server honours
+  it is not verified, and no kernel is promised to come out the same.
 - `--phase`: `sim` (default) for the simulator only; `hw` to add the smoke test and the one-chip runs.
 - `--out`: output directory (default `./kernel-probe`).
 - `--endpoint`: the coder's OpenAI-compatible URL, ending in `/v1` (default: from the tier config).
