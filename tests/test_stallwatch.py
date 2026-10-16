@@ -151,6 +151,19 @@ class _StuckProc:
         return None
 
 
+def _alive_with(pid, marker):
+    """True only when `pid` is alive, is no zombie, and its command line still holds `marker` (this test's unique tmp
+    path), so a pid the kernel has reused for another process is never killed."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            stat = f.read()
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            cmdline = f.read()
+    except OSError:
+        return False
+    return stat[stat.rfind(")") + 2:].split()[0] != "Z" and marker.encode() in cmdline
+
+
 def _alive(pid):
     try:
         os.kill(pid, 0)
@@ -198,10 +211,8 @@ def test_the_child_is_killed_when_the_watch_loop_raises(tmp_path):
         assert not _alive(made[0].pid)
     finally:
         for p in made:
-            try:
-                os.killpg(p.pid, 9)
-            except ProcessLookupError:
-                pass
+            p.kill()                         # skips a child run_watched has already reaped, so no freed pid is hit
+            p.wait(timeout=5)
 
 
 def test_a_line_split_across_two_reads_is_counted_once(tmp_path):
@@ -258,7 +269,7 @@ _STARTED: list = []
 
 def _tracked_popen(*a, **k):
     proc = subprocess.Popen(*a, **k)
-    _STARTED.append(proc.pid)
+    _STARTED.append(proc)
     return proc
 
 
@@ -267,10 +278,11 @@ def _kill_every_started_child_by_pid():
     """Whatever a test started is killed by pid at teardown, so a regression cannot leave a 120 s sleeper behind."""
     _STARTED.clear()
     yield
-    for pid in _STARTED:
+    for proc in _STARTED:
+        proc.kill()                          # skips a child that has been reaped, so a freed pid is never signalled
         try:
-            os.kill(pid, 9)
-        except (ProcessLookupError, PermissionError):
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
             pass
 
 
@@ -340,7 +352,7 @@ def test_a_grandchild_that_ignores_sigterm_is_killed_after_the_grace_even_when_t
         assert got.elapsed_s >= 0.4                                     # the group was given its grace
         assert _wait_gone(pid)
     finally:
-        if pid and _alive(pid):
+        if pid and _alive_with(pid, str(pidfile)):
             os.kill(pid, 9)
 
 
@@ -535,3 +547,60 @@ def test_an_interrupt_in_the_leader_check_during_the_grace_still_sigkills_once_a
     with pytest.raises(KeyboardInterrupt):
         stallwatch._kill_group(_Fake4242(poll=interrupted), term_grace_s=5.0)
     assert g.sent(_signal.SIGTERM) == 1 and g.sent(_signal.SIGKILL) == 1
+
+
+# I7: output with no newline must not grow the watcher's memory without bound.
+
+# Every child here writes a bounded amount and has a file-size limit of 16 MiB, so a regression cannot fill the disk.
+FSIZE_LIMIT = "import resource; resource.setrlimit(resource.RLIMIT_FSIZE, (16 << 20, 16 << 20))\n"
+NO_NEWLINE_5MIB = (FSIZE_LIMIT + "import sys, time\n"
+                   "chunk = 'x' * 65536\n"
+                   "for _ in range(80):\n"
+                   "    sys.stdout.write(chunk); sys.stdout.flush(); time.sleep(0.01)\n"
+                   "time.sleep(0.5)\n")
+
+
+def test_five_mib_without_a_newline_keeps_the_pending_buffer_bounded(tmp_path):
+    from orchard import stallwatch
+    got = run_watched([sys.executable, "-c", NO_NEWLINE_5MIB], cwd=tmp_path, env=dict(os.environ),
+                      log_path=tmp_path / "log", popen=_tracked_popen, poll_s=0.05, backstop_s=60,
+                      watcher=StallWatcher(quiet_s=1000, repeat_lines=10 ** 9))
+    assert got.returncode == 0 and not got.killed
+    assert (tmp_path / "log").stat().st_size == 80 * 65536
+    assert 0 < got.max_pending_bytes <= stallwatch.PENDING_MAX_BYTES == 64 * 1024
+
+
+def test_a_child_that_prints_4_mib_of_one_character_without_a_newline_is_stopped_as_repeating(tmp_path):
+    """The cut pieces of a long line are fed to the repeat detector as lines, so identical output with no newline is
+    caught by the repeat rule."""
+    code = (FSIZE_LIMIT + "import sys, time\n"
+            "for _ in range(1024):\n"                       # 4 MiB in all, then it waits
+            "    sys.stdout.write('x' * 4096); sys.stdout.flush()\n"
+            "time.sleep(30)\n")
+    got = run_watched([sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
+                      popen=_tracked_popen, poll_s=0.05, backstop_s=10,
+                      watcher=StallWatcher(quiet_s=1000, repeat_lines=3), term_grace_s=1.0)
+    assert got.killed and got.reason.startswith("repeating:"), got.reason
+    assert (tmp_path / "log").stat().st_size <= 4 << 20
+
+
+# I8: the watcher reports the longest quiet stretch and the longest repeat it saw, so the limits can be set from a
+# measurement.
+
+def test_the_watcher_keeps_the_longest_quiet_stretch_and_the_longest_repeat():
+    w = StallWatcher(quiet_s=100, min_cpu_ticks=2, repeat_lines=50)
+    w.observe(0.0, 10, 5)
+    w.observe(7.5, 10, 5)                                  # 7.5 s quiet so far
+    w.observe(9.0, 11, 5)                                  # output: the stretch ended at 9 s
+    w.observe(12.0, 11, 5)
+    assert w.max_quiet_s == pytest.approx(9.0)
+    w.feed_lines(["a", "a", "a", "b", "a", "a"])
+    assert w.max_repeat == 3
+
+
+def test_run_watched_returns_the_watchers_longest_quiet_stretch_and_repeat(tmp_path):
+    code = "import sys, time\nfor _ in range(5):\n    print('same', flush=True)\ntime.sleep(1.5)\n"
+    got = run_watched([sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
+                      popen=_tracked_popen, poll_s=0.1, backstop_s=30, watcher=StallWatcher(quiet_s=100))
+    assert got.returncode == 0 and got.max_repeat == 5
+    assert 0.5 <= got.max_quiet_s <= 5.0, got.max_quiet_s

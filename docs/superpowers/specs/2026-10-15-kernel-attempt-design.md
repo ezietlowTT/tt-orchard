@@ -189,7 +189,7 @@ Allowed new commands: `kernel_check.py` and `tt-lang-sim` from the ttlang venv. 
 30 minutes wall time, 300 s per simulator run (all provisional).
 
 Attempts are independent draws from a server that may not accept a seed. The report says so and gives counts and no
-rates or intervals.
+rates or intervals. (Corrected by amendment 27: at temperature 0, the default, attempts can be one sample.)
 
 ### 5.4 Hardware phase
 
@@ -270,7 +270,7 @@ Read from `docs/thin_packages.md` on `origin/docs/v6-canonical-thin-path` (unmer
 - Unmerged branches seen on 2026-10-15 that touch this: `docs/v6-canonical-thin-path`, `feat/v6-extra-code-127`,
   `fix/v6-reproducible-install`, `feat/auxiliary-weights`, `raahem/renumber-scoped-devices`.
 
-## 11. Amendments (2026-10-15 and 2026-10-16, during implementation)
+## 11. Amendments (2026-10-15 and 2026-10-16, during implementation and after the final review)
 
 Each item changes or adds to the approved design above. Reasons come from the implementation ledger and the task reviews.
 
@@ -328,3 +328,49 @@ Each item changes or adds to the approved design above. Reasons come from the im
     The final run leaves 6 unmapped: `__and__`, `index`, `to.dtype_layout`, `diff`, `new_ones` and `to.device`. They stay unmapped
     because their ttnn semantics are not provably identical to the aten ops. Mapping them is a table decision for the operator or a
     later task.
+17. **gozer gets a 120 s SIGTERM grace.** `gozer run` releases its lease in a `finally` after its child exits, and the release
+    resets the chip, which takes about 42 s on this box. The first 5 s grace killed gozer during that reset. Both gozer calls of the
+    probe now pass `GOZER_TERM_GRACE_S` = 120 s; the simulator check keeps 5 s. gozer is still killed at once by a second interrupt
+    during the grace, and then the lease can stay behind.
+18. **A sweep for stray agent processes.** When the agent step ends (also after a crash or an interrupt) and before any verdict, the
+    probe stops every process of the operator's whose environment has `ORCHARD_RUN_DIR` exactly equal to the attempt directory:
+    SIGTERM, up to 2 s, a second scan, then SIGKILL. It never signals itself or an ancestor. The record lists each process with
+    `stopped`, which is true only when the process is gone (no `/proc` entry, a zombie, or another process under the pid); the
+    report counts the others as not confirmed stopped. It cannot see a process whose `/proc/<pid>/environ` no longer holds the
+    value (an exec with a new environment, or a program that overwrote that memory; `clearenv()` alone does not change it) or
+    one whose `/proc` entry is not readable (a non-dumpable process).
+19. **The report gives what the stall watcher saw.** For the smoke test and each hardware run it prints the longest quiet stretch
+    and the longest run of one repeated line, beside the limits (60 s and 20 lines; neither is measured). A stopped run's first line is the
+    watcher's reason (`backstop`, `stalled` or `repeating`). The table has a status column, says `add` is a calibration op and that
+    the simulator computes in f32, and prints a PCC near 1 as `1 - <distance>` or `1 + <distance>`.
+20. **The static gate allows only listed names from `typing` and `__future__`, and refuses forbidden names as attributes and
+    imports.** `from typing import sys as s` reached `sys` through the earlier gate. A limit stays: `from ttnn import shutil as s`
+    passes, because the gate cannot tell a module from another name in `ttl` or `ttnn` without importing ttnn, which opens the device.
+21. **`opinventory.main` defaults `--ttnn-python` to `~/.tenstorrent-venv/bin/python` under the passwd home**, and the stage 0 skill
+    passes it. In an agent shell HOME points inside the run directory. Without the flag every op was `unchecked`.
+22. **The ops-inventory template builds only a subclass of `PreTrainedModel`.** A downloaded config.json could name any public
+    callable of transformers. A name that is not a model class, is not a string, or whose lookup raises is written as `skipped`.
+23. **The simulator dies with the check.** kernel_check runs tt-lang-sim in its own session, kills that group on a timeout, turns
+    SIGTERM, SIGINT and SIGHUP into an exception that kills it too (SIGINT and SIGHUP are left alone when they start ignored;
+    SIGTERM is always handled), and starts it with `PR_SET_PDEATHSIG` set to SIGKILL for the case where kernel_check itself is
+    killed outright. An interrupted check then ends by the signal that arrived, so its exit status names it.
+24. **One probe per output directory.** `kernel-probe` holds an exclusive `flock` on `probe.lock` in `--out` for its whole run. A
+    second probe that cannot take it is refused with exit 2 and told the holder's pid (written in the file as information). The
+    kernel releases the lock when the holder dies, SIGKILL included; the file may remain then, and it is harmless. A clean exit
+    removes the file while it still holds the lock. The first version (a pid file with a staleness check) let two probes that
+    both judged a stale lock dead run at once.
+25. **The stall watcher keeps at most 64 KiB of an unfinished line.** A longer piece is fed to the repeat detector as a line.
+26. **Sampling flags.** `kernel-probe` takes `--temperature` (default 0) or `--temperatures` (a comma-separated list; `--attempts`
+    runs at each), `--top-p` and `--seed`. Temperatures are in [0, 2], top-p in (0, 1]; bad values are refused with exit 2. No seed
+    is sent at temperature 0. Above 0, attempt k (counting every attempt of the run) sends base + k; without `--seed` the base comes
+    from the probe id and the report records it. A seed repeats a sampled run only if the server honours it, which is not verified.
+    `AgentStep` takes the same three options; its default request is unchanged (`temperature: 0`, no other sampling key), so the
+    supervisor is unchanged. The default stays greedy: the operator asked for determinism where it is useful and an easy way to
+    raise the temperature to find wild or ingenious kernels. Greedy decoding makes repeats common; it does not make a kernel
+    reproducible (see item 27).
+27. **The report counts distinct kernels.** The claim that attempts are independent draws did not hold at temperature 0, where
+    the server is asked for greedy decoding. The live probe gave 1 distinct kernel in 3 attempts of `add` and 1 in 5 of
+    `linear_scan` (the five `linear_scan` attempts each took 9 turns and 198 s), 3 in 5 of `rmsnorm`, and 5 in 5 of `silu_mul`
+    (why `silu_mul` diverged was not measured). Repeats are common at temperature 0 and not guaranteed. Each op is now split by
+    temperature, each group says "distinct kernels: N of M attempts" by kernel sha256 (attempts that wrote no kernel are counted
+    apart), and a warning follows when more than one attempt wrote a kernel and all wrote the same one.

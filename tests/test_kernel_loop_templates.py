@@ -10,10 +10,13 @@ real simulator in the ttlang venv. They skip, and say so, when that venv is abse
 """
 import importlib.util
 import json
+import re
 import os
 import shutil
+import signal as _signal_mod
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -57,10 +60,10 @@ def test_without_the_diagnostics_file_the_check_reports_the_environment():
     text = ("Traceback (most recent call last):\n"
             "  File \"<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py\", line 338, in run\n"
             "FileNotFoundError: [Errno 2] No such file or directory: "
-            "'<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/diagnostics.py'\n")
+            "'<TTLANG_VENV>/lib/python3.12/site-packages/ttl/ttl/diagnostics.py'\n")
     result = {"phase": "sim", "sets": [],
               "error": {"phase": "run", "type": "FileNotFoundError",
-                        "text": "[Errno 2] No such file or directory: '.../ttl/sim/diagnostics.py'"}}
+                        "text": "[Errno 2] No such file or directory: '.../ttl/ttl/diagnostics.py'"}}
     got, line = CHECK.classify(kernel_present=True, timed_out=False, returncode=1, text=text, result=result, bar=0.999)
     assert got == "harness_error"
     assert "diagnostics.py" in line
@@ -138,6 +141,8 @@ def test_add_good_passes(tmp_path):
     ("forbidden_stacked_decorator", "forbidden_code", (), "add"),
     ("forbidden_for_binding", "forbidden_code", (), "add"),
     ("forbidden_walrus", "forbidden_code", (), "add"),
+    ("forbidden_typing_sys", "forbidden_code", (), "add"),
+    ("forbidden_attr_os", "forbidden_code", (), "add"),
 ])
 @needs_sim
 def test_each_broken_kernel_gets_its_category(tmp_path, kernel, category, extra, op):
@@ -398,16 +403,31 @@ def test_spoofed_diagnostics_text_is_the_kernel_when_the_file_is_present():
 
 
 def test_diagnostics_file_lookup(tmp_path):
+    """The file the wheel fails to ship is ttl/ttl/diagnostics.py. The wheel's loader, ttl/sim/diagnostics.py, is always
+    there and reads the other one (ttl/sim/diagnostics.py lines 35-36; ttlang_env.diagnostics_target)."""
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     sim = venv / "bin" / "tt-lang-sim"
     sim.write_text("")
     assert CHECK.diagnostics_present(sim) is None                 # no ttl package found: unknown
-    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "sim"
-    pkg.mkdir(parents=True)
+    ttl = venv / "lib" / "python3.12" / "site-packages" / "ttl"
+    (ttl / "ttl").mkdir(parents=True)
     assert CHECK.diagnostics_present(sim) is False
-    (pkg / "diagnostics.py").write_text("")
+    (ttl / "ttl" / "diagnostics.py").write_text("")
     assert CHECK.diagnostics_present(sim) is True
+
+
+def test_the_loader_alone_does_not_count_as_the_diagnostics_file(tmp_path):
+    """I1. The loader ttl/sim/diagnostics.py is present in every wheel; with the target ttl/ttl/diagnostics.py absent,
+    the file is missing."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    sim = venv / "bin" / "tt-lang-sim"
+    sim.write_text("")
+    ttl = venv / "lib" / "python3.12" / "site-packages" / "ttl"
+    (ttl / "sim").mkdir(parents=True)
+    (ttl / "sim" / "diagnostics.py").write_text("# the loader\n")
+    assert CHECK.diagnostics_present(sim) is False
 
 
 # the static gate
@@ -424,6 +444,9 @@ def test_diagnostics_file_lookup(tmp_path):
     ("forbidden_stacked_decorator", ["operation"]),
     ("forbidden_for_binding", ["operation"]),
     ("forbidden_walrus", ["operation"]),
+    # I4: `from typing import sys as s`, then `s.modules["builtins"].open(...)`
+    ("forbidden_typing_sys", ["import", "name", "name"]),
+    ("forbidden_attr_os", ["name"]),                       # ttnn.os
 ])
 def test_the_gate_refuses_each_rule(kernel, rules):
     ok, reason = CHECK.check_kernel_source(KERNELS / f"{kernel}.py")
@@ -463,12 +486,48 @@ GATE_HEADER = 'import ttl\nimport ttnn\n\n\n@ttl.operation(grid="full")\ndef OPE
     ("    x = os", "name"), ("    x = __builtins__", "name"), ("    x = references", "name"),
     ("    x = a.__dict__", "dunder"), ("    x = ttl.__spec__", "dunder"),
     ("    x = ttnn.to_torch", "readback"), ("    x = ttnn.from_torch", "readback"),
+    # I4: a forbidden name imported under another name, or bound by an import as, or reached as an attribute
+    ("    from ttnn import os as o", "name"), ("    from typing import Any as sys", "name"),
+    ("    from ttl import Thing as builtins", "name"), ("    x = ttl.something.os", "name"),
+    ("    x = a.subprocess", "name"), ("    x = a.open", "name"),
+    # I4: from typing, only the type names a kernel plausibly uses (typing.re is a module in some versions)
+    ("    from typing import re", "import"), ("    from typing import get_type_hints", "import"),
+    ("    from __future__ import braces", "import"),
 ])
 def test_the_gate_rules_in_detail(tmp_path, line, rule):
     p = tmp_path / "kernel.py"
     p.write_text(GATE_HEADER + line + "\n")
     ok, reason = CHECK.check_kernel_source(p)
     assert ok is False and reason.startswith(f"1 violation: {rule} at line 7: "), reason
+
+
+def test_the_gate_allows_common_typing_names(tmp_path):
+    """I4. The typing names a kernel plausibly uses still pass, with or without an alias that is not forbidden."""
+    p = tmp_path / "kernel.py"
+    p.write_text("from __future__ import annotations\nfrom typing import Any, Optional, Tuple as T, Callable\n"
+                 + GATE_HEADER + "    x: Optional[Any] = None\n")
+    assert CHECK.check_kernel_source(p) == (True, "")
+
+
+def test_every_allowed_typing_name_is_not_a_module():
+    """I4. The allow-list of typing names holds no module in the interpreter running the tests."""
+    import inspect
+    import typing
+    for name in CHECK.TYPING_NAMES:
+        assert not inspect.ismodule(getattr(typing, name, None)), name
+
+
+@needs_sim
+@pytest.mark.parametrize("kernel", ["forbidden_typing_sys", "forbidden_attr_os"])
+def test_a_module_reached_through_typing_or_an_attribute_is_forbidden_code(tmp_path, kernel):
+    """I4. The check ends forbidden_code and names the rule in its first line; nothing reaches the simulator."""
+    tdir, adir = _attempt(tmp_path, kernel)
+    done, check = _run_check(tdir, adir)
+    assert done.stdout.startswith("FAIL: forbidden_code: "), done.stdout
+    first = check["first_line"]
+    assert re.match(r"\d+ violations?: (import|name) at line \d+: ", first), first
+    assert "name at line" in first
+    assert check["sets"] == [] and not (adir / "harness-result.json").exists()
 
 
 def test_the_gate_allows_math(tmp_path):
@@ -769,7 +828,7 @@ def _venv_with_diagnostics(tmp_path):
     sim = venv / "bin" / "tt-lang-sim"
     sim.write_text("#!/bin/sh\n")
     sim.chmod(0o755)
-    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "sim"
+    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "ttl"
     pkg.mkdir(parents=True)
     (pkg / "diagnostics.py").write_text("")
     return sim
@@ -810,3 +869,256 @@ def test_check_json_lists_every_violation(tmp_path):
     assert check["category"] == "forbidden_code"
     assert check["first_line"].startswith("5 violations: ")
     assert [v["rule"] for v in check["violations"]] == ["import"] + ["readback"] * 4
+
+
+# m2: a simulator that times out is stopped with everything it started.
+
+def _dead_or_zombie(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return True
+    return text[text.rfind(")") + 2:].split()[0] == "Z"
+
+
+def test_a_simulator_timeout_stops_the_grandchild_too(tmp_path):
+    """A stand-in for tt-lang-sim starts a grandchild in its own process group and sleeps. The check's timeout must
+    stop both. Every process here is one this test started; a leftover is killed in the finally only while it is
+    alive and still carries this test's marker."""
+    tdir, adir = _attempt(tmp_path, "add_good")
+    marks = tmp_path / "pids"
+    marks.mkdir()
+    sim = tmp_path / "fake-sim"
+    sim.write_text("#!" + sys.executable + "\n"
+                   "import os, subprocess, sys, time\n"
+                   f"marks = {str(marks)!r}\n"
+                   "open(os.path.join(marks, 'sim'), 'w').write(str(os.getpid()))\n"
+                   "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                   "open(os.path.join(marks, 'grandchild'), 'w').write(str(g.pid))\n"
+                   "time.sleep(60)\n")
+    sim.chmod(0o755)
+    pids = []
+    marker = f"orchard-m2-{os.getpid()}-{time.monotonic_ns()}"
+    try:
+        done = subprocess.run([sys.executable, str(tdir / "kernel_check.py"), "--attempt-dir", str(adir), "--sim",
+                               str(sim), "--timeout-s", "3"], capture_output=True, text=True, timeout=60,
+                              env=dict(os.environ, ORCHARD_TEST_MARKER=marker))
+        pids = [int((marks / n).read_text()) for n in ("sim", "grandchild") if (marks / n).is_file()]
+        assert len(pids) == 2, done.stdout + done.stderr
+        assert done.stdout.startswith("FAIL: timeout"), done.stdout + done.stderr
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not all(_dead_or_zombie(p) for p in pids):
+            time.sleep(0.05)
+        assert all(_dead_or_zombie(p) for p in pids), [p for p in pids if not _dead_or_zombie(p)]
+    finally:
+        for p in pids:
+            _kill_if_ours(p, marker)
+
+
+@pytest.mark.parametrize("pid", ["own group", 1, 0, -3, None])
+def test_the_simulator_kill_never_signals_a_group_that_is_not_the_childs_own(monkeypatch, pid):
+    """os.killpg is replaced by a recorder, so no real signal can be sent whatever the guard decides."""
+    sent = []
+    monkeypatch.setattr(os, "killpg", lambda *a: sent.append(a))
+    killed = []
+    proc = type("P", (), {"pid": os.getpgrp() if pid == "own group" else pid, "kill": lambda self: killed.append(1)})()
+    CHECK._kill_own_group(proc)
+    assert sent == [] and killed == [1]
+
+
+# R1: when kernel_check itself is stopped, the simulator (in its own session since m2) must not be orphaned.
+
+def _ours_alive(pid, marker):
+    """True only when `pid` is alive, not a zombie, and its environment still carries this test's marker, so a pid the
+    kernel has reused for another process is never treated as ours."""
+    if _dead_or_zombie(pid):
+        return False
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            return marker.encode() in f.read()
+    except OSError:
+        return False
+
+
+def _kill_if_ours(pid, marker):
+    if _ours_alive(pid, marker):
+        try:
+            os.kill(pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _start_check_with_fake_sim(tmp_path, marker, preexec_fn=None):
+    """kernel_check.py as this test's own child (its own session), running a stand-in simulator that records its pid,
+    starts a grandchild and sleeps. Returns (check process, marks directory)."""
+    tdir, adir = _attempt(tmp_path, "add_good")
+    marks = tmp_path / "pids"
+    marks.mkdir()
+    sim = tmp_path / "fake-sim"
+    sim.write_text("#!" + sys.executable + "\n"
+                   "import os, subprocess, sys, time\n"
+                   f"marks = {str(marks)!r}\n"
+                   "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                   "open(os.path.join(marks, 'grandchild'), 'w').write(str(g.pid))\n"
+                   "open(os.path.join(marks, 'sim'), 'w').write(str(os.getpid()))\n"
+                   "time.sleep(60)\n")
+    sim.chmod(0o755)
+    env = dict(os.environ, ORCHARD_TEST_MARKER=marker)
+    proc = subprocess.Popen([sys.executable, str(tdir / "kernel_check.py"), "--attempt-dir", str(adir), "--sim",
+                             str(sim), "--timeout-s", "50"], env=env, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=preexec_fn)
+    end = time.monotonic() + 30
+    while time.monotonic() < end and not (marks / "sim").is_file():
+        time.sleep(0.05)
+    assert (marks / "sim").is_file(), "the stand-in simulator never started"
+    return proc, marks
+
+
+def _pids(marks):
+    return [int((marks / n).read_text()) for n in ("sim", "grandchild") if (marks / n).is_file()]
+
+
+def _all_gone(pids, marker, wait_s=10.0):
+    end = time.monotonic() + wait_s
+    while time.monotonic() < end and any(_ours_alive(p, marker) for p in pids):
+        time.sleep(0.05)
+    return [p for p in pids if _ours_alive(p, marker)]
+
+
+def test_sigterm_to_kernel_check_stops_the_simulator_and_its_grandchild(tmp_path):
+    marker = f"orchard-r1-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker)
+        proc.send_signal(_signal_mod.SIGTERM)                 # our own child, by its Popen handle
+        proc.wait(timeout=20)
+        assert _all_gone(_pids(marks), marker) == []
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)
+
+
+def test_sigkill_of_kernel_check_still_stops_the_simulator(tmp_path):
+    """No handler can run after SIGKILL; the simulator dies through its parent-death signal."""
+    marker = f"orchard-r1k-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker)
+        proc.kill()
+        proc.wait(timeout=20)
+        sim_pid = int((marks / "sim").read_text())
+        assert _all_gone([sim_pid], marker) == []
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)
+
+
+def test_the_cleanup_helper_leaves_a_process_without_the_marker_alone(tmp_path):
+    """S2. A pid the kernel reused for another process must never be killed: the helper checks the marker first."""
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True,
+                             env=dict(os.environ, ORCHARD_TEST_MARKER="someone-else"))
+    try:
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not _ours_alive(other.pid, "someone-else"):
+            time.sleep(0.02)
+        _kill_if_ours(other.pid, f"orchard-s2-{os.getpid()}")
+        time.sleep(0.2)
+        assert other.poll() is None
+        _kill_if_ours(other.pid, "someone-else")
+        assert other.wait(timeout=5) == -9
+    finally:
+        other.kill()
+        other.wait(timeout=5)
+
+
+
+# M2: smaller guards around the simulator.
+
+def test_a_simulator_that_was_already_reaped_is_never_signalled(monkeypatch):
+    """After communicate() has reaped the simulator its pid may be reused; nothing may be looked up or signalled."""
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda *a: calls.append(("killpg", a)))
+    monkeypatch.setattr(os, "getpgid", lambda *a: calls.append(("getpgid", a)) or a[0])
+    proc = type("P", (), {"pid": 424242, "returncode": 0, "kill": lambda self: calls.append(("kill",))})()
+    CHECK._kill_own_group(proc)
+    assert calls == []
+
+
+def test_a_simulator_whose_parent_is_already_gone_exits_before_it_runs(tmp_path):
+    """The parent-death signal only covers a parent that dies after prctl. The child compares its parent with the
+    pid recorded before the fork and exits at once when they differ. A fake parent pid stands in for a dead parent."""
+    marker = f"orchard-m2p-{os.getpid()}-{time.monotonic_ns()}"
+    env = dict(os.environ, ORCHARD_TEST_MARKER=marker)
+    orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env,
+                              preexec_fn=CHECK._die_with_parent_fn(parent=os.getpid() + 999999))
+    normal = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env,
+                              preexec_fn=CHECK._die_with_parent_fn())
+    try:
+        assert orphan.wait(timeout=10) == 1
+        time.sleep(0.3)
+        assert normal.poll() is None
+    finally:
+        for p in (orphan, normal):
+            p.kill()
+            p.wait(timeout=5)
+
+
+def test_a_sighup_that_starts_ignored_stays_ignored(tmp_path):
+    """kernel_check started with SIGHUP ignored (as under nohup) keeps ignoring it; SIGTERM still stops it."""
+    marker = f"orchard-m2h-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+
+    def ignore_hup():
+        _signal_mod.signal(_signal_mod.SIGHUP, _signal_mod.SIG_IGN)
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker, preexec_fn=ignore_hup)
+        proc.send_signal(_signal_mod.SIGHUP)
+        time.sleep(0.5)
+        assert proc.poll() is None
+        proc.send_signal(_signal_mod.SIGTERM)
+        proc.wait(timeout=20)
+        assert _all_gone(_pids(marks), marker) == []
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)
+
+
+def test_the_check_docstring_says_what_an_interrupt_does():
+    doc = " ".join(CHECK.__doc__.split())
+    assert "interrupt" in doc and "no check.json" in doc
+
+
+@pytest.mark.parametrize("sig", [_signal_mod.SIGTERM, _signal_mod.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_an_interrupted_check_exits_with_the_signal_that_stopped_it(tmp_path, sig):
+    """A1. A watcher reading the exit status must see the signal that arrived (-15 for SIGTERM, -1 for SIGHUP), not
+    the SIGINT exit a bare KeyboardInterrupt gives; the simulator and its grandchild are gone, and no check.json."""
+    marker = f"orchard-a1-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+
+    def default_dispositions():
+        # W9: the child starts with SIGHUP and SIGINT at their defaults even when pytest itself runs under nohup;
+        # test_a_sighup_that_starts_ignored_stays_ignored covers an inherited SIG_IGN.
+        for s in (_signal_mod.SIGHUP, _signal_mod.SIGINT):
+            _signal_mod.signal(s, _signal_mod.SIG_DFL)
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker, preexec_fn=default_dispositions)
+        proc.send_signal(sig)
+        assert proc.wait(timeout=20) == -sig
+        assert _all_gone(_pids(marks), marker) == []
+        assert not (tmp_path / "attempt" / "check.json").exists()
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)

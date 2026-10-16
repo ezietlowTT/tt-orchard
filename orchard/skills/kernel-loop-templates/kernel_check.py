@@ -10,9 +10,13 @@ Defaults come from DIR/check_config.json: {"sim": "<tt-lang-sim>", "timeout_s": 
 kernel_harness.py from the directory THIS file is in, so the harness that judges a kernel is the copy next to the check
 that was run. Exit 0 and `PASS` when the kernel passed; exit 1 and `FAIL: <category>: <first line>` when it did not;
 exit 2 on a usage error. It writes check.json with sha256 values of the files that took part and the bars it applied.
+An interrupt (SIGTERM, or SIGINT or SIGHUP unless they started ignored) stops the simulator and everything it started
+and writes no check.json; the process then ends by that same signal, so its exit status names it (-15 for SIGTERM,
+-1 for SIGHUP).
 
 Before the simulator runs, a static gate (`check_kernel_source`) reads kernel.py with `ast` and refuses the shortcuts a
-model is likely to try: importing anything but ttl, ttnn and math, calling open/exec/eval and similar, naming dunder
+model is likely to try: importing anything but ttl, ttnn and math (and a short list of names from typing and
+__future__), calling open/exec/eval and similar or reaching them or os/sys as an attribute, naming dunder
 attributes, naming ttnn's to_torch/from_torch, and an OPERATION that is not a top-level def decorated with
 ttl.operation. A refused kernel ends `forbidden_code` and never runs. The gate is best effort. The kernel still runs in
 the harness's own process, so a determined kernel can find a way around a static check; the gate stops the easy ways.
@@ -56,6 +60,16 @@ DEFAULT_BARS = {
 # The static gate's tables.
 ALLOWED_IMPORTS = {"ttl", "ttnn", "math"}
 HARMLESS_FROM_MODULES = {"__future__", "typing"}       # `from __future__ import ...` and `from typing import ...`
+# The only names `from typing import` and `from __future__ import` may bring in. typing's namespace also holds modules
+# (sys, and re or io in some Python versions), and `from typing import sys as s` would hand the kernel sys under a name
+# that is not forbidden. A fixed list is used because the gate cannot know which Python the harness runs; a test
+# checks that none of these is a module in the interpreter that runs the tests.
+TYPING_NAMES = {"Any", "Optional", "Union", "List", "Tuple", "Dict", "Set", "FrozenSet", "Callable", "Sequence",
+                "Mapping", "Iterable", "Iterator", "Literal", "Final", "ClassVar", "TypeVar", "Generic", "Protocol",
+                "NamedTuple", "TypedDict", "TYPE_CHECKING", "Annotated", "Type", "NoReturn", "cast", "overload"}
+FUTURE_NAMES = {"annotations", "division", "absolute_import", "print_function", "unicode_literals", "generator_stop",
+                "nested_scopes", "generators", "with_statement"}
+FROM_NAME_ALLOWED = {"typing": TYPING_NAMES, "__future__": FUTURE_NAMES}
 FORBIDDEN_NAMES = {"open", "exec", "eval", "compile", "__import__", "globals", "locals", "setattr", "getattr",
                    "delattr", "vars", "breakpoint", "sys", "os", "atexit", "builtins", "subprocess", "importlib",
                    "references"}
@@ -86,6 +100,9 @@ def bars_from_spec(spec: dict, phase: str) -> dict:
 def diagnostics_present(sim) -> bool | None:
     """Whether tt-lang-sim's diagnostics.py exists in the venv the simulator lives in.
 
+    The file is site-packages/ttl/ttl/diagnostics.py, which the wheel does not ship. The wheel's loader,
+    ttl/sim/diagnostics.py, is always present and reads that file, so the loader says nothing about it.
+
     A bare command name is looked up on PATH, and the path is resolved, so a symlink to the simulator leads to its
     venv. None when the simulator cannot be found or no ttl package sits next to it (a layout this code does not
     know); classify then falls back to reading the text."""
@@ -99,7 +116,7 @@ def diagnostics_present(sim) -> bool | None:
     packages = list(venv.glob("lib/python*/site-packages/ttl"))
     if not packages:
         return None
-    return any((p / "sim" / "diagnostics.py").is_file() for p in packages)
+    return any((p / "ttl" / "diagnostics.py").is_file() for p in packages)
 
 
 def _is_dunder(name: str) -> bool:
@@ -200,7 +217,19 @@ def _analyse(path) -> tuple[list, bool]:
                 if a.name == "*":
                     found.append(_violation(line, "import", f"from {module} import *",
                                             "import the names you need one by one"))
-                elif a.name in READBACK_NAMES:
+                    continue
+                if not node.level and module in FROM_NAME_ALLOWED and a.name not in FROM_NAME_ALLOWED[module]:
+                    found.append(_violation(line, "import", f"from {module} import {a.name}",
+                                            f"from {module}, import only these names: "
+                                            + ", ".join(sorted(FROM_NAME_ALLOWED[module]))))
+                # A forbidden name is refused when it is imported and when it is the name an import binds, so
+                # `from ttnn import os as o` and `from typing import Any as sys` are both caught.
+                for bound in (a.name, a.asname):
+                    if bound and (bound in FORBIDDEN_NAMES
+                                  or (_is_dunder(bound) and bound not in HARMLESS_DUNDER_NAMES)):
+                        found.append(_violation(line, "name", f"import of {bound}" if bound == a.name
+                                                else f"import bound to {bound}"))
+                if a.name in READBACK_NAMES:
                     found.append(_violation(line, "readback", f"import of {a.name}"))
         elif isinstance(node, ast.Name):
             if node.id in FORBIDDEN_NAMES or (_is_dunder(node.id) and node.id not in HARMLESS_DUNDER_NAMES):
@@ -214,6 +243,8 @@ def _analyse(path) -> tuple[list, bool]:
                 found.append(_violation(line, "dunder", f"attribute {node.attr}"))
             elif node.attr in READBACK_NAMES:
                 found.append(_violation(line, "readback", f"attribute {node.attr}"))
+            elif node.attr in FORBIDDEN_NAMES:          # ttnn.os, x.sys, y.open: a module or builtin reached by name
+                found.append(_violation(line, "name", f"attribute {node.attr}"))
 
     bindings = _module_bindings(tree)
     alias_kinds = {"import ttl", "ttl operation"}
@@ -243,8 +274,9 @@ def _analyse(path) -> tuple[list, bool]:
 def kernel_source_violations(path) -> list[dict]:
     """Every rule kernel.py breaks, as dicts {rule, line, detail, remedy}, sorted by line. Empty when it breaks none.
 
-    Rules: `import` (only ttl, ttnn and math, plus `from __future__` and `from typing`; no star imports),
-    `name` (FORBIDDEN_NAMES, a call of input(), any dunder name but __name__ and __all__), `dunder` (an attribute
+    Rules: `import` (only ttl, ttnn and math, plus `from __future__` and `from typing` with the names in
+    FROM_NAME_ALLOWED; no star imports), `name` (FORBIDDEN_NAMES as a name, an attribute, an imported name or the name
+    an import binds; a call of input(); any dunder name but __name__ and __all__), `dunder` (an attribute
     whose name starts and ends with two underscores), `readback` (to_torch and from_torch, as an attribute, a name
     or an imported name), `operation` (OPERATION must be bound only by one top-level def whose only decorator is ttl's
     operation, reached through `import ttl [as x]` or `from ttl import operation [as x]`, names nothing rebinds).
@@ -367,7 +399,114 @@ def classify(*, kernel_present, timed_out, returncode, text, result, bar, phase=
     return None, ""
 
 
+def _kill_own_group(proc) -> None:
+    """SIGKILL the process group the simulator leads, so whatever it started goes with it. Only a group the child
+    leads itself is signalled: never id 1 or below, never this process's own group, and never a pid that does not
+    lead its own group (the guards orchard/stallwatch.py uses; this template stands alone, so it has its own copy).
+    Anything else gets a plain kill of the child alone."""
+    import signal
+    if getattr(proc, "returncode", None) is not None:
+        return                                       # already reaped: its pid may belong to another process now
+    pgid = proc.pid
+    try:
+        leads = isinstance(pgid, int) and pgid > 1 and pgid != os.getpgrp() and os.getpgid(pgid) == pgid
+    except OSError:
+        leads = False
+    try:
+        if leads:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        pass
+
+
+def _die_with_parent_fn(parent: int | None = None):
+    """A preexec function for the simulator. Its parts are resolved here, in the parent, so the forked child only
+    calls them: prctl(PR_SET_PDEATHSIG, SIGKILL) asks Linux to kill the simulator when this check process dies (it
+    covers a SIGKILL of the check, after which no handler of ours runs). A parent that died between the fork and the
+    prctl is caught by comparing os.getppid() with `parent` (this process's pid, recorded before the fork): the child
+    exits at once. Where prctl is missing only the parent check runs."""
+    parent = os.getpid() if parent is None else parent
+    try:
+        import ctypes
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except Exception:
+        prctl = None
+
+    def child() -> None:
+        if prctl is not None:
+            try:
+                prctl(1, 9)                              # PR_SET_PDEATHSIG = 1, SIGKILL = 9
+            except Exception:
+                pass
+        if os.getppid() != parent:
+            os._exit(1)
+    return child
+
+
+_ARRIVED: list = []                                   # the signal _raise_interrupt turned into KeyboardInterrupt
+
+
+def _raise_interrupt(signum, frame):
+    _ARRIVED.append(signum)
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
+def _exit_by_signal() -> None:
+    """After an interrupt: end this process by the signal that arrived (SIGINT when none was recorded, as for a plain
+    Ctrl-C), with its default action, so the exit status names that signal and not SIGINT."""
+    import signal
+    sig = _ARRIVED[-1] if _ARRIVED else signal.SIGINT
+    signal.signal(sig, signal.SIG_DFL)
+    os.kill(os.getpid(), sig)
+
+
+def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
+    """(timed_out, return code, stdout and stderr) of one simulator run. The simulator starts in its own session; on a
+    timeout its whole group is killed, so a process it started does not outlive the check. On any exception, including
+    the KeyboardInterrupt that main's handlers raise for SIGTERM, SIGINT and SIGHUP (SIGINT and SIGHUP are left alone
+    when they start ignored; SIGTERM is always handled), the group is killed before the exception goes on. If this process is killed outright, the simulator gets SIGKILL from its parent-death signal."""
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True, preexec_fn=_die_with_parent_fn())
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+        return False, proc.returncode, (out or "") + "\n" + (err or "")
+    except subprocess.TimeoutExpired:
+        _kill_own_group(proc)
+        try:
+            out, err = proc.communicate(timeout=10)   # bounded: a process that left the group may hold the pipes
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = "", ""
+        return True, None, (out or "") + "\n" + (err or "")
+    except BaseException:
+        _kill_own_group(proc)
+        raise
+
+
 def main(argv=None) -> int:
+    """Run the check. SIGTERM, SIGINT and SIGHUP (the last two only when they did not start ignored) become a
+    KeyboardInterrupt while it runs, so a watcher that stops this process (run_watched sends SIGTERM to this
+    process's group) also stops the simulator, which runs in a session of its own. The previous handlers are restored
+    at the end."""
+    import signal
+    previous = {}
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        if sig != signal.SIGTERM and signal.getsignal(sig) == signal.SIG_IGN:
+            continue                                  # a signal that starts ignored (nohup) stays ignored
+        try:
+            previous[sig] = signal.signal(sig, _raise_interrupt)
+        except ValueError:                            # not the main thread: no handler can be installed
+            pass
+    try:
+        return _main(argv)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--attempt-dir", default=".")
     ap.add_argument("--phase", choices=("sim",), default="sim")
@@ -407,14 +546,9 @@ def main(argv=None) -> int:
             category, line = ("no_kernel", "kernel.py defines no OPERATION") if reason.startswith("no-operation") \
                 else ("forbidden_code", reason)
     if category is None and kernel.is_file():
-        try:
-            done = subprocess.run([sim, str(HERE / "kernel_harness.py"), "--", "--spec", str(spec_path), "--kernel",
-                                   str(kernel), "--out", str(result_path), "--phase", "sim"],
-                                  capture_output=True, text=True, timeout=timeout_s, cwd=adir)
-            rc, text = done.returncode, (done.stdout or "") + "\n" + (done.stderr or "")
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            text = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        timed_out, rc, text = run_sim([sim, str(HERE / "kernel_harness.py"), "--", "--spec", str(spec_path),
+                                       "--kernel", str(kernel), "--out", str(result_path), "--phase", "sim"],
+                                      timeout_s=timeout_s, cwd=adir)
     log_path.write_text(text, encoding="utf-8")
     result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.is_file() else None
     if category is None:
@@ -433,4 +567,8 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        _exit_by_signal()
+        raise

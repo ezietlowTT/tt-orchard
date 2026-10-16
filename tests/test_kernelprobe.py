@@ -460,7 +460,7 @@ def test_the_report_header_lists_versions_patch_hashes_coder_and_provisional_bar
     kp.write_report(tmp_path / "probe", [], header)
     md = (tmp_path / "probe" / "kernel-probe-report.md").read_text()
     for needle in ("1.1.10+gfake", "c" * 40, kp.defaults.TTLANG_DIAGNOSTICS_SHA256, "qwen3-coder-next", "provisional",
-                   "pcc >= 0.999", "pcc >= 0.99", "independent draws", "synthetic", "diagnostics patch applied: no"):
+                   "pcc >= 0.999", "pcc >= 0.99", "greedy decoding", "synthetic", "diagnostics patch applied: no"):
         assert needle in md, needle
     data = json.loads((tmp_path / "probe" / "kernel-probe-report.json").read_text())
     assert data["header"] == header and data["attempts"] == []
@@ -606,6 +606,54 @@ def test_a_smoke_test_killed_by_the_watcher_blocks_the_probe(tmp_path, fake_kenv
         kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=hangs)
     text = str(info.value)
     assert "the smoke test hung" in text and "stalled" in text and "gozer-gatekeeper" in text
+
+
+def test_both_gozer_commands_give_gozer_time_to_release_its_lease_and_the_simulator_check_does_not(tmp_path,
+                                                                                                     fake_kenv):
+    """C1. A watcher stop sends SIGTERM to the group and SIGKILL after the grace. `gozer run` releases its lease in a
+    `finally` after its child exits, and the release resets the chip (41.7 s measured here). A grace shorter than that
+    kills gozer in the middle of the reset and leaves the lease under a dead pid. The simulator check holds no lease, so
+    it keeps the short default."""
+    seen = []
+
+    def recorder(argv, **kw):
+        seen.append((list(argv), kw))
+        if "--out" in argv and argv[0] == "gozer":
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET]}))
+        elif "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps(NO_KERNEL))
+        else:
+            with open(kw["log_path"], "a") as f:
+                f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 1.0)
+
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=recorder)
+    gozer = [kw for argv, kw in seen if argv[0] == "gozer"]
+    assert len(gozer) == 2
+    assert all(kw.get("term_grace_s", 0) >= 100 for kw in gozer), [kw.get("term_grace_s") for kw in gozer]
+    assert kp.GOZER_TERM_GRACE_S >= 100
+
+    seen.clear()
+    adir2 = tmp_path / "probe2" / "add" / "attempt-1"
+    kp.prepare_attempt(adir2, op="add", env=fake_kenv, tt_lang=FACTS)
+    (adir2 / "kernel.py").write_text((KERNELS / "add_good.py").read_text())
+    kp.authoritative_check(adir2, op="add", env=fake_kenv, run_watched=recorder, tt_lang=FACTS)
+    (argv, kw), = seen
+    assert argv[0] != "gozer" and kw.get("term_grace_s", 5.0) < 100
+
+
+def test_a_hung_smoke_test_says_the_lease_is_normally_released(tmp_path, fake_kenv):
+    """C1. After a watcher stop gozer normally releases its lease. Only when gozer itself had to be killed after the
+    grace can the lease be left under a dead process, and the message says how to look."""
+    def hangs(argv, **kw):
+        return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
+    with pytest.raises(kp.ProbeBlocked) as info:
+        kp.smoke_test(env=fake_kenv, shared_python="/p", run_watched=hangs)
+    text = str(info.value)
+    assert "normally" in text and "gozer status" in text and "gozer-gatekeeper" in text
+    assert "second interrupt" in text
+    assert "Its lease may be held by a dead process" not in text
 
 
 def test_a_smoke_test_that_exits_non_zero_is_unavailable_without_blocking(tmp_path, fake_kenv):
@@ -1175,6 +1223,11 @@ def test_the_exit_codes_match_the_cli():
     from orchard import cli
     assert (kp.EXIT_OK, kp.EXIT_REFUSED, kp.EXIT_ERROR, kp.EXIT_ABORTED, kp.EXIT_BLOCKED) == \
         (cli.EXIT_OK, cli.EXIT_REFUSED, cli.EXIT_ERROR, cli.EXIT_ABORTED, cli.EXIT_BLOCKED)
+    # m1: the module docstring names every exit code the command uses, each with its meaning
+    doc = " ".join(kp.__doc__.split())
+    for code, words in ((kp.EXIT_OK, "a report was written"), (kp.EXIT_REFUSED, "refusal"),
+                        (kp.EXIT_ERROR, "crash"), (kp.EXIT_ABORTED, "interrupt"), (kp.EXIT_BLOCKED, "hung")):
+        assert re.search(rf"\b{code}\b[^.;]*{words}", doc), (code, words)
 
 
 def test_an_attempt_that_crashes_keeps_the_earlier_attempts_in_the_report_and_exits_3(tmp_path, fake_kenv, env_ready,
@@ -1346,3 +1399,1090 @@ def test_credentials_in_the_endpoint_are_never_printed(tmp_path, fake_kenv, env_
     text += (tmp_path / "out" / "kernel-probe-report.md").read_text()
     text += (tmp_path / "out" / "kernel-probe-report.json").read_text()
     assert "127.0.0.1:1" in out.getvalue() and "secret" not in text
+
+
+# ---- stray agent processes (I5) -----------------------------------------------------------------------------------
+#
+# Every process these tests signal is a child the test started itself, with start_new_session=True and an
+# ORCHARD_RUN_DIR under the test's own tmp directory. The sweep's kill functions are wrapped so that a signal to any
+# other pid is recorded and never sent (each test asserts there was none), and every child is stopped in a finally.
+
+import signal as _signal
+import subprocess as _subprocess
+import sys as _sys
+import time as _time
+
+from orchard.agent import Outcome, agent_env
+
+
+def _child(run_dir, *, extra_env=None):
+    env = dict(os.environ)
+    env["ORCHARD_RUN_DIR"] = str(Path(run_dir).resolve())
+    env.update(extra_env or {})
+    return _subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], env=env, start_new_session=True,
+                             stdin=_subprocess.DEVNULL, stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL)
+
+
+def _wait_for_env(pid, value, timeout=10.0):
+    """Wait until the child's /proc environ is readable (an exec has happened)."""
+    want = ("ORCHARD_RUN_DIR=" + value).encode()
+    end = _time.monotonic() + timeout
+    while _time.monotonic() < end:
+        try:
+            if want in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                return
+        except OSError:
+            pass
+        _time.sleep(0.02)
+    raise AssertionError(f"child {pid} never showed ORCHARD_RUN_DIR={value}")
+
+
+def _guarded_kills(allowed, sent: list, violations: list):
+    """kill and killpg stand-ins that pass a signal on only to a pid (or a group led by a pid) that `allowed` accepts
+    (a set of pids, or a predicate). Any other call is recorded in `violations` and NOT sent. The sweep catches
+    exceptions, so a raising guard would be swallowed; each test asserts `violations == []` at its end instead."""
+    ok = allowed if callable(allowed) else (lambda pid: pid in allowed)
+
+    def kill(pid, sig):
+        sent.append(("kill", pid, sig))
+        if not ok(pid):
+            violations.append(("kill", pid, sig))
+            return
+        os.kill(pid, sig)
+
+    def killpg(pgid, sig):
+        sent.append(("killpg", pgid, sig))
+        if not ok(pgid):
+            violations.append(("killpg", pgid, sig))
+            return
+        os.killpg(pgid, sig)
+    return kill, killpg
+
+
+def test_the_guard_records_a_signal_the_sweep_would_swallow(tmp_path):
+    """S3. A stray this test did not allow: the sweep swallows exceptions, so the guard must record the call (and not
+    send it) for the test to see it."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    stray = _child(adir)
+    sent, violations = [], []
+    try:
+        _wait_for_env(stray.pid, str(adir.resolve()))
+        kill, killpg = _guarded_kills(set(), sent, violations)
+        kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.1)
+        assert violations and all(pid == stray.pid for _, pid, _ in violations)
+        assert stray.poll() is None                               # nothing was sent
+    finally:
+        _stop(stray)
+
+
+def _stop(*procs):
+    """Popen.kill skips a child that has already been reaped, so a freed pid is never signalled."""
+    for p in procs:
+        p.kill()
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def test_the_sweep_stops_a_process_with_this_attempt_directory_and_leaves_a_neighbour_alone(tmp_path):
+    """The neighbour's directory starts with the attempt's directory (attempt-1 and attempt-10), so a prefix match
+    would stop it too. Only the exact directory counts."""
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    other = tmp_path / "probe" / "add" / "attempt-10"
+    adir.mkdir(parents=True)
+    other.mkdir(parents=True)
+    stray, neighbour = _child(adir), _child(other)
+    sent = []
+    try:
+        _wait_for_env(stray.pid, str(adir.resolve()))
+        _wait_for_env(neighbour.pid, str(other.resolve()))
+        violations = []
+        kill, killpg = _guarded_kills({stray.pid}, sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg)
+        assert [s["pid"] for s in swept] == [stray.pid] and "time.sleep" in swept[0]["cmdline"]
+        assert stray.wait(timeout=5) == -_signal.SIGTERM
+        assert neighbour.poll() is None
+        assert all(pid == stray.pid for _, pid, _ in sent) and violations == []
+    finally:
+        _stop(stray, neighbour)
+
+
+def test_the_sweep_kills_a_process_that_ignores_sigterm(tmp_path):
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stubborn = _subprocess.Popen(
+        [_sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                "print('ready', flush=True); time.sleep(60)"],
+        env=env, start_new_session=True, stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent = []
+    try:
+        assert stubborn.stdout.readline().strip() == b"ready"
+        violations = []
+        kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.5)
+        assert [s["pid"] for s in swept] == [stubborn.pid]
+        assert stubborn.wait(timeout=5) == -_signal.SIGKILL
+        assert [sig for _, _, sig in sent] == [_signal.SIGTERM, _signal.SIGKILL] and violations == []
+    finally:
+        _stop(stubborn)
+
+
+def test_the_sweep_never_signals_this_process_or_its_parent(tmp_path, monkeypatch):
+    """The scan is patched to name our own pid and our parent's; a recorder stands in for every kill function, so no
+    real signal can be sent whatever the sweep decides."""
+    sent = []
+    monkeypatch.setattr(kp, "scan_strays", lambda run_dir, **kw: [os.getpid(), os.getppid(), 1, 0])
+    monkeypatch.setattr(kp, "_environ_has", lambda *a: True)      # as if each of them carried the attempt's value
+    record = lambda *a: sent.append(a)                           # noqa: E731
+    swept = kp.sweep_strays(tmp_path, kill=record, killpg=record, grace_s=0.1)
+    assert sent == [] and swept == []
+
+
+def test_a_proc_entry_that_vanishes_mid_scan_is_skipped(tmp_path):
+    """A fake /proc: one entry has no environ (the process ended between the listing and the read), one has an
+    unreadable environ, one cannot be stat'ed at all, one matches. Only the match is returned, and nothing raises."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    proc = tmp_path / "proc"
+    for pid in ("4001", "4002", "4003"):
+        (proc / pid).mkdir(parents=True)
+    (proc / "4002" / "environ").mkdir()                           # reading a directory raises
+    (proc / "4003" / "environ").write_bytes(b"A=1\0ORCHARD_RUN_DIR=" + str(adir.resolve()).encode() + b"\0")
+    (proc / "self").mkdir()
+    (proc / "4004").symlink_to(proc / "gone")                     # the whole entry vanished: stat fails
+    assert kp.scan_strays(adir, proc_root=str(proc)) == [4003]
+
+
+def test_the_sweep_never_raises(tmp_path, monkeypatch):
+    def broken(run_dir, **kw):
+        raise OSError("proc went away")
+    monkeypatch.setattr(kp, "scan_strays", broken)
+    assert kp.sweep_strays(tmp_path, kill=lambda *a: None, killpg=lambda *a: None) == []
+
+
+def _carries(pid, adir) -> bool:
+    """Whether /proc shows `pid` alive, not a zombie, with this test's unique ORCHARD_RUN_DIR in its environment."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(errors="replace")
+        env = Path(f"/proc/{pid}/environ").read_bytes()
+    except OSError:
+        return False
+    if stat[stat.rfind(")") + 2:].split()[0] == "Z":
+        return False
+    return ("ORCHARD_RUN_DIR=" + str(Path(adir).resolve())).encode() in env.split(b"\0")
+
+
+def test_a_process_a_stray_starts_during_the_grace_is_found_by_a_second_scan_and_killed(tmp_path):
+    """S1. On SIGTERM the stray starts a new process in a session of its own (outside any group the sweep signalled)
+    and exits. A second scan after the grace finds it by its ORCHARD_RUN_DIR and kills it."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    pidfile = tmp_path / "fork.pid"
+    code = ("import os, signal, subprocess, sys, time\n"
+            "def on_term(*a):\n"
+            "    p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+            f"    open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+            "    os._exit(0)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(60)\n")
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stray = _subprocess.Popen([_sys.executable, "-c", code], env=env, start_new_session=True,
+                              stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent, violations = [], []
+    fork = None
+    try:
+        assert stray.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills(lambda pid: _carries(pid, adir), sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=2.0)
+        fork = int(pidfile.read_text())
+        assert stray.wait(timeout=5) == 0
+        assert not _carries(fork, adir)
+        assert {r["pid"]: r["stopped"] for r in swept} == {stray.pid: True, fork: True}
+        assert violations == []
+    finally:
+        _stop(stray)
+        if fork and _carries(fork, adir):
+            os.kill(fork, 9)
+
+
+def test_a_second_interrupt_during_the_grace_still_sends_the_sigkill_and_propagates(tmp_path):
+    """S1. Ctrl-C during the grace (the injected sleep raises KeyboardInterrupt) must not skip the SIGKILL pass."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stubborn = _subprocess.Popen(
+        [_sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                "print('ready', flush=True); time.sleep(60)"],
+        env=env, start_new_session=True, stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent, violations = [], []
+
+    def interrupted(_s):
+        raise KeyboardInterrupt
+    try:
+        assert stubborn.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
+        with pytest.raises(KeyboardInterrupt):
+            kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=5.0, sleep=interrupted)
+        assert stubborn.wait(timeout=5) == -_signal.SIGKILL
+        assert violations == []
+    finally:
+        _stop(stubborn)
+
+
+def test_a_process_still_there_after_the_sigkill_is_reported_as_not_stopped(tmp_path, monkeypatch):
+    """S1. Fakes only: the scan names a pid, every kill function is a recorder, and /proc keeps showing the process.
+    The record says it was not stopped, and the report says so with its pid."""
+    monkeypatch.setattr(kp, "scan_strays", lambda run_dir, **kw: [999999999])
+    monkeypatch.setattr(kp, "_environ_has", lambda *a: True)
+    monkeypatch.setattr(kp, "_gone", lambda *a: False)               # /proc keeps showing it running
+    sent = []
+    record = lambda *a: sent.append(a)                           # noqa: E731
+    now = [0.0]
+
+    def clock():                                                  # each reading moves on 0.5 s, so no wait spins
+        now[0] += 0.5
+        return now[0]
+    swept = kp.sweep_strays(tmp_path, kill=record, killpg=record, grace_s=0, sleep=lambda _s: None, clock=clock)
+    assert swept == [{"pid": 999999999, "cmdline": "", "stopped": False}]
+    md = _report_md(tmp_path / "r", [_row_attempt(swept=swept)])
+    row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    assert "1 stray agent process could not be confirmed stopped (pid 999999999)" in row
+    assert "process stopped" not in row
+    md = _report_md(tmp_path / "r2", [_row_attempt(swept=[dict(swept[0], stopped=True)])])
+    assert "1 stray agent process stopped" in md
+
+
+def test_an_interrupt_during_the_sigterm_pass_still_sends_the_sigkill(tmp_path):
+    """M3. Ctrl-C arrives while the sweep is sending SIGTERM (the first group signal raises KeyboardInterrupt and is
+    not sent). The SIGKILL pass must still run before the interrupt goes on."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    stray = _child(adir)
+    sent, violations = [], []
+    try:
+        _wait_for_env(stray.pid, str(adir.resolve()))
+        kill, killpg = _guarded_kills({stray.pid}, sent, violations)
+        first = []
+
+        def interrupted_killpg(pgid, sig):
+            if not first:
+                first.append(sig)
+                raise KeyboardInterrupt
+            killpg(pgid, sig)
+        with pytest.raises(KeyboardInterrupt):
+            kp.sweep_strays(adir, kill=kill, killpg=interrupted_killpg)
+        assert stray.wait(timeout=5) == -_signal.SIGKILL and violations == []
+    finally:
+        _stop(stray)
+
+
+def test_a_stray_that_execs_without_the_marker_is_not_confirmed_stopped(tmp_path):
+    """M3. On SIGTERM the stray execs a new program with an environment that lacks ORCHARD_RUN_DIR. /proc no longer
+    shows the marker, but the process runs: the record must say it was not confirmed stopped."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    code = ("import os, signal, sys, time\n"
+            "def on_term(*a):\n"
+            "    env = {k: v for k, v in os.environ.items() if k != 'ORCHARD_RUN_DIR'}\n"
+            "    os.execve(sys.executable, [sys.executable, '-c', 'import time; time.sleep(60)'], env)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(60)\n")
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stray = _subprocess.Popen([_sys.executable, "-c", code], env=env, start_new_session=True,
+                              stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent, violations = [], []
+    try:
+        assert stray.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills({stray.pid}, sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=2.0)
+        assert stray.poll() is None                                   # it is still running, under a new program
+        assert [(r["pid"], r["stopped"]) for r in swept] == [(stray.pid, False)] and violations == []
+    finally:
+        _stop(stray)
+
+
+def test_gone_means_no_entry_a_zombie_or_another_process_under_the_pid(tmp_path):
+    """M3, on a fake /proc: a running process with the recorded start time is not gone; a zombie, a missing entry and
+    a process with another start time (the pid was reused) are."""
+    proc = tmp_path / "proc"
+
+    def stat(pid, state, start):
+        (proc / str(pid)).mkdir(parents=True)
+        fields = [state, "1"] + ["0"] * 17 + [str(start)] + ["0"] * 10
+        (proc / str(pid) / "stat").write_text(f"{pid} (py thon) " + " ".join(fields) + "\n")
+    stat(500, "S", 1234)
+    stat(501, "Z", 1234)
+    assert kp._gone(str(proc), 500, 1234) is False
+    assert kp._gone(str(proc), 500, 1233) is True
+    assert kp._gone(str(proc), 501, 1234) is True
+    assert kp._gone(str(proc), 502, 1234) is True
+
+
+def _helper_with_marked_grandchild(adir):
+    """A helper child (its own session, NO marker) that starts a grandchild carrying the attempt's ORCHARD_RUN_DIR in
+    the helper's group. The grandchild does not lead a group, so the sweep must reach it by pid."""
+    code = ("import os, subprocess, sys, time\n"
+            f"env = dict(os.environ, ORCHARD_RUN_DIR={str(adir.resolve())!r})\n"
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], env=env)\n"
+            "print(g.pid, flush=True)\n"
+            "time.sleep(60)\n")
+    env = {k: v for k, v in os.environ.items() if k != "ORCHARD_RUN_DIR"}
+    helper = _subprocess.Popen([_sys.executable, "-c", code], env=env, start_new_session=True,
+                               stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    grandchild = int(helper.stdout.readline())
+    _wait_for_env(grandchild, str(adir.resolve()))
+    return helper, grandchild
+
+
+def test_a_stray_that_does_not_lead_its_group_is_stopped_by_pid(tmp_path):
+    """M4. The plain kill(pid) path, with real processes: the grandchild is stopped by kill, nothing is group-signalled,
+    and the helper (no marker) keeps running."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    helper, grandchild = _helper_with_marked_grandchild(adir)
+    sent, violations = [], []
+    try:
+        kill, killpg = _guarded_kills({grandchild}, sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg)
+        assert sent and all(kind == "kill" and pid == grandchild for kind, pid, _ in sent), sent
+        assert [(r["pid"], r["stopped"]) for r in swept] == [(grandchild, True)]
+        assert helper.poll() is None and violations == []
+    finally:
+        _stop(helper)
+        if _carries(grandchild, adir):
+            os.kill(grandchild, 9)
+
+
+def test_the_guard_records_a_plain_kill_it_does_not_allow(tmp_path):
+    """M4. The guard's kill branch: a grandchild the test does not allow is recorded and never signalled."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    helper, grandchild = _helper_with_marked_grandchild(adir)
+    sent, violations = [], []
+    try:
+        kill, killpg = _guarded_kills(set(), sent, violations)
+        kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.2)
+        assert violations and all(kind == "kill" and pid == grandchild for kind, pid, _ in violations)
+        assert _carries(grandchild, adir)                            # nothing was sent
+    finally:
+        _stop(helper)
+        if _carries(grandchild, adir):
+            os.kill(grandchild, 9)
+
+
+def test_an_interrupt_is_not_lost_when_the_second_scan_fails(tmp_path, monkeypatch):
+    """A4. Ctrl-C during the grace, and the second scan raises. The known stray still gets its SIGKILL and the
+    KeyboardInterrupt goes on (it is not replaced by the scan's error and swallowed)."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stubborn = _subprocess.Popen(
+        [_sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                "print('ready', flush=True); time.sleep(60)"],
+        env=env, start_new_session=True, stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    real_scan = kp.scan_strays
+    scans = []
+
+    def scan(run_dir, **kw):
+        scans.append(1)
+        if len(scans) > 1:
+            raise RuntimeError("proc went away")
+        return real_scan(run_dir, **kw)
+    monkeypatch.setattr(kp, "scan_strays", scan)
+    sent, violations = [], []
+
+    def interrupted(_s):
+        raise KeyboardInterrupt
+    try:
+        assert stubborn.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
+        with pytest.raises(KeyboardInterrupt):
+            kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=5.0, sleep=interrupted)
+        assert stubborn.wait(timeout=5) == -_signal.SIGKILL and violations == [] and len(scans) == 2
+    finally:
+        _stop(stubborn)
+
+
+class _BackgroundingStep:
+    """Stands in for AgentStep: run() starts a process with the agent's environment that outlives the step, the way a
+    shell command that backgrounds a process and exits would, then returns or raises."""
+    started: list = []
+    raise_after = False
+
+    def __init__(self, **kw):
+        self.run_dir = kw["run_dir"]
+
+    def run(self, system, user):
+        env = agent_env(self.run_dir)
+        env["PATH"] = os.environ.get("PATH", "")
+        p = _subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], env=env, start_new_session=True,
+                              stdin=_subprocess.DEVNULL, stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL)
+        type(self).started.append(p)
+        (Path(self.run_dir) / "kernel.py").write_text((KERNELS / "add_good.py").read_text())
+        _wait_for_env(p.pid, str(Path(self.run_dir).resolve()))
+        if type(self).raise_after:
+            raise RuntimeError("the agent step crashed")
+        return Outcome("done", 1, "done")
+
+
+def test_run_attempt_stops_agent_processes_that_outlive_the_step_before_the_verdict(tmp_path, fake_kenv, monkeypatch):
+    _BackgroundingStep.started, _BackgroundingStep.raise_after = [], False
+    monkeypatch.setattr(kp, "AgentStep", _BackgroundingStep)
+    order, violations = [], []
+    real_sweep = kp.sweep_strays
+
+    def sweep(run_dir, **kw):
+        order.append("sweep")
+        allowed = {p.pid for p in _BackgroundingStep.started}
+        kill, killpg = _guarded_kills(allowed, [], violations)
+        return real_sweep(run_dir, kill=kill, killpg=killpg)
+    monkeypatch.setattr(kp, "sweep_strays", sweep)
+    writer = check_writer(NO_KERNEL)
+
+    def check(argv, **kw):
+        order.append("check")
+        assert all(p.poll() is not None for p in _BackgroundingStep.started), "a stray ran during the verdict"
+        return writer(argv, **kw)
+    try:
+        attempt = kp.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1",
+                                 model="m", coder_model="m", probe_id="t", run_watched=check, tt_lang=FACTS)
+        (p,) = _BackgroundingStep.started
+        assert order == ["sweep", "check"]
+        assert [s["pid"] for s in attempt["swept"]] == [p.pid] and p.wait(timeout=5) is not None
+        on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text())
+        assert on_disk["swept"] == attempt["swept"]
+        kp.write_report(tmp_path, [attempt], {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"]})
+        assert "1 stray agent process stopped" in (tmp_path / "kernel-probe-report.md").read_text()
+        assert violations == []
+    finally:
+        _stop(*_BackgroundingStep.started)
+
+
+def test_a_crashed_agent_step_still_has_its_strays_stopped(tmp_path, fake_kenv, monkeypatch):
+    _BackgroundingStep.started, _BackgroundingStep.raise_after = [], True
+    monkeypatch.setattr(kp, "AgentStep", _BackgroundingStep)
+    real_sweep = kp.sweep_strays
+    violations = []
+
+    def sweep(run_dir, **kw):
+        kill, killpg = _guarded_kills({p.pid for p in _BackgroundingStep.started}, [], violations)
+        return real_sweep(run_dir, kill=kill, killpg=killpg)
+    monkeypatch.setattr(kp, "sweep_strays", sweep)
+    try:
+        with pytest.raises(RuntimeError):
+            kp.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1",
+                           model="m", coder_model="m", probe_id="t", run_watched=check_writer(NO_KERNEL),
+                           tt_lang=FACTS)
+        (p,) = _BackgroundingStep.started
+        assert p.wait(timeout=5) == -_signal.SIGTERM and violations == []
+    finally:
+        _stop(*_BackgroundingStep.started)
+        _BackgroundingStep.raise_after = False
+
+
+# ---- the report says what a row means (I6) ------------------------------------------------------------------------
+
+
+def _row_attempt(**kw):
+    a = {"op": "silu_mul", "attempt": 1, "status": "done", "status_detail": "", "turns": 12, "agent_wall_s": 300.0,
+         "passed_sim": True, "category": None, "first_line": "", "pcc_min": 0.9999, "hw": None,
+         "agent_check_untrusted": False, "swept": []}
+    a.update(kw)
+    return a
+
+
+def _report_md(tmp_path, attempts, ops=("silu_mul",)):
+    kp.write_report(tmp_path, attempts, {"probe_id": "t", "bars": {}, "hw": None, "ops": list(ops)})
+    return (tmp_path / "kernel-probe-report.md").read_text()
+
+
+def test_the_table_has_a_status_column_with_the_reason_for_a_step_that_did_not_end_done(tmp_path):
+    md = _report_md(tmp_path, [
+        _row_attempt(status="escalate", status_detail="the watchdog saw the agent loop again after a nudge\nmore"),
+        _row_attempt(attempt=2)])
+    header = next(l for l in md.splitlines() if l.startswith("| attempt"))
+    assert "| status |" in header
+    row1 = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    row2 = next(l for l in md.splitlines() if l.startswith("| 2 |"))
+    assert "escalate: the watchdog saw the agent loop again after a nudge |" in row1 and "more" not in row1
+    assert "| done |" in row2
+    # every row has as many cells as the header
+    assert row1.count(" | ") == header.count(" | ") == row2.count(" | ")
+
+
+def test_the_header_says_add_is_a_calibration_op(tmp_path):
+    md = _report_md(tmp_path, [_row_attempt(op="add")], ops=("add",))
+    flat = " ".join(md.split())
+    assert "`add` is a calibration op" in flat and "reference example the agent reads" in flat
+    assert "not evidence" in flat
+    assert "calibration op" not in " ".join(_report_md(tmp_path / "other", [_row_attempt()]).split())
+
+
+def test_the_header_says_the_simulator_computes_in_f32(tmp_path):
+    flat = " ".join(_report_md(tmp_path, [_row_attempt()]).split())
+    assert "promotes bf16 to f32" in flat and "max_abs_err" in flat and "PCC of 1.0" in flat
+    # S4: transcendental ops round in f32 too, so rounding is not a hardware-only effect
+    assert "Rounding on hardware is coarser (bf16) than the simulator's f32" in flat
+    assert "seen only on hardware" not in flat
+
+
+def test_an_agent_cell_with_nothing_to_say_is_a_dash(tmp_path):
+    md = _report_md(tmp_path, [_row_attempt()])
+    row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    assert row.rstrip().endswith("| - |"), row
+
+
+@pytest.mark.parametrize("pcc,shown", [(0.99999994, "1 - 6.0e-08"), (0.995, "0.995"), (1.0, "1"),
+                                       (0.9999996, "1 - 4.0e-07"), (1.0000001, "1 + 1.0e-07")])
+def test_a_pcc_short_of_1_is_never_printed_as_1(tmp_path, pcc, shown):
+    md = _report_md(tmp_path, [_row_attempt(pcc_min=pcc)])
+    row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    header = [c.strip() for c in next(l for l in md.splitlines() if l.startswith("| attempt")).strip("|").split("|")]
+    assert cells[header.index("PCC min (sim)")] == shown
+
+
+# ---- what the stall watcher saw on hardware (I8) -------------------------------------------------------------------
+
+
+def test_the_report_gives_the_watchers_longest_quiet_stretch_and_repeat_for_the_smoke_test_and_each_run(tmp_path,
+                                                                                                         fake_kenv):
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+
+    def fake(argv, **kw):
+        if "--out" in argv:
+            Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET]}))
+            return kp.Watched(0, None, False, 30.0, max_quiet_s=12.34, max_repeat=4)
+        with open(kw["log_path"], "a") as f:
+            f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 9.0, max_quiet_s=3.21, max_repeat=2)
+
+    hw = kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=fake)
+    assert hw["watch"] == {"max_quiet_s": 3.2, "max_repeat": 2, "quiet_limit_s": kp.HW_QUIET_S,
+                           "repeat_limit": kp.HW_REPEAT_LINES}
+    assert attempt["hw"]["watch"]["max_quiet_s"] == 12.3 and attempt["hw"]["watch"]["max_repeat"] == 4
+    header = kp.report_header(env=fake_kenv, coder_model="c", probe_id="t", ops=["add"], hw=hw, tt_lang=FACTS)
+    kp.write_report(tmp_path, [attempt], header)
+    flat = " ".join((tmp_path / "kernel-probe-report.md").read_text().split())
+    assert ("smoke test: longest quiet stretch 3.2 s, longest repeat 2 lines; watcher limits 60 s and 20 lines"
+            in flat)
+    assert ("attempt 1 on hardware: longest quiet stretch 12.3 s, longest repeat 4 lines; watcher limits 60 s and "
+            "20 lines" in flat)
+
+
+@pytest.mark.parametrize("reason,word", [("backstop: still running after 600 s", "backstop"),
+                                         ("stalled: no output and no CPU use for 60 s", "stalled")])
+def test_a_hang_row_says_whether_the_backstop_or_the_stall_rule_stopped_it(tmp_path, fake_kenv, reason, word):
+    """Neither reason may be read as a device hang without the watcher's own words."""
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+
+    def fake(argv, **kw):
+        if "--out" in argv:
+            return kp.Watched(-15, reason, True, 600.0, max_quiet_s=60.0, max_repeat=1)
+        with open(kw["log_path"], "a") as f:
+            f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 9.0)
+
+    with pytest.raises(kp.ProbeBlocked):
+        kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=fake)
+    assert attempt["hw"]["category"] == "hang" and attempt["hw"]["first_line"].startswith(word)
+    assert attempt["hw"]["watch"]["max_quiet_s"] == 60.0
+    kp.write_report(tmp_path, [attempt], {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"]})
+    row = next(l for l in (tmp_path / "kernel-probe-report.md").read_text().splitlines() if l.startswith("| 1 |"))
+    assert f"| hang | {word}" in row
+
+
+# ---- one probe per output directory (S6, L1) -----------------------------------------------------------------------
+#
+# The lock is an flock on DIR/probe.lock. Every holder in these tests is a child this test started, stopped with
+# Popen.kill/wait in a finally.
+
+REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _holder(out_dir, *, write_pid=True):
+    """A child that holds the probe lock on `out_dir` and sleeps. write_pid=False takes the flock by hand and leaves
+    the file empty, as a holder looks between its create and its write."""
+    if write_pid:
+        code = ("import sys, time\nfrom orchard import kernelprobe as kp\n"
+                f"lock = kp.acquire_lock(__import__('pathlib').Path({str(out_dir)!r}))\n"
+                "print('held', flush=True)\ntime.sleep(60)\n")
+    else:
+        code = ("import fcntl, os, time\n"
+                f"os.makedirs({str(out_dir)!r}, exist_ok=True)\n"
+                f"fd = os.open(os.path.join({str(out_dir)!r}, 'probe.lock'), os.O_RDWR | os.O_CREAT, 0o600)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\nos.ftruncate(fd, 0)\n"
+                "print('held', flush=True)\ntime.sleep(60)\n")
+    p = _subprocess.Popen([_sys.executable, "-c", code], cwd=REPO_ROOT, stdout=_subprocess.PIPE,
+                          stderr=_subprocess.DEVNULL, env=dict(os.environ, PYTHONPATH=REPO_ROOT))
+    assert p.stdout.readline().strip() == b"held"
+    return p
+
+
+def _end(p):
+    p.kill()
+    p.wait(timeout=10)
+
+
+def test_a_second_probe_on_the_same_directory_is_refused(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    out_dir = tmp_path / "out"
+    holder = _holder(out_dir)
+    try:
+        code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=no_run)
+        assert code == kp.EXIT_REFUSED and seen == []
+        assert f"another probe is using {out_dir} (pid {holder.pid})" in capsys.readouterr().err
+    finally:
+        _end(holder)
+
+
+def test_a_lock_left_by_a_sigkilled_probe_is_taken_over_at_once(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    out_dir = tmp_path / "out"
+    holder = _holder(out_dir)
+    _end(holder)                                                  # SIGKILL: no cleanup ran, the file stays
+    assert (out_dir / kp.LOCK_NAME).is_file()
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and seen == [1]
+    assert not (out_dir / kp.LOCK_NAME).exists()                 # removed at a clean exit
+
+
+def test_two_probes_racing_for_one_directory_never_both_get_it(tmp_path):
+    """Twenty rounds. Each round starts with a lock file a dead probe left, and two children (this test's own) each
+    write a ready file once imported, then wait on a barrier file that the parent writes only when both are ready, and
+    take the lock at the same moment. Exactly one may get it."""
+    code = ("import os, sys, time\nfrom pathlib import Path\nfrom orchard import kernelprobe as kp\n"
+            "out, barrier, ready = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])\n"
+            "ready.write_text('ready')\n"
+            "while not barrier.exists():\n    time.sleep(0.0005)\n"
+            "try:\n    lock = kp.acquire_lock(out)\n    print('got', flush=True)\n    time.sleep(0.3)\n"
+            "    kp.release_lock(lock)\nexcept kp._Refused:\n    print('refused', flush=True)\n")
+    dead = _subprocess.Popen([_sys.executable, "-c", "pass"])
+    dead.wait(timeout=10)
+    for rnd in range(20):
+        out_dir = tmp_path / f"out{rnd}"
+        out_dir.mkdir()
+        (out_dir / kp.LOCK_NAME).write_text(json.dumps({"pid": dead.pid, "boot_id": "old", "start_time": 1}))
+        barrier = tmp_path / f"go{rnd}"
+        ready = [tmp_path / f"ready{rnd}-{i}" for i in range(2)]
+        kids = [_subprocess.Popen([_sys.executable, "-c", code, str(out_dir), str(barrier), str(ready[i])],
+                                  cwd=REPO_ROOT, stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
+                                  env=dict(os.environ, PYTHONPATH=REPO_ROOT)) for i in range(2)]
+        try:
+            end = _time.monotonic() + 60                            # a bounded wait for both children to be ready
+            while _time.monotonic() < end and not all(r.exists() for r in ready):
+                _time.sleep(0.005)
+            assert all(r.exists() for r in ready), f"round {rnd}: a child never became ready"
+            barrier.write_text("go")
+            outs = [k.communicate(timeout=30) for k in kids]
+            results = sorted(o.decode().strip() for o, _ in outs)
+            assert results == ["got", "refused"], (rnd, results, [e.decode(errors="replace") for _, e in outs])
+        finally:
+            for k in kids:
+                _end(k)
+
+
+def test_a_symlink_at_the_lock_path_is_refused_and_left_alone(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    target = tmp_path / "operator.txt"
+    target.write_text("keep me\n")
+    (out_dir / kp.LOCK_NAME).symlink_to(target)
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_REFUSED and seen == [] and target.read_text() == "keep me\n"
+    assert (out_dir / kp.LOCK_NAME).is_symlink() and kp.LOCK_NAME in capsys.readouterr().err
+
+
+def test_a_read_only_output_directory_is_a_plain_refusal(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    out_dir.chmod(0o500)
+    try:
+        code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=no_run)
+        err = capsys.readouterr().err
+        assert code == kp.EXIT_REFUSED and seen == [] and "Traceback" not in err
+        assert "cannot open the lock" in err and "Permission denied" in err
+    finally:
+        out_dir.chmod(0o700)
+
+
+@pytest.mark.parametrize("text", ["9" * 4000, "\x00\xff garbage", '{"pid": 99999999999999999999999}', '{"pid": "x"}'], ids=["digits", "garbage", "huge", "string"])
+def test_a_lock_with_garbage_or_a_huge_pid_still_gives_a_plain_refusal(tmp_path, text):
+    out_dir = tmp_path / "out"
+    holder = _holder(out_dir)
+    try:
+        (out_dir / kp.LOCK_NAME).write_text(text, errors="replace")      # the flock is advisory; the text is info
+        with pytest.raises(kp._Refused) as info:
+            kp.acquire_lock(out_dir)
+        assert str(info.value).startswith(f"another probe is using {out_dir}")
+    finally:
+        _end(holder)
+
+
+def test_an_empty_lock_whose_flock_is_held_is_held(tmp_path):
+    """A holder between its create and its write leaves an empty file. The flock decides, so it is refused as held."""
+    out_dir = tmp_path / "out"
+    holder = _holder(out_dir, write_pid=False)
+    try:
+        assert (out_dir / kp.LOCK_NAME).read_bytes() == b""
+        with pytest.raises(kp._Refused) as info:
+            kp.acquire_lock(out_dir)
+        assert str(info.value).startswith(f"another probe is using {out_dir}")
+    finally:
+        _end(holder)
+
+
+def test_a_lock_file_replaced_between_the_open_and_the_flock_is_taken_again(tmp_path, monkeypatch):
+    """Another probe unlinked the file we opened and made a new one: our flock on the old inode reaches nobody, so
+    the lock is taken again on the file at the path."""
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    path = out_dir / kp.LOCK_NAME
+    path.write_text("")
+    real_flock = kp.fcntl.flock
+    calls = []
+
+    def flock(fd, op):
+        if not calls:
+            os.unlink(path)
+            path.write_text("")
+        calls.append(op)
+        return real_flock(fd, op)
+    monkeypatch.setattr(kp.fcntl, "flock", flock)
+    lock = kp.acquire_lock(out_dir)
+    try:
+        assert len(calls) >= 2
+        assert os.fstat(lock.fd).st_ino == os.stat(path).st_ino
+    finally:
+        kp.release_lock(lock)
+
+
+def test_the_lock_is_held_while_attempts_run_and_removed_after_a_crash(tmp_path, fake_kenv, env_ready, monkeypatch):
+    out_dir = tmp_path / "out"
+    held = []
+
+    def on_n(n):
+        held.append(json.loads((out_dir / kp.LOCK_NAME).read_text())["pid"])
+        raise OSError("crash")
+    fake_attempts(monkeypatch, on_n)
+    code = kp.main(probe_args(tmp_path, attempts=2), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_ERROR and held == [os.getpid()]
+    assert not (out_dir / kp.LOCK_NAME).exists()
+
+
+def test_an_os_error_inside_the_lock_is_a_plain_refusal(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    """A5. os.fstat failing on the lock file (called from kernelprobe only; every other caller gets the real one)
+    must give exit 2 with a plain message. Before the fix it escaped as a raw OSError."""
+    import errno as _errno
+    real_fstat = os.fstat
+
+    def fstat(fd):
+        if _sys._getframe(1).f_globals.get("__name__") == "orchard.kernelprobe":
+            raise OSError(_errno.EIO, "Input/output error")
+        return real_fstat(fd)
+    monkeypatch.setattr(os, "fstat", fstat)
+    with pytest.raises(kp._Refused) as info:
+        kp.acquire_lock(tmp_path / "direct")
+    assert "Input/output error" in str(info.value)
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == kp.EXIT_REFUSED and seen == [] and "Traceback" not in err and "Input/output error" in err
+
+
+# ---- sampling (B2 to B4) ----------------------------------------------------------------------------------------------
+
+
+def test_run_attempt_sends_and_records_its_sampling(tmp_path, fake_kenv):
+    with FakeModel(scripted(final("done"))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL),
+                              temperature=0.7, top_p=0.9, seed=11)
+        sent = server.requests[0]
+    want = {"temperature": 0.7, "top_p": 0.9, "seed": 11}
+    assert (sent["temperature"], sent["top_p"], sent["seed"]) == (0.7, 0.9, 11)
+    assert attempt["sampling"] == want and attempt["provenance"]["sampling"] == want
+    on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text())
+    assert on_disk["sampling"] == want
+
+
+def test_run_attempt_is_greedy_by_default(tmp_path, fake_kenv):
+    with FakeModel(scripted(final("done"))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL))
+        sent = server.requests[0]
+    assert sent["temperature"] == 0 and "seed" not in sent and "top_p" not in sent
+    assert attempt["sampling"] == {"temperature": 0.0, "top_p": None, "seed": None}
+
+
+def _recording_attempts(monkeypatch):
+    """Replace run_attempt with one that records (n, temperature, top_p, seed) and returns a canned record."""
+    seen = []
+
+    def run_attempt(*, op, n, temperature=0.0, top_p=None, seed=None, **kw):
+        seen.append((n, temperature, top_p, seed))
+        rec = canned(op, n)
+        rec["sampling"] = {"temperature": temperature, "top_p": top_p, "seed": seed}
+        return rec
+    monkeypatch.setattr(kp, "run_attempt", run_attempt)
+    return seen
+
+
+@pytest.mark.parametrize("flags,words", [
+    ({"temperature": "2.5"}, "between 0 and 2"),
+    ({"temperature": "-0.1"}, "between 0 and 2"),
+    ({"temperature": "warm"}, "not a number"),
+    ({"temperature": "nan"}, "between 0 and 2"),
+    ({"temperatures": "0,,1"}, "not a number"),
+    ({"temperatures": "0,3"}, "between 0 and 2"),
+    ({"temperatures": "0.5,0.5"}, "twice"),
+    ({"temperature": "0.5", "temperatures": "0,1"}, "--temperature or --temperatures"),
+    ({"top_p": "0"}, "top-p"),
+    ({"top_p": "1.5"}, "top-p"),
+    ({"top_p": "x"}, "top-p"),
+    ({"seed": "1.5"}, "--seed"),
+    ({"seed": "-3"}, "--seed"),
+], ids=lambda v: str(v) if isinstance(v, str) else "-".join(f"{k}={x}" for k, x in v.items()))
+def test_bad_sampling_flags_are_refused_before_anything_runs(tmp_path, fake_kenv, env_ready, monkeypatch, capsys,
+                                                             flags, words):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, **flags), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == kp.EXIT_REFUSED and seen == [] and words in err and "Traceback" not in err
+    assert not (tmp_path / "out").exists() and env_ready == []        # refused before the environment check
+
+
+def test_temperatures_run_n_attempts_each_with_seeds_base_plus_k_and_none_at_zero(tmp_path, fake_kenv, env_ready,
+                                                                                  monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=3, temperatures="0,0.7", seed="100", top_p="0.9"), env=fake_kenv,
+                   out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK
+    assert seen == [(1, 0.0, 0.9, None), (2, 0.0, 0.9, None), (3, 0.0, 0.9, None),
+                    (4, 0.7, 0.9, 104), (5, 0.7, 0.9, 105), (6, 0.7, 0.9, 106)]
+    header = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())["header"]
+    assert header["sampling"]["seed_base"] == 100 and header["sampling"]["seed_base_from"] == "--seed"
+    assert header["sampling"]["temperatures"] == [0.0, 0.7] and header["sampling"]["top_p"] == 0.9
+
+
+def test_without_a_seed_the_base_comes_from_the_probe_id_and_is_recorded(tmp_path, fake_kenv, env_ready,
+                                                                        monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    monkeypatch.setattr(kp, "new_probe_id", lambda: "20261016T000000Z-abcdef12")
+    code = kp.main(probe_args(tmp_path, attempts=2, temperature="1.0"), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK
+    base = kp.seed_base_from_probe_id("20261016T000000Z-abcdef12")
+    assert isinstance(base, int) and 0 <= base < 2 ** 31
+    assert seen == [(1, 1.0, None, base + 1), (2, 1.0, None, base + 2)]
+    out = tmp_path / "out"
+    header = json.loads((out / "kernel-probe-report.json").read_text())["header"]
+    assert header["sampling"]["seed_base"] == base and header["sampling"]["seed_base_from"] == "probe id"
+    assert f"--seed {base}" in (out / "kernel-probe-report.md").read_text()
+
+
+def test_the_default_is_one_greedy_group_with_no_seed(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=2), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and seen == [(1, 0.0, None, None), (2, 0.0, None, None)]
+
+
+def test_the_cli_parser_has_the_sampling_flags():
+    from orchard import cli
+    args = cli._parser().parse_args(["kernel-probe", "--op", "add", "--temperatures", "0,0.5", "--top-p", "0.9",
+                                     "--seed", "7"])
+    assert (args.temperatures, args.top_p, args.seed, args.temperature) == ("0,0.5", "0.9", "7", None)
+
+
+def _sampled(n, temperature, sha, op="silu_mul"):
+    a = _row_attempt(op=op, attempt=n, sampling={"temperature": temperature, "top_p": None,
+                                                  "seed": None if temperature == 0 else 100 + n})
+    a["provenance"] = {"kernel_sha256": sha}
+    return a
+
+
+def test_the_report_groups_attempts_by_temperature_and_counts_distinct_kernels(tmp_path):
+    attempts = [_sampled(1, 0.0, "a" * 64), _sampled(2, 0.0, "a" * 64), _sampled(3, 0.0, None),
+                _sampled(4, 0.7, "b" * 64), _sampled(5, 0.7, "c" * 64), _sampled(6, 0.7, "b" * 64)]
+    data = kp.write_report(tmp_path, attempts, {"probe_id": "t", "bars": {}, "hw": None, "ops": ["silu_mul"],
+                                                "sampling": {"temperatures": [0.0, 0.7], "top_p": None,
+                                                             "seed_base": 100, "seed_base_from": "--seed",
+                                                             "attempts_per_temperature": 3}})
+    md = (tmp_path / "kernel-probe-report.md").read_text()
+    zero, warm = md.split("### temperature 0.7")
+    assert "### temperature 0\n" in zero
+    assert "| 1 |" in zero and "| 3 |" in zero and "| 4 |" not in zero and "| 4 |" in warm and "| 1 |" not in warm
+    assert "distinct kernels: 1 of 2 attempts; 1 wrote no kernel" in zero
+    assert ("All 2 attempts that wrote a kernel produced the same kernel (1 wrote none): temperature 0 asks the "
+            "server for greedy decoding, so attempts at one prompt often give one sample.") in " ".join(zero.split())
+    assert "Raise --temperature to explore." in zero
+    assert "distinct kernels: 2 of 3 attempts" in warm and "produced the same kernel" not in warm
+    groups = {g["temperature"]: g for g in data["groups"]}
+    assert groups[0.0]["distinct_kernels"] == 1 and groups[0.0]["with_kernel"] == 2 and groups[0.0]["no_kernel"] == 1
+    assert groups[0.7]["distinct_kernels"] == 2 and groups[0.7]["no_kernel"] == 0
+    assert groups[0.0]["sampling"]["temperature"] == 0.0 and groups[0.7]["attempts"] == [4, 5, 6]
+
+
+@pytest.mark.parametrize("shas,warn", [(["a" * 64], False), (["a" * 64, "b" * 64], False),
+                                       (["a" * 64, "a" * 64, "a" * 64], True), ([None, None], False)],
+                         ids=["one", "two-distinct", "three-same", "none-written"])
+def test_the_same_kernel_warning_needs_more_than_one_attempt_with_a_kernel(tmp_path, shas, warn):
+    md_text = " ".join(_report_md(tmp_path, [_sampled(i + 1, 0.0, s) for i, s in enumerate(shas)]).split())
+    assert ("produced the same kernel" in md_text) is warn
+
+
+def test_the_header_says_greedy_attempts_often_repeat_and_are_not_guaranteed_identical(tmp_path):
+    """W1. The live batch gave 5 distinct kernels in 5 attempts of silu_mul at temperature 0, so the report may not
+    call greedy attempts repeatable; it says they often repeat and are not guaranteed to be identical."""
+    flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.0, "a" * 64)]).split())
+    assert ("Temperature 0 asks the server for greedy decoding. Attempts then often repeat each other (the report "
+            "counts distinct kernels) but are not guaranteed to be identical.") in flat
+    assert ("Attempts at temperature above 0 with different seeds sample independently, if the server honours the "
+            "temperature.") in flat
+    assert "repeatable" not in flat and "independent draws" not in flat
+
+
+def test_no_text_calls_greedy_attempts_repeatable():
+    """W1. The help, the README, the module docstring and parse_sampling make no claim that a kernel is reproducible."""
+    from orchard import cli
+    help_text = " ".join(cli._parser()._subparsers._group_actions[0].choices["kernel-probe"].format_help().split())
+    readme = " ".join((REPO / "README.md").read_text().split())
+    probe_part = readme[readme.index("tt-orchard kernel-probe"):][:12000]
+    for name, text in (("help", help_text), ("README", probe_part), ("module", " ".join(kp.__doc__.split())),
+                       ("parse_sampling", " ".join(kp.parse_sampling.__doc__.split()))):
+        assert "repeatable" not in text and "reproducib" not in text, name
+    assert "not guaranteed to be identical" in probe_part
+
+
+def test_the_same_kernel_warning_above_temperature_0_names_the_likely_causes(tmp_path):
+    flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.7, "a" * 64), _sampled(2, 0.7, "a" * 64)]).split())
+    assert ("All 2 attempts that wrote a kernel produced the same kernel at temperature 0.7: the temperature may be "
+            "too low for this prompt, or the server may be ignoring it.") in flat
+
+
+SEED_MAX = 2 ** 63 - 1
+
+
+@pytest.mark.parametrize("flags,words", [
+    ({"seed": str(SEED_MAX), "attempts": 1}, str(SEED_MAX)),
+    ({"seed": str(SEED_MAX - 4), "attempts": 5}, "2**63 - 1"),
+    ({"seed": True}, "--seed"),
+    ({"temperature": "inf"}, "between 0 and 2"),
+    ({"temperature": "-inf"}, "between 0 and 2"),
+    ({"temperatures": ",".join(str(i / 10) for i in range(11))}, "at most 10 temperatures (got 11)"),
+    ({"attempts": 201}, "at most 200 attempts in total (201)"),
+    ({"attempts": 101, "temperatures": "0,1"}, "at most 200 attempts in total (101 x 2 = 202)"),
+], ids=["seed-max-1", "seed-max-5", "seed-bool", "inf", "minus-inf", "eleven-temps", "201", "101x2"])
+def test_seeds_out_of_range_and_oversized_plans_are_refused(tmp_path, fake_kenv, env_ready, monkeypatch, capsys,
+                                                            flags, words):
+    """W2. A seed whose last attempt would pass 2**63 - 1 would fail on every request at run time; the plan is capped
+    at 10 temperatures and 200 attempts in total. Each is refused with exit 2 before anything runs."""
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, **flags), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == kp.EXIT_REFUSED and seen == [] and words in err, err
+    assert not (tmp_path / "out").exists()
+
+
+def test_the_largest_seed_whose_last_attempt_fits_is_accepted(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=5, temperature="0.5", seed=str(SEED_MAX - 5)), env=fake_kenv,
+                   out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and seen[-1][3] == SEED_MAX
+
+
+def test_ten_temperatures_and_200_attempts_are_accepted(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=20, temperatures=",".join(str(i / 10) for i in range(10))),
+                   env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and len(seen) == 200
+
+
+def test_a_groups_sampling_lists_every_seed_and_the_base(tmp_path):
+    """W4. The group's sampling is the group's, with each attempt's seed; it is not the first attempt's sampling."""
+    attempts = [_sampled(1, 0.0, "a" * 64), _sampled(2, 0.0, "b" * 64), _sampled(3, 0.7, "c" * 64),
+                _sampled(4, 0.7, "d" * 64)]
+    data = kp.write_report(tmp_path, attempts, {"probe_id": "t", "bars": {}, "hw": None, "ops": ["silu_mul"],
+                                                "sampling": {"temperatures": [0.0, 0.7], "top_p": None, "seed_base": 100,
+                                                             "seed_base_from": "--seed",
+                                                             "attempts_per_temperature": 2}})
+    groups = {g["temperature"]: g for g in data["groups"]}
+    assert groups[0.0]["sampling"] == {"temperature": 0.0, "top_p": None, "seed_base": 100, "seeds": [None, None]}
+    assert groups[0.7]["sampling"] == {"temperature": 0.7, "top_p": None, "seed_base": 100, "seeds": [103, 104]}
+
+
+def test_the_start_line_says_attempts_per_temperature_and_the_total(tmp_path, fake_kenv, env_ready, monkeypatch):
+    """W5."""
+    _recording_attempts(monkeypatch)
+    out = io.StringIO()
+    kp.main(probe_args(tmp_path, attempts=5, temperatures="0,0.7"), env=fake_kenv, out=out, probe=lambda e, m: True,
+            run_watched_fn=no_run)
+    assert "5 attempts per temperature (0, 0.7): 10 in total" in out.getvalue()
+
+
+def test_a_greedy_only_run_gives_no_seed_formula_or_seed_advice(tmp_path):
+    """W6. No attempt of a greedy-only run sends a seed, so the header says only that."""
+    header = {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"],
+              "sampling": {"temperatures": [0.0], "top_p": None, "seed_base": 1234, "seed_base_from": "probe id",
+                           "attempts_per_temperature": 3}}
+    kp.write_report(tmp_path, [_sampled(1, 0.0, "a" * 64, op="add")], header)
+    flat = " ".join((tmp_path / "kernel-probe-report.md").read_text().split())
+    assert "No seed is sent at temperature 0." in flat
+    assert "--seed" not in flat and "1234" not in flat and "+ k" not in flat
+
+
+def test_the_same_kernel_warning_names_no_missing_kernels_when_every_attempt_wrote_one(tmp_path):
+    """W7."""
+    flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.0, "a" * 64), _sampled(2, 0.0, "a" * 64)]).split())
+    assert "All 2 attempts that wrote a kernel produced the same kernel: temperature 0" in flat and "wrote none" not in flat
+
+
+def test_minus_zero_is_temperature_0(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    """W8. -0 is read as 0: it prints as 0 and is a duplicate of 0."""
+    seen = _recording_attempts(monkeypatch)
+    out = io.StringIO()
+    code = kp.main(probe_args(tmp_path, attempts=1, temperature="-0"), env=fake_kenv, out=out,
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert code == kp.EXIT_OK and "temperature -0" not in out.getvalue() and "temperature -0" not in md
+    assert seen == [(1, 0.0, None, None)] and str(seen[0][1]) == "0.0"
+    code = kp.main(probe_args(tmp_path / "b", attempts=1, temperatures="-0,0"), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_REFUSED and "twice" in capsys.readouterr().err
+
+
+def test_phase_hw_with_two_temperatures_runs_one_smoke_test_and_every_sim_pass(tmp_path, fake_kenv, env_ready):
+    """W11. Attempts 1 and 2 run at temperature 0, 3 and 4 at 0.7; attempts 1 and 3 write the good kernel. One smoke
+    test runs, then a hardware run for each simulator pass, in both groups."""
+    good = (KERNELS / "add_good.py").read_text()
+    script = scripted(call("write_file", path="kernel.py", content=good), final("done"), final("done"),
+                      call("write_file", path="kernel.py", content=good), final("done"), final("done"))
+    gozer_calls = []
+    with FakeModel(script) as server:
+        code = kp.main(probe_args(tmp_path, attempts=2, temperatures="0,0.7", endpoint=server.endpoint, phase="hw"),
+                       env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=passing_check(gozer_calls))
+    assert code == 0
+    smoke = [c for c in gozer_calls if "--out" not in c]
+    kernels = [c for c in gozer_calls if "--out" in c]
+    assert len(smoke) == 1 and len(kernels) == 2
+    assert gozer_calls.index(smoke[0]) == 0                       # the smoke test comes first
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    by_n = {a["attempt"]: a for a in data["attempts"]}
+    assert by_n[1]["hw"]["passed"] is True and by_n[3]["hw"]["passed"] is True
+    assert by_n[2]["hw"] is None and by_n[4]["hw"] is None
+    assert by_n[3]["sampling"]["temperature"] == 0.7

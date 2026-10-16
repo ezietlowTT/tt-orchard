@@ -168,3 +168,105 @@ print(json.dumps({"ops": [o["op"] for o in ops], "py": py, "hops": hops}))
     assert got["ops"] == ["aten.add.Tensor"]
     assert got["py"] == {"<built-in function getitem>": 2}
     assert got["hops"] == {"wrap_with_set_grad_enabled": 1}
+
+
+@needs_stack
+@pytest.mark.parametrize("name", ["set_seed", "pipeline", "AutoTokenizer"])
+def test_a_config_naming_a_callable_that_is_not_a_model_class_is_skipped(tmp_path, name):
+    """I3. config.json comes from the Hub, so its `architectures` entry must not choose which public callable of
+    transformers runs. A function (set_seed, pipeline) and a class that is not a model (AutoTokenizer) are skipped."""
+    done, raw = run_template(tmp_path, {**QWEN3_TINY, "architectures": [name]})
+    assert done.returncode == 0, done.stderr
+    assert "not a transformers model class" in raw["skipped"] and name in raw["skipped"] and "ops" not in raw
+
+
+@needs_stack
+def test_a_callable_named_by_the_config_is_never_called(tmp_path):
+    """I3. A recorder planted in the transformers namespace stands in for any public callable. It must not run, and the
+    class given with --class goes through the same rule."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({**QWEN3_TINY, "architectures": ["OrchardPlantedCallable"]}))
+    marker = tmp_path / "called"
+    code = r'''
+import importlib.util, sys, transformers
+marker = sys.argv[2]
+def planted(*a, **k):
+    open(marker, "w").write("called")
+transformers.OrchardPlantedCallable = planted
+spec = importlib.util.spec_from_file_location("t", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+rc1 = m.main(["--model-dir", sys.argv[3], "--out", sys.argv[4]])
+rc2 = m.main(["--model-dir", sys.argv[3], "--out", sys.argv[4], "--class", "OrchardPlantedCallable"])
+print(rc1, rc2)
+'''
+    out = tmp_path / "raw.json"
+    done = subprocess.run([PY, "-c", code, str(TEMPLATE), str(marker), str(d), str(out)], capture_output=True,
+                          text=True, timeout=300)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split()[-2:] == ["0", "0"]
+    assert not marker.exists()
+    assert "not a transformers model class" in json.loads(out.read_text())["skipped"]
+
+
+def _fake_stack(tmp_path):
+    """A stand-in torch and transformers on PYTHONPATH. The transformers stand-in raises on any attribute lookup it
+    does not define, as the real lazy module does when a backend import fails. Nothing real is imported."""
+    root = tmp_path / "fake-stack"
+    (root / "torch").mkdir(parents=True)
+    (root / "torch" / "__init__.py").write_text("__version__ = '0.0-fake'\n")
+    (root / "transformers").mkdir()
+    (root / "transformers" / "__init__.py").write_text(
+        "__version__ = '0.0-fake'\n"
+        "class PreTrainedModel:\n    pass\n"
+        "def __getattr__(name):\n"
+        "    raise RuntimeError(f'Failed to import transformers.models.{name} because of a backend error')\n")
+    return root
+
+
+@pytest.mark.parametrize("arch,words", [("BrokenForCausalLM", "RuntimeError"), (5, "not a string"),
+                                        ({"a": 1}, "not a string")])
+def test_a_class_lookup_that_raises_or_a_name_that_is_not_a_string_is_skipped(tmp_path, arch, words):
+    """S5. The lookup in transformers can raise (a lazy module whose backend import fails), and architectures[0] can
+    be any JSON value. Either ends in the skipped form, exit 0, with a message naming the problem."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({**QWEN3_TINY, "architectures": [arch]}))
+    out = tmp_path / "raw.json"
+    env = dict(os.environ, PYTHONPATH=str(_fake_stack(tmp_path)))
+    done = subprocess.run([sys.executable, str(TEMPLATE), "--model-dir", str(d), "--out", str(out)],
+                          capture_output=True, text=True, timeout=60, env=env)
+    assert done.returncode == 0, done.stderr
+    raw = json.loads(out.read_text())
+    assert words in raw["skipped"] and "ops" not in raw, raw["skipped"]
+
+
+def _run_with_fake_stack(tmp_path, config, init=None):
+    d = tmp_path / "model"
+    d.mkdir(exist_ok=True)
+    (d / "config.json").write_text(json.dumps(config))
+    root = _fake_stack(tmp_path)
+    if init is not None:
+        (root / "transformers" / "__init__.py").write_text(init)
+    out = tmp_path / "raw.json"
+    done = subprocess.run([sys.executable, str(TEMPLATE), "--model-dir", str(d), "--out", str(out)],
+                          capture_output=True, text=True, timeout=60, env=dict(os.environ, PYTHONPATH=str(root)))
+    return done, (json.loads(out.read_text()) if out.exists() else None)
+
+
+@pytest.mark.parametrize("archs", [5, {"a": 1}, "Qwen3ForCausalLM"], ids=["int", "dict", "string"])
+def test_architectures_that_is_not_a_list_is_skipped(tmp_path, archs):
+    """M5. `architectures` must be a list; anything else ends in the skipped form, exit 0, with no traceback."""
+    done, raw = _run_with_fake_stack(tmp_path, {**QWEN3_TINY, "architectures": archs})
+    assert done.returncode == 0 and "Traceback" not in done.stderr, done.stderr
+    assert "architectures" in raw["skipped"] and "not a list" in raw["skipped"]
+
+
+def test_a_failure_to_read_pretrainedmodel_is_skipped(tmp_path):
+    """M5. The class lookup succeeds but reading transformers.PreTrainedModel raises (the lazy module again)."""
+    init = ("__version__ = '0.0-fake'\n"
+            "class GoodForCausalLM:\n    pass\n"
+            "def __getattr__(name):\n"
+            "    raise RuntimeError(f'Failed to import {name}')\n")
+    done, raw = _run_with_fake_stack(tmp_path, {**QWEN3_TINY, "architectures": ["GoodForCausalLM"]}, init=init)
+    assert done.returncode == 0 and "Traceback" not in done.stderr, done.stderr
+    assert "RuntimeError" in raw["skipped"] and "PreTrainedModel" in raw["skipped"]

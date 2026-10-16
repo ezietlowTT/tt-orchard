@@ -1099,23 +1099,37 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   job. For a flag you leave out it uses the tier stage 2 runs on, from the tier config that `bringup.toml`
   names. With a flag missing and no config it refuses and names the two flags. A URL is printed without any
   `user:password@` part.
-- It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`.
+- It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`, and when
+  another probe is using the same `--out` directory (it holds a lock on `probe.lock`). The lock goes away when its
+  probe ends, however it ends; a `probe.lock` file left after a SIGKILL is harmless.
 - The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
   `kernel.py` made as a regular file of at most 256 KiB, under `<out>/.verdict/<op>-<n>/`. The agent's own `check.json`
-  is never believed; when it disagrees, the report marks it `agent_check_untrusted`. This boundary is best effort
-  against shortcuts and accidents.
-- The check needs more than PCC. A static gate on `kernel.py` runs first (imports limited to `ttl`, `ttnn` and `math`, with `__future__`, `typing` and aliases of the three
-  accepted; no `import torch` or host code; `OPERATION` a top-level `def` decorated with `@ttl.operation`) and reports every violation
-  with a remedy. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
+  is never believed; when it disagrees, the report marks it `agent_check_untrusted`. Before that re-check, the probe
+  stops every process the agent left running (found by the `ORCHARD_RUN_DIR` value each agent process carries), and
+  the report counts them. This boundary is best effort against shortcuts and accidents.
+- The check needs more than PCC. A static gate on `kernel.py` runs first and reports every violation with a remedy.
+  Imports are limited to `ttl`, `ttnn` and `math` (aliases of the three accepted), plus a listed set of names from
+  `typing` (such as `Any` and `Optional`) and from `__future__` (such as `annotations`). Forbidden names such as
+  `open`, `os` and `sys` are refused as a name, an attribute or an import, also under an alias. There is no
+  `import torch` or host code, and `OPERATION` is a top-level `def` decorated with `@ttl.operation`. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
   every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
   `harness_error` (a fault in the templates or the environment, including the setup phase).
 - The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
-  set). Attempts are independent draws, so the report gives counts and no rates.
+  set). The report gives counts and no rates. Temperature 0 (the default) asks the server for greedy decoding.
+  Attempts then often repeat each other but are not guaranteed to be identical, so for each op and temperature the
+  report counts the distinct kernels and warns when every attempt that wrote a kernel wrote the same one.
 - `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
   runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
   The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress
-  is stopped by the stall watcher (SIGTERM to the whole process group first, so `gozer run` can release its lease, then
-  SIGKILL after a grace period), the probe stops, and the command exits 5 with the report written for what ran.
+  is stopped by the stall watcher (SIGTERM to the whole process group first, then SIGKILL after a grace period of
+  120 s), the probe stops, and the command exits 5 with the report written for what ran. The grace covers gozer's
+  lease release, whose chip reset takes about 42 s, so a watcher stop normally ends with the lease released. Only
+  when gozer itself had to be killed can the lease be left under a dead process: after the grace, or at once when a
+  second interrupt (another Ctrl-C or SIGTERM) arrives during the grace. Then look with `gozer status` and use the
+  gozer-gatekeeper skill. The watcher's limits on hardware (60 s with no output and no
+  CPU use, 20 repeats of one line) are not measured. For the smoke test and each hardware run the report gives the
+  longest quiet stretch and the longest repeat the watcher saw, and a stopped run's first line names the rule
+  that stopped it (`backstop`, `stalled` or `repeating`).
 - Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
   attempts' results.
 - A run that stops early still writes its report from the attempts that finished, with the reason. An exception
@@ -1124,7 +1138,17 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
 Flags:
 
 - `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`). Required.
-- `--attempts`: independent attempts (default 5).
+- `--attempts`: attempts per temperature, each a fresh conversation (default 5).
+- `--temperature`: the sampling temperature, 0 to 2 (default 0). Temperature 0 asks the server for greedy decoding.
+  Attempts then often repeat each other but are not guaranteed to be identical (the live probe at temperature 0
+  gave 1 distinct kernel in 5 attempts of `linear_scan` and 5 in 5 of `silu_mul`). Raise it to explore wild or
+  ingenious kernels.
+- `--temperatures`: several temperatures, comma-separated (for example `0,0.5,1.0`); `--attempts` runs at each, so
+  `--attempts 3 --temperatures 0,0.7` runs 6. Not with `--temperature`.
+- `--top-p`: nucleus sampling, above 0 and at most 1 (default: not sent).
+- `--seed`: a base seed. Above temperature 0, attempt k sends the base plus k; without `--seed` the base comes from
+  the probe id and the report records it. A seed makes the request the same on a rerun; whether the server honours
+  it is not verified, and no kernel is promised to come out the same.
 - `--phase`: `sim` (default) for the simulator only; `hw` to add the smoke test and the one-chip runs.
 - `--out`: output directory (default `./kernel-probe`).
 - `--endpoint`: the coder's OpenAI-compatible URL, ending in `/v1` (default: from the tier config).

@@ -1238,3 +1238,44 @@ Not done:
 - The `generic_op` export route is not built. The full-port stages are untouched.
 - The tt-lang diagnostics patch is local and has not been reported upstream, by decision.
 - Deferred minors for each task are in the ledger.
+
+## 2026-10-16: fixes after the final review of the kernel attempt (branch `ka-final-fixes`)
+Prompt (controller): fix the final whole-branch review's findings (one Critical, eight Important, two minor), then a re-review's
+regression and its smaller items, test first, one commit per item, with a mutation per new guard. Worked in its own worktree while a
+live probe batch ran the shipped templates from `kernel-attempt`. Reports: `.superpowers/sdd/2026-10-15-kernel-attempt/final-fixes-report.md`.
+Key decisions (spec section 11, items 17 to 25):
+- gozer gets 120 s after the watcher's SIGTERM, because its lease release runs a chip reset of about 42 s. The first 5 s grace
+  killed gozer during the reset.
+- The probe stops stray agent processes before any verdict: same uid, `ORCHARD_RUN_DIR` exactly the attempt directory, SIGTERM,
+  2 s, a second scan, SIGKILL. `stopped` means the process is gone. It cannot see a process whose /proc environ no longer
+  holds the value (an exec with a new environment; `clearenv()` alone does not change it) or a non-dumpable process.
+- The report gives the watcher's longest quiet stretch and longest repeat for each hardware run, so its limits can be set from a
+  measurement; it also has a status column and notes on `add` and the simulator's f32.
+- The static gate allows only listed names from `typing` and `__future__` and refuses forbidden names as attributes and imports.
+  `from ttnn import shutil as s` still passes: the gate cannot tell a module from a name without importing ttnn.
+- `opinventory.main` defaults `--ttnn-python` under the passwd home, because in an agent shell HOME points inside the run directory.
+- The ops-inventory template builds only a `PreTrainedModel` subclass.
+- kernel_check runs the simulator in its own session with `PR_SET_PDEATHSIG` and a SIGTERM handler. The first version of this fix
+  (session only) orphaned the simulator when the watcher stopped kernel_check; the re-review found it.
+- `kernel-probe` holds an flock on `probe.lock` in its output directory. A first version (a pid file with a staleness
+  check) let two probes run at once after both judged a stale lock dead; the re-review found it.
+Notable moment: an I7 test written against the old code had a child print without end under a 60 s backstop. It wrote a 48 GB log
+under `/tmp/pytest-of-ttuser` and took the root disk to 97% while the live probe ran. I deleted it at once. Tests that make large
+output now run the child under `RLIMIT_FSIZE` (16 MiB) and write a bounded amount.
+
+## 2026-10-16: kernel probe sampling (branch `ka-final-fixes`, round 3 of the fix wave)
+Prompt (operator, through the controller): "as much as we can make determinism happen when it is useful, we should do it. but we
+should also make it easy to adjust temperature so wild, zany or ingenious results can be found too".
+- Live finding at the code before this change: every request sent `temperature: 0` (greedy decoding asked for), and attempts
+  at one prompt were often the same sample. `add` gave 1 distinct kernel in 3 attempts, `linear_scan` 1 in 5 (identical: 9 turns
+  and 198 s each), `rmsnorm` 3 in 5, and `silu_mul` 5 different kernels in 5 attempts, 26 to 37 turns each; why `silu_mul`
+  diverged was not measured. The report's "independent draws" sentence was wrong, and so was calling greedy attempts
+  repeatable: repeats are common at temperature 0 and not guaranteed.
+- `AgentStep` takes temperature, top_p and seed; its default request is byte for byte the old one. `kernel-probe` takes
+  `--temperature`, `--temperatures`, `--top-p` and `--seed`; greedy stays the default. No seed at temperature 0; above it,
+  attempt k sends base + k, and a base derived from the probe id is recorded so a run can be repeated with `--seed` (if the
+  server honours seeds, which is not verified).
+- The report splits each op by temperature and counts distinct kernels, with a warning when all attempts wrote one kernel.
+- Same round: kernel_check now exits by the signal that stopped it (it used to exit as SIGINT for every signal), and an
+  interrupt can no longer be lost inside the sweep's SIGKILL pass. Spec section 11, items 26 and 27.
+

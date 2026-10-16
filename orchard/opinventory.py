@@ -294,6 +294,16 @@ def record_in_delta(stage_dir) -> bool:
     return True
 
 
+def _real_home() -> Path:
+    """The operator's home from the passwd entry. `tt-orchard inventory` uses $HOME, which is the same home when the
+    operator runs it; the stage 0 agent runs this module in a shell whose HOME points inside the run directory."""
+    try:
+        import pwd
+        return Path(pwd.getpwuid(os.getuid()).pw_dir)
+    except (ImportError, KeyError):
+        return Path.home()
+
+
 def main(argv=None) -> int:
     """`python3 -m orchard.opinventory`: run the inventory into a stage directory, then record it in delta.json.
     Exit 0 or 2 as run_inventory does. A missing delta.json is not an error here: the inventory files are still written."""
@@ -301,7 +311,9 @@ def main(argv=None) -> int:
     ap.add_argument("--model-dir", required=True)
     ap.add_argument("--out", required=True, help="the stage directory")
     ap.add_argument("--python", required=True, help="interpreter with torch and transformers")
-    ap.add_argument("--ttnn-python", default=None)
+    ap.add_argument("--ttnn-python", default=str(_real_home() / ".tenstorrent-venv" / "bin" / "python"),
+                    help="the shared venv's interpreter, asked only for the installed ttnn's version "
+                         "(default ~/.tenstorrent-venv/bin/python under the operator's home)")
     ap.add_argument("--layers", type=int, default=2)
     ap.add_argument("--seq", type=int, default=8)
     ap.add_argument("--class", dest="cls", default=None)

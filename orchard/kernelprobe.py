@@ -29,20 +29,28 @@ convenience copy of attempt.json is written into the attempt directory after wha
 so the probe never writes through a link the agent left.
 
 These measures stop shortcuts and accidents: a model that edits its check, plants a link, or leaves a file in the
-way. They do not stop an agent determined to attack the operator's account. Agent shells run as the operator, so a
-background process the agent started can outlive its step and write anywhere the operator can, including the
-`.verdict` directory. The static gate and this boundary are best effort.
+way. They do not stop an agent determined to attack the operator's account. Agent shells run as the operator. A
+process the agent starts in the background carries ORCHARD_RUN_DIR=<attempt directory>; when the agent step ends
+(also after a crash or an interrupt) and before any verdict, `sweep_strays` stops every process of the operator's
+that carries that exact value, and the attempt record lists them under `swept`. A process whose /proc environ no
+longer holds the value (an exec with a new environment, or a program that overwrote that memory) escapes the sweep
+and can write anywhere the operator can, including the `.verdict` directory. The static gate and this boundary are
+best effort.
 
-The budget (BUDGET) and the watchdog's detectors bound each attempt. Attempts are independent draws, and the report
-gives counts with no rates.
+The budget (BUDGET) and the watchdog's detectors bound each attempt. Temperature 0 (the default) asks the server for
+greedy decoding. Attempts then often repeat each other but are not guaranteed to be identical, so the report counts
+the distinct kernels per op and temperature; it gives counts with no rates.
 
 `main` is the command `tt-orchard kernel-probe`. It starts no model server: the coder must already answer at its
 endpoint (starting it is `tt-orchard bringup`'s job), and the simulator environment must pass
 `tt-orchard kernel-env --check`. Exit 0 means a report was written, whatever the attempts' results; 2 is a refusal
-before anything ran; 5 means a hardware run hung, and the report covers what ran before it.
+before anything ran; 3 means an attempt or the hardware phase had a crash; 4 means an interrupt (Ctrl-C or SIGTERM)
+stopped the run; 5 means a hardware run hung. With 3, 4 and 5 the report covers what ran before the stop.
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -73,6 +81,16 @@ OPS = defaults.KERNEL_PROBE_OPS
 # Provisional: none of these has been measured (spec section 5.3).
 BUDGET = {"max_turns": 40, "wall_s": 1800.0, "sim_timeout_s": 300.0, "hw_backstop_s": 600.0}
 GOZER_WHO = "claude:orchard-kernel-probe"
+# How long a `gozer run` gets after the watcher's SIGTERM before the SIGKILL. gozer forwards the SIGTERM to its child,
+# waits for it, and then releases its lease in a `finally`; the release resets the chip, measured at 41.7 s on this
+# box, and gozer also scans /proc and revalidates the lease. A grace shorter than that kills gozer during the reset and
+# leaves the lease under a dead pid. The watcher stops waiting as soon as the group is gone, so the normal path does
+# not wait out the whole grace.
+GOZER_TERM_GRACE_S = 120.0
+# The stall watcher's limits for the smoke test and each hardware run. Not measured: the report gives the longest
+# quiet stretch and the longest repeat the watcher saw on each run, so these can be set from a measurement.
+HW_QUIET_S = 60.0
+HW_REPEAT_LINES = 20
 AGENT = "kernel-probe"
 # One shell command of the agent may run this long: one simulator check plus a margin. The wall budget is checked
 # between turns, so an attempt can overrun it by up to this much.
@@ -345,10 +363,12 @@ def set_measures(sets: list) -> dict:
             "rel_l2_max": max(rel) if rel else None}
 
 
-def provenance(*, kernel_sha256, tt_lang, coder_model, probe_id, simulator_pcc_min, hardware_pcc_min=None) -> dict:
-    """The provenance block of a probe attempt (spec section 6)."""
+def provenance(*, kernel_sha256, tt_lang, coder_model, probe_id, simulator_pcc_min, hardware_pcc_min=None,
+               sampling: dict | None = None) -> dict:
+    """The provenance block of a probe attempt (spec section 6), with the sampling the coder was asked for."""
     return {"origin": "kernel", "kernel_sha256": kernel_sha256, "tt_lang": tt_lang, "coder_model": coder_model,
-            "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min}
+            "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min,
+            "sampling": sampling}
 
 
 def _shipped_hashes(op: str) -> dict:
@@ -474,6 +494,181 @@ def load_attempts(probe_dir, *, ops, probe_id) -> tuple[list[dict], int]:
     return sorted(out, key=lambda a: (order[a["op"]], a["attempt"])), ignored
 
 
+# ---- stray agent processes --------------------------------------------------------------------------------------
+#
+# An agent's shell command can start a process in the background and exit. spawn_checked stops a shell's session only
+# on a timeout, so such a process would keep running as the operator through the verdict and the hardware phase. Every
+# agent process carries ORCHARD_RUN_DIR=<attempt directory> (agent_env), so the probe finds them by that value and stops
+# them right after the agent step ends, before any verdict.
+
+SWEEP_GRACE_S = 2.0          # how long the strays get after SIGTERM before the SIGKILL
+SWEEP_POLL_S = 0.05
+
+
+def _run_dir_entry(run_dir) -> bytes:
+    return b"ORCHARD_RUN_DIR=" + os.fsencode(str(Path(run_dir).resolve()))
+
+
+def _environ_has(proc_root: str, pid: int, entry: bytes) -> bool:
+    """Whether /proc/<pid>/environ holds exactly `entry` as one of its variables. False for a process that has ended,
+    a zombie (its environ reads empty) or one whose environ cannot be read."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "environ"), "rb") as f:
+            return entry in f.read().split(b"\0")
+    except OSError:
+        return False
+
+
+def scan_strays(run_dir, *, proc_root: str = "/proc", uid: int | None = None) -> list[int]:
+    """The pids of the processes owned by `uid` (default: ours) whose environment has ORCHARD_RUN_DIR equal to the
+    resolved `run_dir`. The comparison is exact, so attempt-1 does not match attempt-10. An entry that cannot be read
+    (the process ended during the scan, or it belongs to someone else) is skipped."""
+    uid = os.getuid() if uid is None else uid
+    entry = _run_dir_entry(run_dir)
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            if os.stat(os.path.join(proc_root, name)).st_uid != uid:
+                continue
+        except OSError:
+            continue
+        if _environ_has(proc_root, int(name), entry):
+            found.append(int(name))
+    return sorted(found)
+
+
+def _protected_pids(proc_root: str = "/proc") -> set[int]:
+    """Our own pid, our parent's, every further ancestor that /proc shows, and 0 and 1. None of them is signalled."""
+    out = {0, 1, os.getpid(), os.getppid()}
+    pid = os.getppid()
+    for _ in range(4096):                                # a bound in case /proc shows a loop
+        try:
+            with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            pid = int(text[text.rfind(")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        if pid in out:
+            break
+        out.add(pid)
+    return out
+
+
+def _cmdline(proc_root: str, pid: int) -> str:
+    try:
+        with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
+            return f.read(4096).replace(b"\0", b" ").decode("utf-8", errors="replace").strip()[:120]
+    except OSError:
+        return ""
+
+
+def _proc_state(proc_root: str, pid: int) -> tuple[str, int] | None:
+    """(state letter, start time in clock ticks) of a process from /proc/<pid>/stat, or None when it does not exist."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8", errors="replace") as f:
+            text = f.read()
+        rest = text[text.rfind(")") + 2:].split()
+        return rest[0], int(rest[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def _gone(proc_root: str, pid: int, start: int | None) -> bool:
+    """True when the process no longer runs: no /proc entry, a zombie, or a different process under the same pid
+    (another start time)."""
+    st = _proc_state(proc_root, pid)
+    if st is None or st[0] == "Z":
+        return True
+    return start is not None and st[1] != start
+
+
+def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.killpg, grace_s: float = SWEEP_GRACE_S,
+                 clock=time.monotonic, sleep=time.sleep) -> list[dict]:
+    """Stop every process that carries this attempt's ORCHARD_RUN_DIR: SIGTERM, up to `grace_s` for them to go, then a
+    second scan and SIGKILL for everything it finds, so a process a stray started during the grace is caught too.
+    Returns [{"pid", "cmdline", "stopped"}]. `stopped` is True only when the process is gone afterwards (no /proc
+    entry, a zombie, or another process under the pid); a process that still runs, for example under a new program
+    without the variable, is recorded with `stopped` False. Never raises an Exception. An interrupt at any point after
+    the first scan (during the SIGTERM pass or the grace) still gets the SIGKILL pass before it goes on.
+
+    Our own pid and our ancestors are never signalled. Each signal goes to the pid itself (os.kill), except for a
+    process that leads its own group, whose group is signalled so its children go too; a group is never signalled when
+    its id is 1 or less or is our own group (the stallwatch guards). Before each signal the process's environment is
+    read again, so a pid that ended and was reused by another process in between is not signalled.
+
+    What it cannot see: a process whose /proc/<pid>/environ no longer holds the value (an exec with a new environment,
+    or a program that overwrote that memory; clearenv() alone does not change it), and a process whose /proc entry
+    cannot be read (a non-dumpable process, for example one that ran a setuid program, has a root-owned entry)."""
+    records: list[dict] = []
+    starts: dict[int, int | None] = {}
+    try:
+        protected = _protected_pids(proc_root)
+        entry = _run_dir_entry(run_dir)
+
+        def found() -> list[int]:
+            return [pid for pid in scan_strays(run_dir, proc_root=proc_root)
+                    if isinstance(pid, int) and pid > 1 and pid not in protected]
+
+        def note(pids) -> None:
+            for pid in pids:
+                if pid not in starts:
+                    st = _proc_state(proc_root, pid)
+                    starts[pid] = st[1] if st else None
+                    records.append({"pid": pid, "cmdline": _cmdline(proc_root, pid), "stopped": False})
+
+        def send(pid: int, sig) -> None:
+            if not _environ_has(proc_root, pid, entry):
+                return                                   # gone, a zombie, or no longer one of ours
+            try:
+                pgid = os.getpgid(pid)
+                if pgid == pid and pgid > 1 and pgid != os.getpgrp() and pgid not in protected:
+                    killpg(pgid, sig)
+                else:
+                    kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        def kill_pass() -> None:
+            """The second scan and the SIGKILLs. Every step has its own guard, so this never raises: an error here
+            cannot replace an interrupt that is on its way out."""
+            try:
+                note(found())                            # a second scan: new processes started during the grace
+            except Exception:
+                pass                                     # the processes already known still get their SIGKILL
+            for r in records:
+                try:
+                    send(r["pid"], signal.SIGKILL)
+                except Exception:
+                    pass
+
+        targets = found()
+        note(targets)
+        try:
+            for pid in targets:
+                send(pid, signal.SIGTERM)
+            deadline = clock() + grace_s
+            while clock() < deadline and any(_environ_has(proc_root, pid, entry) for pid in targets):
+                sleep(SWEEP_POLL_S)
+        except BaseException:
+            kill_pass()                                  # never raises; an interrupt must not skip the SIGKILL
+            raise
+        kill_pass()
+        deadline = clock() + 1.0                         # a killed process leaves /proc within moments
+        while clock() < deadline and not all(_gone(proc_root, r["pid"], starts.get(r["pid"])) for r in records):
+            sleep(SWEEP_POLL_S)
+        for r in records:
+            r["stopped"] = _gone(proc_root, r["pid"], starts.get(r["pid"]))
+    except Exception:
+        pass
+    return records
+
+
 def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
     """The supervisor's loop detectors with their default thresholds, answering through the probe's control object.
     NoNewEvidence is left out: an attempt has no evidence directory the agent is asked to fill, and the wall-clock
@@ -484,8 +679,11 @@ def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
 
 def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, max_turns=BUDGET["max_turns"],
                 wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
-                tt_lang: dict | None = None) -> dict:
-    """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json."""
+                tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
+                seed: int | None = None) -> dict:
+    """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
+    The sampling (temperature, top_p, seed) goes to the coder and into the record as `sampling`."""
+    sampling = {"temperature": temperature, "top_p": top_p, "seed": seed}
     adir = Path(probe_dir) / op / f"attempt-{n}"
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
     prepare_attempt(adir, op=op, env=env, tt_lang=facts)
@@ -497,12 +695,15 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         step = AgentStep(agent=AGENT, endpoint=endpoint, model=model, tools=attempt_tools(adir), ledger=ledger,
                          stage=0, phase="probe", feed=dog.feed, control=control, run_dir=adir,
                          evidence_dir=adir / "evidence", log_path=adir / "log" / "probe-00001.jsonl", http=http,
-                         clock=clock, guard=RetryGuard(), max_turns=max_turns)
+                         clock=clock, guard=RetryGuard(), max_turns=max_turns, temperature=temperature, top_p=top_p,
+                         seed=seed)
         user = (f"Write kernel.py for the op `{op}` in kernel_spec.json. "
                 "Start by reading kernel_spec.json and reference/eltwise_add.py.")
         outcome = step.run(SKILL.read_text(encoding="utf-8"), user)
     finally:
         ledger.close()
+        # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running.
+        swept = sweep_strays(adir)
     agent_wall_s = round(time.monotonic() - started, 2)
     check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
     sets = check.get("sets") if isinstance(check.get("sets"), list) else []
@@ -514,8 +715,10 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
+        "swept": swept, "sampling": dict(sampling),
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
-                                 coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"]),
+                                 coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
+                                 sampling=dict(sampling)),
     }
     _save_attempt(adir, attempt)
     return attempt
@@ -542,24 +745,47 @@ def _size(path: Path) -> int:
     return path.stat().st_size if path.is_file() else 0
 
 
-def smoke_test(*, env, shared_python, run_watched=run_watched) -> tuple[bool, list[str]]:
+def _hw_watcher() -> StallWatcher:
+    return StallWatcher(quiet_s=HW_QUIET_S, repeat_lines=HW_REPEAT_LINES)
+
+
+def _watch_facts(got) -> dict:
+    """What the stall watcher saw on one hardware run, beside the limits it applied."""
+    return {"max_quiet_s": round(float(getattr(got, "max_quiet_s", 0.0) or 0.0), 1),
+            "max_repeat": int(getattr(got, "max_repeat", 0) or 0),
+            "quiet_limit_s": HW_QUIET_S, "repeat_limit": HW_REPEAT_LINES}
+
+
+def _watch_text(w: dict) -> str:
+    return (f"longest quiet stretch {w['max_quiet_s']:.1f} s, longest repeat {w['max_repeat']} lines; "
+            f"watcher limits {w['quiet_limit_s']:.0f} s and {w['repeat_limit']} lines")
+
+
+def smoke_test(*, env, shared_python, run_watched=run_watched, record: dict | None = None) -> tuple[bool, list[str]]:
     """Upstream's examples/eltwise_add.py with the shared venv's tt-lang and ttnn, on one leased chip (spec 5.4).
     (ok, the last lines of its output). ok needs exit 0 and `PASSED!` in the output. A run the stall watcher
-    killed raises ProbeBlocked."""
+    killed raises ProbeBlocked. `record`, when given, receives `watch`: what the stall watcher saw (_watch_facts)."""
     Path(env.scratch_dir).mkdir(parents=True, exist_ok=True)
     log = Path(env.scratch_dir) / "smoke.txt"
     start = _size(log)
     argv = _gozer("kernel-probe smoke test", str(shared_python), str(Path(env.src_dir) / "examples" / "eltwise_add.py"))
-    got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
-                      backstop_s=BUDGET["hw_backstop_s"])
+    got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=_hw_watcher(),
+                      backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     text = _new_text(log, start)
     tail = text.splitlines()[-SMOKE_TAIL_LINES:]
+    if record is not None:
+        record["watch"] = _watch_facts(got)
     if got.killed:
-        # A hang blocks the probe. gozer was killed with the example, so its lease may outlive it.
-        hw = {"available": False, "hung": True, "reason": got.reason, "smoke_tail": tail}
+        # A hang blocks the probe. The watcher's SIGTERM reaches gozer too, and gozer normally releases its lease
+        # (with the chip reset) within GOZER_TERM_GRACE_S. Only a gozer that had to be killed after the grace can
+        # leave its lease under a dead process.
+        hw = {"available": False, "hung": True, "reason": got.reason, "smoke_tail": tail, "watch": _watch_facts(got)}
         last = " / ".join(tail[-5:]) or "(no output)"
-        raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its last lines: {last}. Its lease may be held by a dead "
-                           "process: use gozer-gatekeeper or `gozer reconcile`, never reset by hand", hw=hw)
+        raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its last lines: {last}. The watcher stopped it, and "
+                           "gozer normally releases the lease when it stops. If gozer itself had to be killed (after "
+                           f"the {GOZER_TERM_GRACE_S:.0f} s grace, or at once by a second interrupt during the grace), "
+                           "the lease may still be held by a dead process: look with `gozer status` and use the "
+                           "gozer-gatekeeper skill. Never reset a chip by hand", hw=hw)
     return (got.returncode == 0 and "PASSED!" in text), tail
 
 
@@ -608,11 +834,14 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     argv = _gozer(f"kernel-probe {op} attempt {n}", str(shared_python), str(TEMPLATES / "kernel_harness.py"),
                   "--spec", str(TEMPLATES / "ops" / f"{op}.json"), "--kernel", str(kernel), "--out", str(out),
                   "--phase", "hw")
-    got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
-                      backstop_s=BUDGET["hw_backstop_s"])
+    got = run_watched(argv, cwd=vdir / CLEAN_DIR, env=None, log_path=log, watcher=_hw_watcher(),
+                      backstop_s=BUDGET["hw_backstop_s"], term_grace_s=GOZER_TERM_GRACE_S)
     if got.killed:
+        # The first line is the watcher's own reason ("backstop: ..." or "stalled: ..." or "repeating: ..."), so a
+        # watcher stop is not read as a device hang without saying which rule stopped it.
         _record_hw(adir, attempt, {"passed": False, "category": "hang", "pcc_min": None, "sets": [], "violations": [],
-                                   "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1)})
+                                   "first_line": got.reason, "elapsed_s": round(got.elapsed_s, 1),
+                                   "watch": _watch_facts(got)})
         raise ProbeBlocked(f"{op} attempt {n}: {got.reason}")
     try:
         raw = _read_regular(out, 64 * 1024 * 1024)
@@ -628,7 +857,7 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     sets = result.get("sets") if result and isinstance(result.get("sets"), list) else []
     return _record_hw(adir, attempt, {"passed": category is None, "category": category, "first_line": line,
                                       **set_measures(sets), "sets": sets, "violations": [],
-                                      "elapsed_s": round(got.elapsed_s, 1)})
+                                      "elapsed_s": round(got.elapsed_s, 1), "watch": _watch_facts(got)})
 
 
 def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_watched=run_watched,
@@ -642,16 +871,17 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
     Results are kept as they happen, so an exception part way through loses nothing that finished: hardware_phase
     writes each attempt's `hw` block into its record in place, and the smoke test's result is stored in `state["smoke"]`
     before any kernel runs."""
-    ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched)
+    seen: dict = {}
+    ok, tail = smoke_test(env=env, shared_python=shared_python, run_watched=run_watched, record=seen)
     if state is not None:
-        state["smoke"] = {"available": ok, "smoke_tail": tail}
+        state["smoke"] = {"available": ok, "smoke_tail": tail, "watch": seen.get("watch")}
     if not ok:
-        return {"available": False, "smoke_tail": tail}
+        return {"available": False, "smoke_tail": tail, "watch": seen.get("watch")}
     for attempt in attempts:
         if attempt.get("passed_sim") is True:
             adir = Path(probe_dir) / attempt["op"] / f"attempt-{attempt['attempt']}"
             hardware_phase(adir, attempt, env=env, shared_python=shared_python, run_watched=run_watched)
-    return {"available": True, "smoke_tail": tail}
+    return {"available": True, "smoke_tail": tail, "watch": seen.get("watch")}
 
 
 # ---- the report -------------------------------------------------------------------------------------------------
@@ -693,14 +923,127 @@ def _cell(value) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")[:160]
 
 
+def _pcc_cell(value) -> str:
+    """A PCC cell. When six significant digits would round a value near 1 to `1`, the distance from 1 is printed with
+    its sign (`1 - 6.0e-08`, or `1 + 1.0e-07` for a value a little above 1 from floating-point error), so the table
+    never shows a perfect PCC for an imperfect one."""
+    if isinstance(value, float) and value != 1.0 and f"{value:.6g}" == "1":
+        return f"1 - {1.0 - value:.1e}" if value < 1.0 else f"1 + {value - 1.0:.1e}"
+    return _cell(value)
+
+
+def _status_cell(a: dict) -> str:
+    """How the agent step ended. A step that did not end `done` also gets the first line of the reason."""
+    status = a.get("status")
+    detail = str(a.get("status_detail") or "").strip().splitlines()
+    if status and status != "done" and detail:
+        return _cell(f"{status}: {detail[0]}")
+    return _cell(status)
+
+
+def _agent_cell(a: dict) -> str:
+    """The agent column: whether its own check.json was untrusted, and how many of its processes the sweep stopped."""
+    parts = ["untrusted"] if a.get("agent_check_untrusted") else []
+    swept = [r for r in a.get("swept") or [] if isinstance(r, dict)]
+    stopped = [r for r in swept if r.get("stopped") is not False]
+    left = [r for r in swept if r.get("stopped") is False]
+    if stopped:
+        parts.append(f"{len(stopped)} stray agent process{'es' if len(stopped) != 1 else ''} stopped")
+    if left:
+        pids = ", ".join(str(r.get("pid")) for r in left)
+        parts.append(f"{len(left)} stray agent process{'es' if len(left) != 1 else ''} could not be confirmed stopped "
+                     f"(pid{'s' if len(left) != 1 else ''} {pids})")
+    return _cell("; ".join(parts))
+
+
+def _sampling_text(sp: dict) -> str:
+    """The run's sampling in one sentence, with the seed base needed to repeat a sampled run."""
+    temps = ", ".join(f"{t:g}" for t in sp.get("temperatures") or [])
+    top_p = "the server's default" if sp.get("top_p") is None else f"{sp['top_p']:g}"
+    text = (f"Sampling: temperature {temps} ({sp.get('attempts_per_temperature')} attempts each), top_p {top_p}. "
+            "No seed is sent at temperature 0.")
+    if any(t != 0 for t in sp.get("temperatures") or []):       # only then does any attempt send a seed
+        text += (f" Above 0, attempt k sends seed {sp.get('seed_base')} + k (base from {sp.get('seed_base_from')}; "
+                 f"send the same requests again with --seed {sp.get('seed_base')}).")
+    return text
+
+
+def _group_lines(g: dict, rows: list[dict]) -> list[str]:
+    """One temperature group of an op: a heading, the attempts table and the distinct-kernel lines."""
+    lines = ["", f"### temperature {g['temperature']:g}", "",
+             "| attempt | simulator | hardware | status | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
+             "first line | agent check |",
+             "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+    for a in sorted(rows, key=lambda a: a["attempt"]):
+        h = a.get("hw") if isinstance(a.get("hw"), dict) else None
+        category = a.get("category") or (h or {}).get("category")
+        first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
+        lines.append("| " + " | ".join([
+            _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
+            "-" if h is None else ("yes" if h.get("passed") else "no"), _status_cell(a),
+            _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
+            _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
+    return lines + [""] + _distinct_lines(g)
+
+
 def _bars_text(b: dict) -> str:
     lo, hi = b["slope"]
     return (f"pcc >= {b['pcc']}, rel_l2 <= {b['rel_l2']}, slope in [{lo}, {hi}], "
             f"max_abs_err <= {b['max_abs_atol']} + {b['max_abs_rtol']} * max|expected|")
 
 
+def _temperature_of(a: dict) -> float:
+    """The attempt's sampling temperature; a record from before sampling was recorded was greedy (0)."""
+    sp = a.get("sampling") if isinstance(a.get("sampling"), dict) else {}
+    t = sp.get("temperature")
+    return float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else 0.0
+
+
+def kernel_groups(attempts: list[dict], ops: list[str], seed_base: int | None = None) -> list[dict]:
+    """One group per op and temperature, in the order they appear: the attempt numbers, the group's sampling
+    ({"temperature", "top_p", "seed_base", "seeds"}: the seed each attempt sent, null at temperature 0), and how many
+    distinct kernels the attempts wrote (by provenance.kernel_sha256). Attempts with no kernel copied count apart."""
+    groups: dict[tuple, dict] = {}
+    for op in ops:
+        for a in sorted((a for a in attempts if a["op"] == op), key=lambda a: a["attempt"]):
+            key = (op, _temperature_of(a))
+            sp = a.get("sampling") if isinstance(a.get("sampling"), dict) else {}
+            g = groups.setdefault(key, {"op": op, "temperature": key[1], "attempts": [], "shas": [],
+                                        "sampling": {"temperature": key[1], "top_p": sp.get("top_p"),
+                                                     "seed_base": seed_base, "seeds": []}})
+            g["attempts"].append(a["attempt"])
+            g["sampling"]["seeds"].append(sp.get("seed"))
+            g["shas"].append((a.get("provenance") or {}).get("kernel_sha256"))
+    out = []
+    for g in groups.values():
+        shas = [x for x in g.pop("shas") if x]
+        out.append({**g, "with_kernel": len(shas), "distinct_kernels": len(set(shas)),
+                    "no_kernel": len(g["attempts"]) - len(shas)})
+    return out
+
+
+def _distinct_lines(g: dict) -> list[str]:
+    """The distinct-kernel line of a group, and a warning when every attempt that wrote a kernel wrote the same one."""
+    line = f"distinct kernels: {g['distinct_kernels']} of {g['with_kernel']} attempts"
+    if g["no_kernel"]:
+        line += f"; {g['no_kernel']} wrote no kernel"
+    lines = [line]
+    if g["with_kernel"] > 1 and g["distinct_kernels"] == 1:
+        none = f" ({g['no_kernel']} wrote none)" if g["no_kernel"] else ""
+        if g["temperature"] == 0:
+            lines.append(f"All {g['with_kernel']} attempts that wrote a kernel produced the same kernel{none}: "
+                         "temperature 0 asks the server for greedy decoding, so attempts at one prompt often give one "
+                         "sample. Raise --temperature to explore.")
+        else:
+            lines.append(f"All {g['with_kernel']} attempts that wrote a kernel produced the same kernel at temperature "
+                         f"{g['temperature']:g}{none}: the temperature may be too low for this prompt, or the server "
+                         "may be ignoring it.")
+    return lines
+
+
 def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
-    """Write kernel-probe-report.json (header, attempts, attempts to first pass per op) and kernel-probe-report.md."""
+    """Write kernel-probe-report.json (header, attempts, attempts to first pass per op, and per op and temperature the
+    distinct-kernel counts) and kernel-probe-report.md."""
     probe_dir = Path(probe_dir)
     probe_dir.mkdir(parents=True, exist_ok=True)
     ops = list(header.get("ops") or [])
@@ -710,16 +1053,26 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     by_op = {op: [a for a in attempts if a["op"] == op] for op in ops}
     first = {op: {"sim": _first_pass(rows, lambda a: a.get("passed_sim") is True), "hw": _first_pass(rows, _hw_passed)}
              for op, rows in by_op.items()}
-    data = {"header": header, "attempts": attempts, "first_pass": first}
+    groups = kernel_groups(attempts, ops, (header.get("sampling") or {}).get("seed_base")
+                           if isinstance(header.get("sampling"), dict) else None)
+    data = {"header": header, "attempts": attempts, "first_pass": first, "groups": groups}
     _write_json(probe_dir / "kernel-probe-report.json", data)
 
     t = header.get("tt_lang") or {}
     lines = ["# Kernel probe report", "",
              f"Probe id: {header.get('probe_id')}. Coder model: {header.get('coder_model')}.", "",
-             "Attempts are independent draws from a model server that may not accept a seed. The report gives counts "
-             "and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
+             "Temperature 0 asks the server for greedy decoding. Attempts then often repeat each other (the report "
+             "counts distinct kernels) but are not guaranteed to be identical. Attempts at temperature above 0 with "
+             "different seeds sample independently, if the server honours the temperature. The report gives counts and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
              "outliers. A kernel that passes them can still fail on real activations.", "",
+             "The simulator promotes bf16 to f32 (tt-lang-sim's default) and the references compute in f32, so on a "
+             "simple op a correct kernel shows a max_abs_err of 0.0 and a PCC of 1.0. Rounding on hardware is "
+             "coarser (bf16) than the simulator's f32.", "",
+             *(["`add` is a calibration op: its working kernel is upstream's eltwise_add.py, the reference example "
+                "the agent reads. A pass of `add` shows the loop works; it is not evidence that the coder can write a "
+                "kernel.", ""] if "add" in ops else []),
              *([header["budget_note"], ""] if header.get("budget_note") else []),
+             *([_sampling_text(header["sampling"]), ""] if isinstance(header.get("sampling"), dict) else []),
              *([f"{header['ignored_records']} unrelated or unreadable records ignored under {VERDICT_DIR}.", ""]
                if header.get("ignored_records") else []),
              "## tt-lang", "",
@@ -735,6 +1088,8 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     hw = header.get("hw")
     if header.get("stopped") or header.get("blocked"):
         lines += [f"The probe stopped: {header.get('stopped') or header['blocked']}", ""]
+    if isinstance(hw, dict) and isinstance(hw.get("watch"), dict):
+        lines += [f"smoke test: {_watch_text(hw['watch'])}", ""]
     if hw is None:
         lines.append("hw: not run")
     elif hw.get("available"):
@@ -746,20 +1101,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines += ["hw: unavailable. The smoke test (upstream's eltwise_add.py on one chip) failed. Its last lines:", "",
                   "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
     for op, rows in by_op.items():
-        lines += ["", f"## {op}", "",
-                  "| attempt | simulator | hardware | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
-                  "first line | agent check |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
-        for a in sorted(rows, key=lambda a: a["attempt"]):
-            h = a.get("hw") if isinstance(a.get("hw"), dict) else None
-            category = a.get("category") or (h or {}).get("category")
-            first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
-            lines.append("| " + " | ".join([
-                _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
-                "-" if h is None else ("yes" if h.get("passed") else "no"),
-                _cell(a.get("pcc_min")), _cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
-                _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line),
-                "untrusted" if a.get("agent_check_untrusted") else "-"]) + " |")
+        lines += ["", f"## {op}"]
+        for g in (g for g in groups if g["op"] == op):
+            lines += _group_lines(g, [a for a in rows if a["attempt"] in g["attempts"]])
         f = first[op]
         lines.append("")
         lines.append(f"attempts to first pass in the simulator: {f['sim']}" if f["sim"] is not None
@@ -775,6 +1119,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
             lines.append(count)
             if f["hw"] is not None:
                 lines.append(f"attempts to first pass on hardware: {f['hw']}")
+            for a in sorted(ran, key=lambda a: a["attempt"]):
+                if isinstance(a["hw"].get("watch"), dict):
+                    lines.append(f"attempt {a['attempt']} on hardware: {_watch_text(a['hw']['watch'])}")
     (probe_dir / "kernel-probe-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return data
 
@@ -844,6 +1191,81 @@ def _hw_line(a: dict) -> str:
     return f"{a['op']} {a['attempt']}: {result}{first}"
 
 
+MAX_TEMPERATURE = 2.0
+MAX_TEMPERATURES = 10        # choice: a plan larger than this is more likely a typo than a measurement
+MAX_TOTAL_ATTEMPTS = 200     # choice: attempts x temperatures; at about 200 s an attempt this is 11 hours
+SEED_MAX = 2 ** 63 - 1       # the largest seed an OpenAI-compatible server takes (a signed 64-bit integer)
+
+
+def _number(text, flag: str) -> float:
+    try:
+        value = float(str(text).strip())
+    except ValueError:
+        raise _Refused(f"{flag}: {text!r} is not a number") from None
+    return value
+
+
+def parse_sampling(args, attempts: int = 1) -> dict:
+    """The run's sampling from --temperature, --temperatures, --top-p and --seed, checked; raises _Refused.
+
+    {"temperatures": [...], "top_p": float or None, "seed": int or None}. The default is one group at temperature 0
+    (the server is asked for greedy decoding; attempts often repeat each other but are not guaranteed to be identical).
+    Every temperature must be in [0, 2] and
+    listed once, at most MAX_TEMPERATURES of them, with at most MAX_TOTAL_ATTEMPTS attempts in all (`attempts` per
+    temperature); top-p in (0, 1]; the seed a whole number of 0 or more whose last attempt (base + total) is at most
+    2**63 - 1."""
+    one, many = getattr(args, "temperature", None), getattr(args, "temperatures", None)
+    if one is not None and many is not None:
+        raise _Refused("give --temperature or --temperatures, not both")
+    texts = [one] if one is not None else (str(many).split(",") if many is not None else ["0"])
+    temperatures = []
+    for text in texts:
+        t = _number(text, "--temperatures" if many is not None else "--temperature")
+        if not (0.0 <= t <= MAX_TEMPERATURE):                 # NaN fails this too
+            raise _Refused(f"temperature {text.strip()} is not between 0 and {MAX_TEMPERATURE:g}")
+        t = t + 0.0                                            # -0.0 becomes 0.0, so it prints as 0
+        if t in temperatures:
+            raise _Refused(f"temperature {t:g} is listed twice")
+        temperatures.append(t)
+    if len(temperatures) > MAX_TEMPERATURES:
+        raise _Refused(f"at most {MAX_TEMPERATURES} temperatures (got {len(temperatures)})")
+    total = attempts * len(temperatures)
+    if total > MAX_TOTAL_ATTEMPTS:
+        sum_text = f"{attempts} x {len(temperatures)} = {total}" if len(temperatures) > 1 else f"{total}"
+        raise _Refused(f"at most {MAX_TOTAL_ATTEMPTS} attempts in total ({sum_text})")
+    top_p = getattr(args, "top_p", None)
+    if top_p is not None:
+        try:
+            top_p = float(str(top_p).strip())
+        except ValueError:
+            raise _Refused(f"--top-p: {top_p!r} is not a number") from None
+        if not (0.0 < top_p <= 1.0):
+            raise _Refused(f"--top-p {top_p:g} is not in (0, 1]")
+    seed = getattr(args, "seed", None)
+    if seed is not None:
+        try:
+            seed = int(str(seed).strip())
+        except ValueError:
+            raise _Refused(f"--seed: {seed!r} is not a whole number") from None
+        if seed < 0:
+            raise _Refused(f"--seed {seed} is below 0")
+        if seed + total > SEED_MAX:
+            raise _Refused(f"--seed {seed}: the last attempt would send {seed} + {total}, above the largest seed "
+                           f"2**63 - 1 ({SEED_MAX})")
+    return {"temperatures": temperatures, "top_p": top_p, "seed": seed}
+
+
+def seed_base_from_probe_id(probe_id: str) -> int:
+    """A seed base derived from the probe id, for a run without --seed. The report records it, so the run can be
+    repeated with --seed <base> (if the server honours seeds)."""
+    return int(hashlib.sha256(probe_id.encode("utf-8")).hexdigest()[:8], 16) % (2 ** 31)
+
+
+def attempt_seed(base: int, k: int, temperature: float) -> int | None:
+    """The seed of the k-th attempt of the run (k counts every attempt from 1): none at temperature 0, else base + k."""
+    return None if temperature == 0 else base + k
+
+
 def new_probe_id() -> str:
     """A token no earlier run used: the UTC time and 8 random hex digits."""
     return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(4)
@@ -858,6 +1280,100 @@ def safe_url(url) -> str:
     if "@" not in parts.netloc:
         return str(url)
     return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
+
+
+LOCK_NAME = "probe.lock"
+
+
+class ProbeLock:
+    """The held lock: the open file (whose flock is the lock) and its path."""
+
+    def __init__(self, fd: int, path: Path):
+        self.fd, self.path = fd, path
+
+
+def _holder_note(fd: int) -> str:
+    """` (pid N)` from the holder's lock file, or "" when the file is empty, garbage or names no sane pid. The text is
+    information for the refusal message only; the flock decides who holds the lock."""
+    try:
+        rec = json.loads(os.pread(fd, 4096, 0).decode("utf-8"))
+        pid = rec.get("pid") if isinstance(rec, dict) else None
+        if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < (1 << 32):
+            return f" (pid {pid})"
+    except Exception:
+        pass
+    return ""
+
+
+def acquire_lock(probe_dir: Path) -> ProbeLock:
+    """Take an exclusive flock on `probe_dir/probe.lock` for this process, or raise _Refused with a plain message.
+
+    Two probes on one directory would write the same attempt directories, and each one's sweep would stop the other's
+    agent processes. The kernel releases a flock when its holder dies (SIGKILL included), so a lock left by an ended
+    probe needs no staleness check: the next probe simply gets it. The file is opened with O_NOFOLLOW (a link is
+    refused) and must be a regular file. After the flock, the file at the path must be the file we locked; if another
+    probe removed it and made a new one in between, the lock is taken again once. The pid written into the file is
+    information for a refused probe's message."""
+    path = Path(probe_dir) / LOCK_NAME
+    try:
+        Path(probe_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _Refused(f"cannot create the output directory {probe_dir}: {exc.strerror or exc}") from None
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _Refused(f"{path} is a link; remove it if no probe is using {probe_dir}") from None
+            raise _Refused(f"cannot open the lock {path}: {exc.strerror or exc}") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise _Refused(f"{path} is not a regular file; remove it if no probe is using {probe_dir}")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise _Refused(f"another probe is using {probe_dir}{_holder_note(fd)}; wait for it to end or "
+                                   "pass another --out") from None
+                raise _Refused(f"cannot lock {path}: {exc.strerror or exc}") from None
+            try:
+                st = os.stat(path, follow_symlinks=False)
+                same = (st.st_ino, st.st_dev) == (os.fstat(fd).st_ino, os.fstat(fd).st_dev)
+            except OSError:
+                same = False
+            if not same:
+                os.close(fd)                             # we locked a file nobody else can reach: take it again
+                continue
+            try:
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, json.dumps({"pid": os.getpid()}).encode("utf-8"), 0)
+            except OSError:
+                pass                                     # the pid is information only; the flock is the lock
+            return ProbeLock(fd, path)
+        except BaseException as exc:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            if isinstance(exc, OSError):                 # fstat, stat or another call on the lock file failed
+                raise _Refused(f"cannot use the lock {path}: {exc.strerror or exc}") from None
+            raise
+    raise _Refused(f"another probe is using {probe_dir}: its lock file kept changing while this probe took it")
+
+
+def release_lock(lock: ProbeLock) -> None:
+    """Remove the lock file if it is still the file we hold, then close it (which releases the flock). Never raises.
+    After a SIGKILL nothing runs here: the kernel releases the flock, and the file that stays is harmless."""
+    try:
+        st = os.stat(lock.path, follow_symlinks=False)
+        if (st.st_ino, st.st_dev) == (os.fstat(lock.fd).st_ino, os.fstat(lock.fd).st_dev):
+            os.unlink(lock.path)
+    except OSError:
+        pass
+    try:
+        os.close(lock.fd)
+    except OSError:
+        pass
 
 
 def _raise_interrupt(signum, frame):
@@ -881,6 +1397,10 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     written from the records this run's attempts returned. `tier_config` is the TierConfig the coder comes from when a
     flag is missing (the CLI loads it from bringup.toml).
 
+    The output directory is locked (an flock on `probe.lock`) from the first write to the end. A second probe on the
+    same directory is refused with exit 2. The kernel releases the lock when this process dies, however it dies; the
+    file may remain after a SIGKILL and is harmless. A clean exit removes it.
+
     A run that stops early still writes its report from what finished, with "The probe stopped: <reason>" in it:
     a hung hardware run (ProbeBlocked) exits 5, an exception in an attempt or in the hardware phase exits 3, and Ctrl-C
     or SIGTERM exits 4. No hardware runs after a crash or an interrupt. If the report itself cannot be written, the
@@ -896,6 +1416,10 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     attempts = int(getattr(args, "attempts", 5) or 0)
     if attempts < 1:
         return refuse("--attempts must be at least 1")
+    try:
+        plan = parse_sampling(args, attempts)
+    except _Refused as exc:
+        return refuse(str(exc))
     env = env or default_env(args)
     results = ttlang_env.ensure(env, check_only=True, say=say)
     if not results or any(r.status != ttlang_env.OK for r in results):
@@ -910,69 +1434,90 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                       "server that runs")
 
     probe_dir = Path(getattr(args, "out", None) or "kernel-probe")
-    probe_id = new_probe_id()
-    facts = tt_lang_facts(env)
-    say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts, coder {model} at {safe_url(endpoint)}")
-    records: list[dict] = []
-    hw, stopped, blocked, code = None, None, None, EXIT_OK
-    state: dict = {}
-    hw_started = False
     try:
-        previous = signal.signal(signal.SIGTERM, _raise_interrupt)
-    except ValueError:                                  # not the main thread: no handler can be installed
-        previous = None
+        lock = acquire_lock(probe_dir)
+    except _Refused as exc:
+        return refuse(str(exc))
     try:
-        where = "attempt 1"
+        probe_id = new_probe_id()
+        base = plan["seed"] if plan["seed"] is not None else seed_base_from_probe_id(probe_id)
+        sampling = {"temperatures": plan["temperatures"], "top_p": plan["top_p"], "seed_base": base,
+                    "seed_base_from": "--seed" if plan["seed"] is not None else "probe id",
+                    "attempts_per_temperature": attempts}
+        facts = tt_lang_facts(env)
+        temps = ", ".join(f"{t:g}" for t in plan["temperatures"])
+        n_temps = len(plan["temperatures"])
+        how_many = (f"{attempts} attempts at temperature {temps}" if n_temps == 1 else
+                    f"{attempts} attempts per temperature ({temps}): {attempts * n_temps} in total")
+        say(f"kernel probe {probe_id}: op {args.op}, {how_many}, coder {model} at {safe_url(endpoint)}")
+        records: list[dict] = []
+        hw, stopped, blocked, code = None, None, None, EXIT_OK
+        state: dict = {}
+        hw_started = False
         try:
-            for n in range(1, attempts + 1):
-                where = f"attempt {n}"
-                record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint, model=model,
-                                     coder_model=model, probe_id=probe_id, http=http, run_watched=run_watched_fn,
-                                     tt_lang=facts)
-                records.append(record)
-                say(_attempt_line(record))
-            if getattr(args, "phase", "sim") == "hw":
-                where, hw_started = "the hardware phase", True
-                shared = getattr(args, "shared_python", None) or str(Path.home() / ".tenstorrent-venv" / "bin" / "python")
-                try:
-                    hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
-                                      run_watched=run_watched_fn, state=state)
-                except ProbeBlocked as exc:
-                    blocked = stopped = str(exc)
-                    code = EXIT_BLOCKED
-                    # A hung smoke test carries its own hardware block. A kernel hang came after a passing smoke test.
-                    hw = exc.hw if exc.hw is not None else state.get("smoke")
-        except KeyboardInterrupt:
-            stopped, code = f"interrupted during {where}", EXIT_ABORTED
-        except Exception as exc:
-            stopped, code = _crash(where, exc), EXIT_ERROR
+            previous = signal.signal(signal.SIGTERM, _raise_interrupt)
+        except ValueError:                                  # not the main thread: no handler can be installed
+            previous = None
+        try:
+            where = "attempt 1"
+            try:
+                # n counts every attempt of the run from 1, across the temperature groups.
+                jobs = [t for t in plan["temperatures"] for _ in range(attempts)]
+                for n, temperature in enumerate(jobs, start=1):
+                    where = f"attempt {n}"
+                    record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint,
+                                         model=model, coder_model=model, probe_id=probe_id, http=http,
+                                         run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
+                                         top_p=plan["top_p"], seed=attempt_seed(base, n, temperature))
+                    records.append(record)
+                    say(_attempt_line(record))
+                if getattr(args, "phase", "sim") == "hw":
+                    where, hw_started = "the hardware phase", True
+                    shared = (getattr(args, "shared_python", None)
+                              or str(Path.home() / ".tenstorrent-venv" / "bin" / "python"))
+                    try:
+                        hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
+                                          run_watched=run_watched_fn, state=state)
+                    except ProbeBlocked as exc:
+                        blocked = stopped = str(exc)
+                        code = EXIT_BLOCKED
+                        # A hung smoke test carries its own hardware block. A kernel hang came after a passing
+                        # smoke test.
+                        hw = exc.hw if exc.hw is not None else state.get("smoke")
+            except KeyboardInterrupt:
+                stopped, code = f"interrupted during {where}", EXIT_ABORTED
+            except Exception as exc:
+                stopped, code = _crash(where, exc), EXIT_ERROR
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+        if hw_started and hw is None:
+            hw = state.get("smoke")                         # a crash or an interrupt after the smoke test ran
+        try:
+            for a in records:
+                if isinstance(a.get("hw"), dict):
+                    say(_hw_line(a))
+            if hw and not hw.get("available") and not hw.get("hung"):
+                say("hardware unavailable: the smoke test failed (the report has its last lines)")
+            header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
+                                   ignored_records=0)
+            if stopped:
+                header["stopped"] = stopped
+            if blocked:
+                header["blocked"] = blocked
+            header["sampling"] = sampling
+            write_report(probe_dir, records, header)
+            say(f"report: {probe_dir / 'kernel-probe-report.md'}")
+            if stopped:
+                say(f"stopped: {stopped}")
+        except Exception as exc:                            # never let the last step lose the records
+            try:
+                print(f"the report could not be written ({type(exc).__name__}: {exc}); the attempt records follow",
+                      file=sys.stderr)
+                print(json.dumps({"stopped": stopped, "attempts": records}, default=str), file=sys.stderr)
+            except Exception:
+                pass
+            return EXIT_ERROR
+        return code
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
-    if hw_started and hw is None:
-        hw = state.get("smoke")                         # a crash or an interrupt after the smoke test ran
-    try:
-        for a in records:
-            if isinstance(a.get("hw"), dict):
-                say(_hw_line(a))
-        if hw and not hw.get("available") and not hw.get("hung"):
-            say("hardware unavailable: the smoke test failed (the report has its last lines)")
-        header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
-                               ignored_records=0)
-        if stopped:
-            header["stopped"] = stopped
-        if blocked:
-            header["blocked"] = blocked
-        write_report(probe_dir, records, header)
-        say(f"report: {probe_dir / 'kernel-probe-report.md'}")
-        if stopped:
-            say(f"stopped: {stopped}")
-    except Exception as exc:                            # never let the last step lose the records
-        try:
-            print(f"the report could not be written ({type(exc).__name__}: {exc}); the attempt records follow",
-                  file=sys.stderr)
-            print(json.dumps({"stopped": stopped, "attempts": records}, default=str), file=sys.stderr)
-        except Exception:
-            pass
-        return EXIT_ERROR
-    return code
+        release_lock(lock)

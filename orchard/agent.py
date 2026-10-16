@@ -360,7 +360,8 @@ class AgentStep:
                  phase: str, feed, control, run_dir, evidence_dir, log_path, http=post_json,
                  clock=time.time, guard: RetryGuard | None = None, max_turns: int = AGENT_MAX_TURNS,
                  max_tokens: int = AGENT_MAX_TOKENS, timeout: float = AGENT_REQUEST_TIMEOUT_S,
-                 thinking: bool = AGENT_THINKING, finished=None):
+                 thinking: bool = AGENT_THINKING, finished=None, temperature: float = 0,
+                 top_p: float | None = None, seed: int | None = None):
         self.agent, self.endpoint, self.model, self.tools = agent, endpoint, model, tools
         self.ledger, self.stage, self.phase = ledger, stage, phase
         self.feed, self.control, self.http, self.clock = feed, control, http, clock
@@ -369,6 +370,9 @@ class AgentStep:
         self.guard = guard if guard is not None else RetryGuard()
         self.max_turns, self.max_tokens, self.timeout = max_turns, max_tokens, timeout
         self.thinking = thinking     # False sends enable_thinking=false (see defaults.AGENT_THINKING)
+        # Sampling. The default is greedy decoding (temperature 0), sent exactly as before. top_p and seed are sent
+        # only when a caller sets them; whether a server honours the seed is up to the server.
+        self.temperature, self.top_p, self.seed = temperature, top_p, seed
         # finished() -> bool: are this step's files written and valid (the supervisor's check)? When it
         # is true and the agent writes a file again unchanged, the step ends as done: an agent that has
         # finished sometimes repeats its last write instead of ending (the first lab run).
@@ -488,7 +492,12 @@ class AgentStep:
             if reason:
                 return self._end(reason, turn - 1)
             request = {"model": self.model, "messages": messages, "tools": TOOL_SCHEMAS,
-                       "temperature": 0, "max_tokens": self.max_tokens, "stream": False}
+                       "temperature": 0 if self.temperature == 0 else self.temperature,
+                       "max_tokens": self.max_tokens, "stream": False}
+            if self.top_p is not None:
+                request["top_p"] = self.top_p
+            if self.seed is not None:
+                request["seed"] = self.seed
             if not self.thinking:
                 request["chat_template_kwargs"] = {"enable_thinking": False}
             try:
