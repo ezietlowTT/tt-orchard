@@ -354,8 +354,9 @@ def _count(runner: ReadOnlyRunner, root: str, repo: str, head: str, remote: str)
 
 
 def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, update: Callable[[str, str | None], str],
-                reuse_s: float = 0.0, branch_warning: bool = True) -> Freshness:
-    """Compare a git checkout's HEAD with its origin's main branch. `update(root, branch)` gives the update hint."""
+                reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True) -> Freshness:
+    """Compare a git checkout's HEAD with its origin's main branch. `update(root, branch)` gives the update hint.
+    `untracked` False leaves untracked files out of the dirty-tree warning."""
     path = str(path)
     root = _out(runner, ["git", "-C", path, "rev-parse", "--show-toplevel"])
     result = Freshness(source=source, path=root or path, state=UNKNOWN, detail="")
@@ -365,7 +366,8 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
         return result
     result.local = _out(runner, ["git", "-C", root, "rev-parse", "HEAD"])
     result.branch = _out(runner, ["git", "-C", root, "symbolic-ref", "--short", "-q", "HEAD"]) or None
-    status = _out(runner, ["git", "-C", root, "status", "--porcelain", "--untracked-files=normal"])
+    status = _out(runner, ["git", "-C", root, "status", "--porcelain",
+                           "--untracked-files=normal" if untracked else "--untracked-files=no"])
     result.dirty = bool(status) if status is not None else None
     if result.dirty:
         result.warnings.append(f"{root} has uncommitted changes.")
@@ -454,13 +456,14 @@ def ttlang_update(root: str, branch: str | None) -> str:
 
 def check_ttlang_source(src_dir, *, run=None, cache: Cache | None = None, reuse_s: float = 0.0,
                         offline: bool = False) -> Freshness:
-    """The tt-lang checkout kernel-env made. Its HEAD is the pin and detached, so no branch warning is given."""
+    """The tt-lang checkout kernel-env made. Its HEAD is the pin and detached, so no branch warning is given. Untracked
+    files do not count as changes: kernel-env's own wheel build leaves packaging/sim/build/ in the checkout."""
     runner = run if isinstance(run, ReadOnlyRunner) else ReadOnlyRunner(run or _raw_run, offline=offline)
     cache = cache if cache is not None else Cache()
     if not Path(src_dir).is_dir():
         return Freshness(SOURCE_TTLANG, str(src_dir), UNKNOWN, f"{src_dir} does not exist; run `tt-orchard kernel-env`.")
     return check_clone(src_dir, source=SOURCE_TTLANG, runner=runner, cache=cache, update=ttlang_update,
-                       reuse_s=reuse_s, branch_warning=False)
+                       reuse_s=reuse_s, branch_warning=False, untracked=False)
 
 
 # ---- the installed tt-lang skill --------------------------------------------------------------------------------

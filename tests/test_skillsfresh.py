@@ -64,7 +64,10 @@ class FakeSys:
         if rest == ["symbolic-ref", "--short", "-q", "HEAD"]:
             return (0, st["branch"] + "\n", "") if st.get("branch") else (1, "", "")
         if rest[:2] == ["status", "--porcelain"]:
-            return 0, (" M README.md\n" if st.get("dirty") else ""), ""
+            if st.get("dirty"):
+                return 0, " M README.md\n", ""
+            show = "--untracked-files=no" not in rest
+            return 0, ("?? build/\n" if st.get("untracked") and show else ""), ""
         if rest == ["remote", "get-url", "origin"]:
             return 0, st["origin"] + "\n", ""
         if rest == ["ls-remote", "origin", "refs/heads/main"]:
@@ -534,3 +537,16 @@ def test_the_cache_file_is_replaced_whole_and_a_broken_one_is_ignored(tmp_path):
     link.symlink_to(tmp_path / "target.json")
     sf.Cache(link).put("k", {"state": sf.CURRENT})
     assert not (tmp_path / "target.json").exists() and not link.is_symlink()
+
+
+def test_untracked_files_count_as_changes_in_the_skills_clone_and_not_in_the_tt_lang_checkout(tmp_path):
+    """kernel-env's wheel build leaves packaging/sim/build/ untracked in the tt-lang checkout; that is not a change.
+    In the skills clone an untracked file can be a new skill, so it is reported."""
+    root, st = skills_repo(tmp_path, head=MAIN, untracked=True)
+    got = check_skills(tmp_path, FakeSys({root: st}, {SKILLS_URL: MAIN}), root)
+    assert got.dirty is True and any("uncommitted" in w for w in got.warnings)
+    src = tmp_path / "tt-lang"
+    src.mkdir()
+    fake = FakeSys({src: {"head": MAIN, "origin": TTLANG_URL, "untracked": True}}, {TTLANG_URL: MAIN})
+    got = sf.check_ttlang_source(src, run=fake, cache=sf.Cache(tmp_path / "c.json"))
+    assert got.dirty is False and not got.warnings
