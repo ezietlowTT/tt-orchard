@@ -47,6 +47,8 @@ stopped the run; 5 means a hardware run hung. With 3, 4 and 5 the report covers 
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -1092,68 +1094,91 @@ def safe_url(url) -> str:
 LOCK_NAME = "probe.lock"
 
 
-def _lock_record(path: Path) -> dict | None:
-    """The lock's {"pid", "boot_id", "start_time"}, or None when the file is not a regular file holding that."""
-    raw = _read_regular(path, 4096)
+class ProbeLock:
+    """The held lock: the open file (whose flock is the lock) and its path."""
+
+    def __init__(self, fd: int, path: Path):
+        self.fd, self.path = fd, path
+
+
+def _holder_note(fd: int) -> str:
+    """` (pid N)` from the holder's lock file, or "" when the file is empty, garbage or names no sane pid. The text is
+    information for the refusal message only; the flock decides who holds the lock."""
     try:
-        rec = json.loads(raw.decode("utf-8")) if raw is not None else None
-    except ValueError:
-        return None
-    if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int) or isinstance(rec.get("pid"), bool):
-        return None
-    return rec
+        rec = json.loads(os.pread(fd, 4096, 0).decode("utf-8"))
+        pid = rec.get("pid") if isinstance(rec, dict) else None
+        if isinstance(pid, int) and not isinstance(pid, bool) and 0 < pid < (1 << 32):
+            return f" (pid {pid})"
+    except Exception:
+        pass
+    return ""
 
 
-def _holder_alive(rec: dict) -> bool:
-    """Whether the process that wrote the lock still runs: the pid is alive and no zombie, and its boot id and start
-    time are the ones recorded (a pid the kernel reused for another process has another start time)."""
-    from orchard.server import proc_identity
-    from orchard.status import _pid_alive
-    pid = rec["pid"]
-    if pid <= 0 or not _pid_alive(pid):
-        return False
-    return proc_identity(pid) == (rec.get("boot_id"), rec.get("start_time"))
+def acquire_lock(probe_dir: Path) -> ProbeLock:
+    """Take an exclusive flock on `probe_dir/probe.lock` for this process, or raise _Refused with a plain message.
 
-
-def acquire_lock(probe_dir: Path) -> Path:
-    """Take `probe_dir/probe.lock` for this process, or raise _Refused. Two probes on one directory would write the
-    same attempt directories, and each one's sweep would stop the other's agent processes.
-
-    The file is created with O_CREAT | O_EXCL | O_NOFOLLOW and holds our pid, boot id and start time. A lock whose
-    process is gone (or whose pid now belongs to another process) is removed and taken over. A lock that cannot be read
-    (a link, garbage) is left alone and refused, with the path named."""
-    from orchard.server import proc_identity
-    Path(probe_dir).mkdir(parents=True, exist_ok=True)
+    Two probes on one directory would write the same attempt directories, and each one's sweep would stop the other's
+    agent processes. The kernel releases a flock when its holder dies (SIGKILL included), so a lock left by an ended
+    probe needs no staleness check: the next probe simply gets it. The file is opened with O_NOFOLLOW (a link is
+    refused) and must be a regular file. After the flock, the file at the path must be the file we locked; if another
+    probe removed it and made a new one in between, the lock is taken again once. The pid written into the file is
+    information for a refused probe's message."""
     path = Path(probe_dir) / LOCK_NAME
-    boot, start = proc_identity(os.getpid()) or (None, None)
-    for _ in range(3):
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
-        except FileExistsError:
-            rec = _lock_record(path)
-            if rec is None:
-                raise _Refused(f"{path} exists and is not a probe lock this command can read; remove it if no probe "
-                               f"is using {probe_dir}") from None
-            if _holder_alive(rec):
-                raise _Refused(f"another probe is using {probe_dir} (pid {rec['pid']}); wait for it to end or "
-                               "pass another --out") from None
-            try:
-                os.unlink(path)                          # the probe that held it is gone: take it over
-            except FileNotFoundError:
-                pass
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump({"pid": os.getpid(), "boot_id": boot, "start_time": start}, f)
-        return path
-    raise _Refused(f"another probe is using {probe_dir}: its lock kept changing while this probe tried to take it")
-
-
-def release_lock(path: Path) -> None:
-    """Remove the lock if it is still ours. Never raises."""
     try:
-        rec = _lock_record(path)
-        if rec is not None and rec.get("pid") == os.getpid():
-            os.unlink(path)
+        Path(probe_dir).mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise _Refused(f"cannot create the output directory {probe_dir}: {exc.strerror or exc}") from None
+    for _ in range(2):
+        try:
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        except OSError as exc:
+            if exc.errno == errno.ELOOP:
+                raise _Refused(f"{path} is a link; remove it if no probe is using {probe_dir}") from None
+            raise _Refused(f"cannot open the lock {path}: {exc.strerror or exc}") from None
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise _Refused(f"{path} is not a regular file; remove it if no probe is using {probe_dir}")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise _Refused(f"another probe is using {probe_dir}{_holder_note(fd)}; wait for it to end or "
+                                   "pass another --out") from None
+                raise _Refused(f"cannot lock {path}: {exc.strerror or exc}") from None
+            try:
+                st = os.stat(path, follow_symlinks=False)
+                same = (st.st_ino, st.st_dev) == (os.fstat(fd).st_ino, os.fstat(fd).st_dev)
+            except OSError:
+                same = False
+            if not same:
+                os.close(fd)                             # we locked a file nobody else can reach: take it again
+                continue
+            try:
+                os.ftruncate(fd, 0)
+                os.pwrite(fd, json.dumps({"pid": os.getpid()}).encode("utf-8"), 0)
+            except OSError:
+                pass                                     # the pid is information only; the flock is the lock
+            return ProbeLock(fd, path)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+    raise _Refused(f"another probe is using {probe_dir}: its lock file kept changing while this probe took it")
+
+
+def release_lock(lock: ProbeLock) -> None:
+    """Remove the lock file if it is still the file we hold, then close it (which releases the flock). Never raises.
+    After a SIGKILL nothing runs here: the kernel releases the flock, and the file that stays is harmless."""
+    try:
+        st = os.stat(lock.path, follow_symlinks=False)
+        if (st.st_ino, st.st_dev) == (os.fstat(lock.fd).st_ino, os.fstat(lock.fd).st_dev):
+            os.unlink(lock.path)
+    except OSError:
+        pass
+    try:
+        os.close(lock.fd)
     except OSError:
         pass
 
