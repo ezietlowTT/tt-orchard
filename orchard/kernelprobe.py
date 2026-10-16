@@ -1442,8 +1442,10 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     "attempts_per_temperature": attempts}
         facts = tt_lang_facts(env)
         temps = ", ".join(f"{t:g}" for t in plan["temperatures"])
-        say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts at temperature {temps}, coder {model} at "
-            f"{safe_url(endpoint)}")
+        n_temps = len(plan["temperatures"])
+        how_many = (f"{attempts} attempts at temperature {temps}" if n_temps == 1 else
+                    f"{attempts} attempts per temperature ({temps}): {attempts * n_temps} in total")
+        say(f"kernel probe {probe_id}: op {args.op}, {how_many}, coder {model} at {safe_url(endpoint)}")
         records: list[dict] = []
         hw, stopped, blocked, code = None, None, None, EXIT_OK
         state: dict = {}

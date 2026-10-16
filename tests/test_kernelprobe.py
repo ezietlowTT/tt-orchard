@@ -2422,3 +2422,12 @@ def test_a_groups_sampling_lists_every_seed_and_the_base(tmp_path):
     groups = {g["temperature"]: g for g in data["groups"]}
     assert groups[0.0]["sampling"] == {"temperature": 0.0, "top_p": None, "seed_base": 100, "seeds": [None, None]}
     assert groups[0.7]["sampling"] == {"temperature": 0.7, "top_p": None, "seed_base": 100, "seeds": [103, 104]}
+
+
+def test_the_start_line_says_attempts_per_temperature_and_the_total(tmp_path, fake_kenv, env_ready, monkeypatch):
+    """W5."""
+    _recording_attempts(monkeypatch)
+    out = io.StringIO()
+    kp.main(probe_args(tmp_path, attempts=5, temperatures="0,0.7"), env=fake_kenv, out=out, probe=lambda e, m: True,
+            run_watched_fn=no_run)
+    assert "5 attempts per temperature (0, 0.7): 10 in total" in out.getvalue()
