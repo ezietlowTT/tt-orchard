@@ -351,8 +351,9 @@ Each item changes or adds to the approved design above. Reasons come from the im
 22. **The ops-inventory template builds only a subclass of `PreTrainedModel`.** A downloaded config.json could name any public
     callable of transformers. A name that is not a model class, is not a string, or whose lookup raises is written as `skipped`.
 23. **The simulator dies with the check.** kernel_check runs tt-lang-sim in its own session, kills that group on a timeout, turns
-    SIGTERM, SIGINT and SIGHUP into an exception that kills it too, and starts it with `PR_SET_PDEATHSIG` set to SIGKILL for the
-    case where kernel_check itself is killed outright.
+    SIGTERM, SIGINT and SIGHUP into an exception that kills it too (SIGINT and SIGHUP are left alone when they start ignored;
+    SIGTERM is always handled), and starts it with `PR_SET_PDEATHSIG` set to SIGKILL for the case where kernel_check itself is
+    killed outright. An interrupted check then ends by the signal that arrived, so its exit status names it.
 24. **One probe per output directory.** `kernel-probe` holds an exclusive `flock` on `probe.lock` in `--out` for its whole run. A
     second probe that cannot take it is refused with exit 2 and told the holder's pid (written in the file as information). The
     kernel releases the lock when the holder dies, SIGKILL included; the file may remain then, and it is harmless. A clean exit

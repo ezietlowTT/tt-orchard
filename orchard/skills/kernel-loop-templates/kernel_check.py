@@ -465,8 +465,8 @@ def _exit_by_signal() -> None:
 def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
     """(timed_out, return code, stdout and stderr) of one simulator run. The simulator starts in its own session; on a
     timeout its whole group is killed, so a process it started does not outlive the check. On any exception, including
-    the KeyboardInterrupt that main's handlers raise for SIGTERM, SIGINT and SIGHUP, the group is killed before the
-    exception goes on. If this process is killed outright, the simulator gets SIGKILL from its parent-death signal."""
+    the KeyboardInterrupt that main's handlers raise for SIGTERM, SIGINT and SIGHUP (SIGINT and SIGHUP are left alone
+    when they start ignored; SIGTERM is always handled), the group is killed before the exception goes on. If this process is killed outright, the simulator gets SIGKILL from its parent-death signal."""
     proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True, preexec_fn=_die_with_parent_fn())
     try:
