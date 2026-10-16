@@ -1263,3 +1263,17 @@ Notable moment: an I7 test written against the old code had a child print withou
 under `/tmp/pytest-of-ttuser` and took the root disk to 97% while the live probe ran. I deleted it at once. Tests that make large
 output now run the child under `RLIMIT_FSIZE` (16 MiB) and write a bounded amount.
 
+## 2026-10-16: kernel probe sampling (branch `ka-final-fixes`, round 3 of the fix wave)
+Prompt (operator, through the controller): "as much as we can make determinism happen when it is useful, we should do it. but we
+should also make it easy to adjust temperature so wild, zany or ingenious results can be found too".
+- Live finding at the code before this change: every request sent `temperature: 0`, so the server decoded greedily and attempts
+  at one prompt could be the same sample. `add` gave 1 distinct kernel in 3 attempts, `linear_scan` 1 in 5 (identical: 9 turns
+  and 198 s each), `silu_mul` 5 in 5 (the server's numerics diverged). The report's "independent draws" sentence was wrong.
+- `AgentStep` takes temperature, top_p and seed; its default request is byte for byte the old one. `kernel-probe` takes
+  `--temperature`, `--temperatures`, `--top-p` and `--seed`; greedy stays the default. No seed at temperature 0; above it,
+  attempt k sends base + k, and a base derived from the probe id is recorded so a run can be repeated with `--seed` (if the
+  server honours seeds, which is not verified).
+- The report splits each op by temperature and counts distinct kernels, with a warning when all attempts wrote one kernel.
+- Same round: kernel_check now exits by the signal that stopped it (it used to exit as SIGINT for every signal), and an
+  interrupt can no longer be lost inside the sweep's SIGKILL pass. Spec section 11, items 26 and 27.
+

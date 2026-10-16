@@ -189,7 +189,7 @@ Allowed new commands: `kernel_check.py` and `tt-lang-sim` from the ttlang venv. 
 30 minutes wall time, 300 s per simulator run (all provisional).
 
 Attempts are independent draws from a server that may not accept a seed. The report says so and gives counts and no
-rates or intervals.
+rates or intervals. (Corrected by amendment 27: at temperature 0, the default, attempts can be one sample.)
 
 ### 5.4 Hardware phase
 
@@ -360,3 +360,16 @@ Each item changes or adds to the approved design above. Reasons come from the im
     removes the file while it still holds the lock. The first version (a pid file with a staleness check) let two probes that
     both judged a stale lock dead run at once.
 25. **The stall watcher keeps at most 64 KiB of an unfinished line.** A longer piece is fed to the repeat detector as a line.
+26. **Sampling flags.** `kernel-probe` takes `--temperature` (default 0) or `--temperatures` (a comma-separated list; `--attempts`
+    runs at each), `--top-p` and `--seed`. Temperatures are in [0, 2], top-p in (0, 1]; bad values are refused with exit 2. No seed
+    is sent at temperature 0. Above 0, attempt k (counting every attempt of the run) sends base + k; without `--seed` the base comes
+    from the probe id and the report records it. A seed repeats a sampled run only if the server honours it, which is not verified.
+    `AgentStep` takes the same three options; its default request is unchanged (`temperature: 0`, no other sampling key), so the
+    supervisor is unchanged. The default stays greedy because a repeatable attempt is what calibration and regression checks need;
+    the operator asked for determinism where it is useful and an easy way to raise the temperature to find wild or ingenious kernels.
+27. **The report counts distinct kernels.** The claim that attempts are independent draws was false at temperature 0: the server
+    decodes greedily, and the live probe gave 1 distinct kernel in 3 attempts of `add` and 1 in 5 of `linear_scan` (the five
+    `linear_scan` attempts each took 9 turns and 198 s), while `silu_mul` gave 5 distinct kernels in 5. Each op is now split by
+    temperature, each group says "distinct kernels: N of M attempts" by kernel sha256 (attempts that wrote no kernel are counted
+    apart), and a warning follows when more than one attempt wrote a kernel and all wrote the same one. The header says attempts
+    at temperature 0 can repeat each other.
