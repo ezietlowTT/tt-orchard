@@ -1279,3 +1279,20 @@ should also make it easy to adjust temperature so wild, zany or ingenious result
 - Same round: kernel_check now exits by the signal that stopped it (it used to exit as SIGINT for every signal), and an
   interrupt can no longer be lost inside the sweep's SIGKILL pass. Spec section 11, items 26 and 27.
 
+
+## 2026-10-16: the latest skills (Task 14, branch `ka-skills`, version 0.6.1)
+Prompt (operator, through the controller): "WE USE THE LATEST tenstorrent/skills and tt-lang skills available. We check in
+preflight whether we have the latest even." The live probe had given the coder only `kernel-probe.md` and `eltwise_add.py`;
+`rmsnorm` passed 0 of 10 and `linear_scan` 0 of 6 on tt-lang API mistakes, and the installed tt-lang skill was never used.
+- `orchard/skillsfresh.py` compares the tenstorrent/skills clone(s), the tt-lang checkout and the installed tt-lang skill with
+  upstream, read only (a runner that refuses every git subcommand that could write, `gh api` GETs only, github.com only,
+  `GIT_OPTIONAL_LOCKS=0`, a network budget). `kernel-probe` and `kernel-env --check` refuse a stale tt-lang source unless
+  `--allow-stale-skills`; the bringup preflight's `skills` row warns and never blocks. Spec section 11, item 28.
+- Found while reading the skill: it documents tt-lang specification 0.12 and the pinned checkout is at 0.20 (`ttl.kernel` is
+  now `ttl.operation`, `reduce_sum` lost its scaler and takes a `shape`, `broadcast` and `fill` moved to `ttl.block`). The
+  probe therefore also gives the coder the checkout's specification and `eltwise_broadcast_reduce.py`, and `kernel-probe.md`
+  lists the renamed names. A test reads the simulator's source and checks each claim.
+- On this machine on 2026-10-16 (read only): the tt-lang checkout is 1 commit behind upstream main (a compiler-only change),
+  so the probe now refuses without `--allow-stale-skills` until the pin moves; the tt-lang skill matches its upstream; the
+  tenstorrent/skills clone is 3 commits behind, dirty, on `tsingletaryTT/squeeze` (a bringup warning).
+- Not measured: whether the reference files change the probe's pass counts.

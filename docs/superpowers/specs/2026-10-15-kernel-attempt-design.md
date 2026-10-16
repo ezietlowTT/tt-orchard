@@ -374,3 +374,34 @@ Each item changes or adds to the approved design above. Reasons come from the im
     (why `silu_mul` diverged was not measured). Repeats are common at temperature 0 and not guaranteed. Each op is now split by
     temperature, each group says "distinct kernels: N of M attempts" by kernel sha256 (attempts that wrote no kernel are counted
     apart), and a warning follows when more than one attempt wrote a kernel and all wrote the same one.
+28. **The latest skills (Task 14).** Operator rule, 2026-10-16: "WE USE THE LATEST tenstorrent/skills and tt-lang skills
+    available. We check in preflight whether we have the latest even." The live probe had given the coder only the short
+    `kernel-probe.md` and `eltwise_add.py`; `rmsnorm` passed 0 of 10 and `linear_scan` 0 of 6, failing on tt-lang API
+    mistakes (element loops over Blocks, an invented `ttl.zeros`, `reduce_sum` without `dims` and `shape`), while a full
+    tt-lang skill sat unused on the machine.
+    - `orchard/skillsfresh.py` compares three sources with upstream, read only: the tenstorrent/skills clone(s) that
+      `skills_dirs` point into (HEAD against `git ls-remote origin refs/heads/main`), the tt-lang checkout (its HEAD is
+      the pin, so "behind" means upstream main moved past `TTLANG_PIN`), and the installed tt-lang skill (each file's git
+      blob sha against the upstream tree, read with one `gh api` call; `SKILL.md` after tt-warp's `ttm-` rename and
+      provenance block are undone). States: current, behind N, ahead, differs, unknown. Unknown never claims current;
+      a current result for the same local state from the last 24 hours covers it. Only read-only git subcommands and
+      `gh api` GETs can run, `git status` runs with `GIT_OPTIONAL_LOCKS=0`, only github.com is contacted, and the
+      network has 15 s per call and 45 s in all.
+    - tenstorrent/skills has no tt-lang skill. The installed one (`~/.claude/skills/ttm-tt-lang`) was copied by
+      `tt-warp fastmodels sync` from tenstorrent/tt-metal, branch `agentic-research/fast-models-fast`, path
+      `.agents/skills/tt-lang`. tt-metal's main removed that path (83bf34e), so the branch is the only upstream copy.
+      On 2026-10-16 every file matched it.
+    - That skill documents tt-lang specification 0.12. The pinned checkout documents 0.20: `ttl.kernel` became
+      `ttl.operation` (0.13), `buffer_factor` became `block_count` (0.15), `broadcast`, `fill` and others moved from
+      `ttl.math` to `ttl.block` (0.17), and `reduce_sum` takes `dims` and a result `shape` with no scaler. The check
+      warns when the skill's version is older. The probe therefore gives the coder, in each attempt's `reference/`,
+      the skill's `guide.md` and `examples.md` and the checkout's `TTLangSpecification.md`, `eltwise_add.py` and
+      `eltwise_broadcast_reduce.py`, and `kernel-probe.md` says what to read for each kind of op and which names
+      changed. A test reads the simulator's source in the checkout and checks each named API claim.
+    - `kernel-probe` refuses (exit 2) when a reference file is missing, a link, not a regular file or over 1 MiB, and
+      when the tt-lang checkout or the skill is stale; `--allow-stale-skills` runs anyway and the report records it
+      with each source's local and upstream shas. `kernel-env --check` fails the same way and writes no cache. The
+      `tt-orchard bringup` preflight has a `skills` row for the tenstorrent/skills clone: a warning when it is not
+      current, dirty or on another branch, never a block, because bringup runs unattended. Orchard never updates a
+      source; each result names the command a person runs.
+    - Not measured: whether the extra reference files raise the probe's pass counts. No probe has run with them.

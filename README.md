@@ -525,6 +525,7 @@ its reason; a `warn` is information.
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
+| skills | never. Each tenstorrent/skills clone that `skills_dirs` points into is compared with upstream main (read only: `git ls-remote`, nothing is pulled). A clone that is behind, differs, could not be compared, has uncommitted changes or is on a branch other than main is a warning that says how to update. No `skills_dirs` is a warning. A check of the same commit from the last 10 minutes is reused | none |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
 uses your Hugging Face token: the download runs with every token variable removed, so a gated model is a
@@ -1042,9 +1043,16 @@ reported and never reset.
 
 Flags:
 
+With `--check` it also checks what the kernel probe gives the coder (section 5.9d): every reference file must be
+readable, and the tt-lang checkout and the installed tt-lang skill must be the latest upstream has. A stale one fails
+the check and the line says what to run to update. `--check` keeps its comparison results in memory and writes
+nothing.
+
 - `--check`: change nothing. Report each step and exit 2 if one is missing or failed.
 - `--src-dir`: where the tt-lang checkout lives (default `~/orchard-src/tt-lang`, or `$ORCHARD_TTLANG_SRC`).
 - `--venv-dir`: where the simulator venv lives (default `~/orchard-venvs/ttlang`, or `$ORCHARD_TTLANG_VENV`).
+- `--tt-lang-skill-dir`: the installed tt-lang skill (default `~/.claude/skills/ttm-tt-lang`, or `$ORCHARD_TTLANG_SKILL`).
+- `--allow-stale-skills`: with `--check`, a stale tt-lang checkout or skill does not fail the check.
 
 ### 5.9b Op inventory
 
@@ -1099,7 +1107,8 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   job. For a flag you leave out it uses the tier stage 2 runs on, from the tier config that `bringup.toml`
   names. With a flag missing and no config it refuses and names the two flags. A URL is printed without any
   `user:password@` part.
-- It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`, and when
+- It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`, when a
+  reference file is missing or the tt-lang sources are not the latest (section 5.9d), and when
   another probe is using the same `--out` directory (it holds a lock on `probe.lock`). The lock goes away when its
   probe ends, however it ends; a `probe.lock` file left after a SIGKILL is harmless.
 - The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
@@ -1157,6 +1166,39 @@ Flags:
 - `--venv-dir`: the simulator venv (default `~/orchard-venvs/ttlang`, or `$ORCHARD_TTLANG_VENV`).
 - `--shared-python`: the interpreter with ttnn and tt-lang that the hardware phase runs (default
   `~/.tenstorrent-venv/bin/python`).
+- `--tt-lang-skill-dir`: the installed tt-lang skill whose `guide.md` and `examples.md` the coder gets (default
+  `~/.claude/skills/ttm-tt-lang`, or `$ORCHARD_TTLANG_SKILL`).
+- `--allow-stale-skills`: run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or
+  could not be compared. The report records it, with each source's local and upstream shas.
+
+### 5.9d The latest skills
+
+The operator's rule (2026-10-16): "WE USE THE LATEST tenstorrent/skills and tt-lang skills available. We check in
+preflight whether we have the latest even." Three sources are checked, read only. Orchard never updates one; each
+result says what to run.
+
+| Source | Where | Compared with | Where it is checked |
+|---|---|---|---|
+| tenstorrent/skills | the clone(s) `skills_dirs` in `bringup.toml` point into | upstream `main` (`git ls-remote origin refs/heads/main`) | `tt-orchard bringup` preflight: a warning, never a block |
+| tt-lang checkout | `--src-dir` (default `~/orchard-src/tt-lang`), pinned in `orchard/defaults.py` | upstream `main` | `kernel-probe` (refuses) and `kernel-env --check` (fails) |
+| tt-lang skill | `--tt-lang-skill-dir` (default `~/.claude/skills/ttm-tt-lang`) | each file's git blob sha in tenstorrent/tt-metal, branch `agentic-research/fast-models-fast`, `.agents/skills/tt-lang` | `kernel-probe` (refuses) and `kernel-env --check` (fails) |
+
+- tenstorrent/skills has no tt-lang skill. The installed one was copied by `tt-warp fastmodels sync` from that
+  tt-metal branch; tt-metal's `main` removed the path, so the branch is the only upstream copy. Its `SKILL.md` is
+  compared after tt-warp's two edits are undone (the `ttm-` name prefix and the provenance block).
+- The tt-lang checkout is pinned, so "behind" means upstream `main` has moved past the pin. Moving the pin is a code
+  change (`TTLANG_PIN` and `TTLANG_DIAGNOSTICS_SHA256` in `orchard/defaults.py`) followed by `tt-orchard kernel-env`
+  with the old checkout moved aside. Until then the probe needs `--allow-stale-skills`.
+- A comparison that cannot be made (no network, an origin off github.com, a malformed answer) is `unknown`, never
+  current. A check from the last 24 hours that found the same local state current covers it; otherwise the probe
+  refuses. Results are cached in `~/.cache/tt-orchard/skills-freshness.json`.
+- The checker runs only read-only git commands (`git status` without taking the index lock) and `gh api` GET
+  requests to github.com, each with a 15 s timeout and 45 s for all of them.
+- The tt-lang skill documents tt-lang specification 0.12; the pinned checkout documents 0.20. The check warns when
+  the skill's version is older. The probe gives the coder both: the skill's `guide.md` and `examples.md`, and the
+  checkout's `TTLangSpecification.md`, `eltwise_add.py` and `eltwise_broadcast_reduce.py`, in each attempt's
+  `reference/` directory. Its skill (`orchard/skills/kernel-probe.md`) says which file to read for each kind of op
+  and which names changed since 0.12. Each file's sha256 is in the report and in every attempt's provenance.
 
 ### 5.10 Tensor caches and disk
 
