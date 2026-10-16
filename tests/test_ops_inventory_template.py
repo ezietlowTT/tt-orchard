@@ -168,3 +168,41 @@ print(json.dumps({"ops": [o["op"] for o in ops], "py": py, "hops": hops}))
     assert got["ops"] == ["aten.add.Tensor"]
     assert got["py"] == {"<built-in function getitem>": 2}
     assert got["hops"] == {"wrap_with_set_grad_enabled": 1}
+
+
+@needs_stack
+@pytest.mark.parametrize("name", ["set_seed", "pipeline", "AutoTokenizer"])
+def test_a_config_naming_a_callable_that_is_not_a_model_class_is_skipped(tmp_path, name):
+    """I3. config.json comes from the Hub, so its `architectures` entry must not choose which public callable of
+    transformers runs. A function (set_seed, pipeline) and a class that is not a model (AutoTokenizer) are skipped."""
+    done, raw = run_template(tmp_path, {**QWEN3_TINY, "architectures": [name]})
+    assert done.returncode == 0, done.stderr
+    assert "not a transformers model class" in raw["skipped"] and name in raw["skipped"] and "ops" not in raw
+
+
+@needs_stack
+def test_a_callable_named_by_the_config_is_never_called(tmp_path):
+    """I3. A recorder planted in the transformers namespace stands in for any public callable. It must not run, and the
+    class given with --class goes through the same rule."""
+    d = tmp_path / "model"
+    d.mkdir()
+    (d / "config.json").write_text(json.dumps({**QWEN3_TINY, "architectures": ["OrchardPlantedCallable"]}))
+    marker = tmp_path / "called"
+    code = r'''
+import importlib.util, sys, transformers
+marker = sys.argv[2]
+def planted(*a, **k):
+    open(marker, "w").write("called")
+transformers.OrchardPlantedCallable = planted
+spec = importlib.util.spec_from_file_location("t", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+rc1 = m.main(["--model-dir", sys.argv[3], "--out", sys.argv[4]])
+rc2 = m.main(["--model-dir", sys.argv[3], "--out", sys.argv[4], "--class", "OrchardPlantedCallable"])
+print(rc1, rc2)
+'''
+    out = tmp_path / "raw.json"
+    done = subprocess.run([PY, "-c", code, str(TEMPLATE), str(marker), str(d), str(out)], capture_output=True,
+                          text=True, timeout=300)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.split()[-2:] == ["0", "0"]
+    assert not marker.exists()
+    assert "not a transformers model class" in json.loads(out.read_text())["skipped"]

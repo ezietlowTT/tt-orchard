@@ -14,8 +14,9 @@ DynamicCache. Decoding-time cache and state updates are not traced. A recurrent 
 recurrence over the SEQ positions, so its scan ops do appear.
 
 What it will not do: import a repo's own modeling code. A config.json with `auto_map` is written as `skipped`
-(exit 0), and so is an architecture the installed transformers does not have. The traced class is the one config.json
-names unless --class says otherwise (for example MoshiForCausalLM, the text model inside MoshiForConditionalGeneration,
+(exit 0), and so is an architecture the installed transformers does not have, or a name that is not a model class
+(a subclass of PreTrainedModel): a downloaded config.json must not choose which function of transformers runs.
+The traced class is the class config.json names, unless --class says otherwise (for example MoshiForCausalLM, the text model inside MoshiForConditionalGeneration,
 which takes audio inputs this script does not build). The output says which class was traced.
 
 Exit codes: 0 written (including a `skipped` file), 2 config.json missing, 3 the build or the export failed (the file
@@ -153,6 +154,12 @@ def main(argv=None) -> int:
     cls = getattr(transformers, name, None) if name else None
     if cls is None:
         write(a.out, {**base, "skipped": f"class {name!r} is not in the installed transformers {transformers.__version__}"})
+        return 0
+    # config.json comes from the Hub, so the name it gives must not choose which public callable of transformers
+    # runs (a function such as `pipeline`, or a class such as AutoTokenizer). Only a model class is built.
+    if not (isinstance(cls, type) and issubclass(cls, transformers.PreTrainedModel)):
+        write(a.out, {**base, "skipped": f"{name!r} is not a transformers model class (a subclass of PreTrainedModel); "
+                                         "nothing was built"})
         return 0
     base["traced_class"] = name
     try:
