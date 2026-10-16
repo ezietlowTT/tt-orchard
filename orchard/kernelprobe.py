@@ -632,9 +632,15 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
                 pass
 
         def kill_pass() -> None:
-            note(found())                                # a second scan: new processes started during the grace
+            try:
+                note(found())                            # a second scan: new processes started during the grace
+            except Exception:
+                pass                                     # the processes already known still get their SIGKILL
             for r in records:
-                send(r["pid"], signal.SIGKILL)
+                try:
+                    send(r["pid"], signal.SIGKILL)
+                except Exception:
+                    pass
 
         targets = found()
         note(targets)
@@ -645,7 +651,10 @@ def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.k
             while clock() < deadline and any(_environ_has(proc_root, pid, entry) for pid in targets):
                 sleep(SWEEP_POLL_S)
         except BaseException:
-            kill_pass()                                  # an interrupt must not skip the SIGKILL
+            try:
+                kill_pass()                              # an interrupt must not skip the SIGKILL
+            except Exception:
+                pass                                     # and an error in it must not replace the interrupt
             raise
         kill_pass()
         deadline = clock() + 1.0                         # a killed process leaves /proc within moments

@@ -1775,6 +1775,39 @@ def test_the_guard_records_a_plain_kill_it_does_not_allow(tmp_path):
             os.kill(grandchild, 9)
 
 
+def test_an_interrupt_is_not_lost_when_the_second_scan_fails(tmp_path, monkeypatch):
+    """A4. Ctrl-C during the grace, and the second scan raises. The known stray still gets its SIGKILL and the
+    KeyboardInterrupt goes on (it is not replaced by the scan's error and swallowed)."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stubborn = _subprocess.Popen(
+        [_sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                "print('ready', flush=True); time.sleep(60)"],
+        env=env, start_new_session=True, stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    real_scan = kp.scan_strays
+    scans = []
+
+    def scan(run_dir, **kw):
+        scans.append(1)
+        if len(scans) > 1:
+            raise RuntimeError("proc went away")
+        return real_scan(run_dir, **kw)
+    monkeypatch.setattr(kp, "scan_strays", scan)
+    sent, violations = [], []
+
+    def interrupted(_s):
+        raise KeyboardInterrupt
+    try:
+        assert stubborn.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills({stubborn.pid}, sent, violations)
+        with pytest.raises(KeyboardInterrupt):
+            kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=5.0, sleep=interrupted)
+        assert stubborn.wait(timeout=5) == -_signal.SIGKILL and violations == [] and len(scans) == 2
+    finally:
+        _stop(stubborn)
+
+
 class _BackgroundingStep:
     """Stands in for AgentStep: run() starts a process with the agent's environment that outlives the step, the way a
     shell command that backgrounds a process and exits would, then returns or raises."""
