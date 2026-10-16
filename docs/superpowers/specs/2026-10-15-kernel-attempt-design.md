@@ -1,6 +1,8 @@
 # Kernel attempt: an op inventory and a tt-lang kernel probe
 
-Date: 2026-10-15. Status: draft for operator review. Branch: `kernel-attempt`.
+Date: 2026-10-15. Status: implemented on branch kernel-attempt; section 11 records what changed during implementation. Branch: `kernel-attempt`.
+
+Section 11 amends sections 4.3, 5.1, 5.2, 5.3, 5.4 and 7; where they differ, section 11 wins.
 
 ## 1. Purpose and scope
 
@@ -104,6 +106,8 @@ reader can see when an inventory is partial.
 
 ### 4.3 Statuses and the ttnn dump
 
+(Superseded in part: see section 11, item 8 for a fifth status, `ignored`, and item 10 for what the dump lists.)
+
 `tt-orchard inventory refresh-ttnn` runs `import ttnn; dir(...)` for the public op namespaces under
 `gozer run --chips 1 --who "claude:orchard-inventory"`, and writes `orchard/data/ttnn_ops-<ttnn version>.json`
 with the version, the dump's sha256 and the names. It is a command the operator runs; the supervisor never
@@ -146,7 +150,7 @@ research.
 stage. Each attempt gets `DIR/<op>/attempt-<n>/` with `kernel.py` (the only file the agent writes),
 `check.json`, the agent log, and a copy of the spec. `DIR/kernel-probe-report.json` and `.md` summarise.
 
-Ops (`orchard/skills/kernel-loop-templates/ops/<op>.json`), easiest first:
+Ops (`orchard/skills/kernel-loop-templates/ops/<op>.json`), easiest first (superseded: see section 11, item 1, for a fourth op, `add`):
 
 | Op | Why |
 | --- | --- |
@@ -160,6 +164,8 @@ seeded random values plus a heavy-tailed set (a few scaled outliers), because a 
 easy. Activations captured from a real model are a later addition and the report says the sets are synthetic.
 
 ### 5.2 The check
+
+(Superseded in part: the hash check below is replaced by section 11, item 2, and the PCC-only comparison by item 4.)
 
 `kernel_check.py` (template, run by the agent as a shell command) imports `kernel.py`, runs it on the simulator
 through the ttlang venv's `tt-lang-sim`, compares with the torch reference by Pearson correlation (PCC) and max
@@ -220,7 +226,7 @@ Test first, one commit per change, a mutation per guard (the repo's practice). T
   scaling off.
 - **Probe.** For each op, a deliberately wrong kernel fixture (a norm with the wrong epsilon, a scan with the
   wrong carry) must come back `numeric_mismatch`; a test that has not been seen to fail proves nothing. Mutations:
-  template hash not checked, category taken from the exit code, hardware phase without a lease (a tripwire gozer
+  template hash not checked (superseded: see section 11, item 2; the probe now re-runs the check itself), category taken from the exit code, hardware phase without a lease (a tripwire gozer
   fails any call), no smoke test, no deadline.
 - **No network and no device.** Inventory and probe tests run with sockets blocked and with the no-chip device
   mask.
@@ -276,11 +282,12 @@ Each item changes or adds to the approved design above. Reasons come from the im
    files the agent can write are capped. A sha256 re-check of the copy comes before the gozer call, so the file that was gated is
    the file that runs on hardware. The report is built from the records the run produced; a resume accepts only `<op>-<int>`
    records with the same probe id. The boundary is best effort against shortcuts and accidents. It does not stop a determined
-   attacker. Reason: the first design read its verdict from a directory the agent could write, and the review showed a planted
-   symlink or a surviving agent process could forge a pass.
+   attacker. `load_attempts` reads records back for a resume; no command calls it yet. Reason: the first design read its
+   verdict from a directory the agent could write, and the review showed a planted symlink or a surviving agent process could
+   forge a pass.
 3. **Two failure categories were added: `harness_error` and `forbidden_code`.** `harness_error` covers a fault in the templates or
    the environment, including the harness `setup` phase (device open, input building, the reference). `forbidden_code` covers a
-   `kernel.py` that the static gate refuses.
+   `kernel.py` that the static gate refuses, and one that is a link, a device or larger than 256 KiB.
 4. **The check is stronger than PCC alone.** PCC does not change when the output is scaled, so a kernel that returned the wrong
    magnitude passed. The check now also needs a per-set relative L2 error, a least-squares slope and a max-abs-error bar. All
    bars are provisional and live in the op specs. A missing field fails. A best-effort static `ast` gate on `kernel.py` runs
@@ -290,13 +297,15 @@ Each item changes or adds to the approved design above. Reasons come from the im
    on 2026-10-15 to trace Qwen3, RWKV, Mamba2 and Moshi's text model. Without `use_cache=False`, three of the four failed. A
    dispatch-level recorder was tried and fails on Moshi.
 6. **`orchard/stallwatch.py`** (operator instruction, 2026-10-15: "Instead of pure timers, we need watchers"). Every long child
-   process runs under a watcher that stops it on a stall (no output and no CPU) or on a repeating output line. The stop sends
+   of `kernel-probe` (the simulator check, the smoke test and the hardware runs) runs under a watcher that stops it on a stall (no output and no CPU) or on a repeating output line. The stop sends
    SIGTERM to the whole process group first, so `gozer run` can release its lease, and SIGKILL after a grace period. Deadlines
-   are a backstop. The budgets in sections 5.3 and 5.4 are backstops.
-7. **`scaled_count`** is `count_in_layers x (layers in config / layers traced) + count outside layers`. The report says when a
+   are a backstop. The budgets in sections 5.3 and 5.4 are backstops. Only `kernel-probe` uses the watcher so far; see the log in
+   CLAUDE.md for the places that still use timers.
+7. **`scaled_count`** is `count_in_layers x (layers in config / layers traced) + count outside layers`, rounded with `round()`. The report says when a
    count is not scaled. Counts are per static node of the traced graph, so a loop body that runs many times counts once.
-8. **A fifth inventory status, `ignored`**, for metadata no-ops (`orchard/data/ignored_ops.json`: alias, contiguous, detach and
-   similar). Section 4.3 listed four statuses. Without `ignored` the unmapped list was mostly noise.
+8. **A fifth inventory status, `ignored`**, for metadata no-ops. `orchard/data/ignored_ops.json` holds exactly
+   `aten._assert_tensor_metadata.default`, `aten.alias.default` and `aten.contiguous.default`. A ruling also named `detach` and
+   `lift_fresh_copy`; they were not shipped. Section 4.3 listed four statuses. Without `ignored` the unmapped list was mostly noise.
 9. **The inventory traverses higher-order-op bodies.** Python-level nodes (for example `getitem`) stay out of the op list and are
    recorded under `python_nodes`. Higher-order wrappers are recorded under `higher_order_nodes`. Both count nodes (a
    `cond` node has two bodies and counts once). Before this, the rotary embedding's `cos`, `sin` and `to.device` were missed.
@@ -306,10 +315,16 @@ Each item changes or adds to the approved design above. Reasons come from the im
 11. **`run_inventory`'s `data_dir` parameter is now `dump_dir`.** The tables are always the packaged ones.
 12. **`tt-orchard kernel-probe` exit codes** are 0 (done), 2 (refused or bad input), 3 (crash), 4 (interrupt) and 5 (hardware
     hang). The report is written whatever happens, from the records so far, and no hardware phase starts after a crash.
-13. **`kernel-env` completes an interrupted clone.** A `.git` with no HEAD and the right origin is finished (remote, fetch,
-    checkout). A clone at another commit is never reset. The plan's code deleted the clone instead, which blocked every retry
+13. **`kernel-env` completes an interrupted clone.** A `.git` with no HEAD and the right origin is finished (the remote exists, so only fetch and
+    checkout run again). A clone at another commit is never reset. The plan's code deleted the clone instead, which blocked every retry
     after one failed fetch.
 14. **The stage 0 hook is step 9 of the delta-triage skill**, after `delta.json` is final, because step 8 rewrites the whole file.
-15. **Process kills.** The kill changed from SIGKILL to SIGTERM first, then SIGKILL after a grace period (item 6). Signal guards
-    never signal a process group id of 1 or lower, the caller's own group, or a process that is not its group's leader. If
-    anything raises during the grace period, the SIGKILL still goes out.
+15. **Process kills.** The kill changed from SIGKILL to SIGTERM first, then SIGKILL after a grace period (item 6). Before the
+    first SIGTERM the stop checks that the process group id is above 1, is not the caller's own group, and that the child leads
+    the group. The SIGKILL after the grace checks the id (above 1), the caller's own group and that the group still has members.
+    It does not check leadership, on purpose: the leader may already be reaped. If anything raises during the grace period, the
+    SIGKILL still goes out.
+16. **Success criterion A (section 9) is not met in full.** It asked for no `unmapped` ops on the Qwen3 fixture once a dump exists.
+    The final run leaves 6 unmapped: `__and__`, `index`, `to.dtype_layout`, `diff`, `new_ones` and `to.device`. They stay unmapped
+    because their ttnn semantics are not provably identical to the aten ops. Mapping them is a table decision for the operator or a
+    later task.

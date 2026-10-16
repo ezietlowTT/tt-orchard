@@ -1178,9 +1178,9 @@ Built, by task:
 - Task 1, `tt-orchard kernel-env`: a tt-lang checkout and a simulator venv, with the diagnostics patch. It completes an interrupted clone
   and never resets one at another commit (the plan's code deleted it, which blocked every retry after one failed fetch).
 - Task 2, the command wiring in `orchard/cli.py` and the README section.
-- Task 3 and 3b, `orchard/stallwatch.py`: every long child runs under a watcher that stops it on a stall (no output and no CPU) or a
-  repeating output line. The stop sends SIGTERM to the process group first and SIGKILL after a grace period, so `gozer run` can release
-  its lease. Signal guards never signal pgid 1 or lower, the caller's own group, or a non-leader.
+- Task 3 and 3b, `orchard/stallwatch.py`: every long child of `kernel-probe` (the simulator check, the smoke test, the hardware runs)
+  runs under a watcher that stops it on a stall (no output and no CPU) or a repeating output line. The stop sends SIGTERM to the process group first and SIGKILL after a grace period, so `gozer run` can release
+  its lease. The first SIGTERM is guarded (pgid above 1, a group other than the caller's, child leads it); the SIGKILL checks the first two and that the group has members, and skips leadership because the leader may be reaped.
 - Tasks 4 and 4b, the op inventory template: traces a model on the meta device with `torch.export`, counts ops per static node, scales
   in-layer counts, follows higher-order bodies and keeps python-level nodes out of the op list.
 - Tasks 5 and 6, `orchard/opinventory.py` and `inventory refresh-ttnn`: statuses mapped, composable, unmapped, ignored and unchecked; a
@@ -1203,25 +1203,37 @@ Review findings that changed the design:
   hardware hang).
 Live results:
 - L1: `kernel-env --check` passed all six steps (exit 0).
-- L2 and L3: the inventory ran on default configs of Qwen3, RWKV, Mamba2 and Moshi's text model. The first `inventory refresh-ttnn`
-  ran under `gozer run --chips 1 --exact 1` and wrote the dump for ttnn 0.65.1rc17.dev6200: 821 names, none skipped, lease released,
-  all four chips free afterwards. With that dump (before the higher-order fix): qwen3 mapped 24, unmapped 7, ignored 3; rwkv mapped 16,
-  composable 1, unmapped 4, ignored 2; mamba2 mapped 29, composable 1, unmapped 6, ignored 3; moshi-lm mapped 24, composable 1,
-  unmapped 8, ignored 3. Real gaps: rwkv `copy_` (256 scaled) and `rsub.Scalar` (160); mamba2 `einsum`, `bitwise_not`, `masked_fill`,
-  `split_with_sizes` and `conv1d`; moshi `type_as`. Task 4b then mapped `rsub` and `conv1d` (name match only).
+- L2 and L3: the inventory ran on default configs of Qwen3, RWKV, Mamba2 and Moshi's text model (`MoshiForCausalLM`), 2 layers
+  traced. The first `inventory refresh-ttnn` ran under `gozer run --chips 1 --exact 1` and wrote the dump for ttnn
+  0.65.1rc17.dev6200: 821 names, none skipped, lease released, all four chips free afterwards. Final run on the final code
+  (mapped / composable / unmapped / ignored): Qwen3 26/0/6/3; RWKV 17/1/2/2; Mamba2 30/1/4/3; Moshi's text model 26/1/7/3.
+  Unmapped: Qwen3 `__and__`, `index`, `to.dtype_layout`, `diff`, `new_ones`, `to.device`; RWKV `copy_` (256 scaled), `div_` (4);
+  Mamba2 `einsum` (320), `bitwise_not` (256), `masked_fill` (256), `split_with_sizes` (128); Moshi `type_as` (65), `to.device`
+  (32) and the five Qwen3 ones other than `to.device`. An earlier run before the higher-order-body fix gave other numbers: the fix
+  added the ops inside the rotary-embedding bodies and removed the python-level `getitem` and wrapper nodes. `rsub.Scalar` and
+  `conv1d` are mapped now. By name, each architecture's ops are almost all in ttnn's name list. The unmapped ones are a short list
+  of cast, in-place, indexing and masking ops plus Mamba2's `einsum`. `mapped` is a name match, so this does not say the models
+  would run or run fast.
 - L4 and L5 (the probe against the live coder, and the hardware phase) are run by the controller and added by the controller.
 Notable moments and mistakes:
 - The terminal died on 2026-10-16. Cause: a new test fed a symlink to `/dev/zero` to an uncapped `read_text()`, and the kernel OOM
   killer stopped it (exit 137). My first theory, `os.killpg(0, ...)` in the stallwatch tests, was wrong; the guards stay as hardening.
   That test now runs in a child process limited to 2 GiB with a 60 s timeout. Tests that spawn or kill processes run under `setsid -w`.
-- I ran a stray `gozer run` while a suite was running. Nothing was hurt, and the chips were free afterwards.
+- While a suite was running I ran one `gozer run --chips 2 -- env` to see what a lease hands its child; it released and reset board 0, which was free and unused, and no chip was opened. It was avoidable.
 - The first parse of the ttnn dump listed classes as ops, which led to the `callable()` fix above.
 - Reviewers found the large gaps (the scale-blind check, the forgeable verdict, the lost report); the authors' own tests had passed.
 Process: two parallel worktree streams (`ka-inventory`: tasks 4 to 7 and 11; `ka-probe`: tasks 8 to 10) merged into `kernel-attempt`;
-more than 20 review rounds; every task had a mutation table checked by running the mutations; the ledger is the record. Full suite after
+more than 20 review rounds; most tasks had implementer-run mutation tables (the counts are the implementers' reports; reviewers read them and spot-checked some, and the controller did not re-run them); for two guards in Task 9 (the regular-file read layers) both layers were removed together, so no single layer was seen red alone; the ledger is the record. Full suite after
 the merge: 3,860 passed, 2 skipped.
 Not done:
-- The hardware phase has not run. L4 and L5 results come from the controller.
+- The hardware phase (L5) has not run. L4 and L5 results come from the controller.
+- Success criterion A is not met: Qwen3 has 6 unmapped ops (`__and__`, `index`, `to.dtype_layout`, `diff`, `new_ones`, `to.device`). They
+  stay unmapped because their ttnn semantics are not provably identical to the aten ops. Mapping them is a table decision for the
+  operator or a later task.
+- Only `kernel-probe` runs its children under the stall watcher. These still use timers only: `inventory refresh-ttnn` (a 1800 s
+  `subprocess.run` timeout), the `inventory` trace, the `kernel-env` steps, and the agent's own shell commands (the `Tools` timeout).
+  They can adopt the watcher later.
+- The stall watcher's 60 s quiet period and the probe's other budgets are provisional and unmeasured.
 - Stage wiring (option C in the spec) is the operator's decision from the probe's table.
 - The `generic_op` export route is not built. The full-port stages are untouched.
 - The tt-lang diagnostics patch is local and has not been reported upstream, by decision.

@@ -1104,8 +1104,8 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   `kernel.py` made as a regular file of at most 256 KiB, under `<out>/.verdict/<op>-<n>/`. The agent's own `check.json`
   is never believed; when it disagrees, the report marks it `agent_check_untrusted`. This boundary is best effort
   against shortcuts and accidents.
-- The check needs more than PCC. A static gate on `kernel.py` runs first (imports limited to `ttl`, `ttnn` and `math`; no
-  `import torch` or host code; `OPERATION` a top-level `def` decorated with `@ttl.operation`) and reports every violation
+- The check needs more than PCC. A static gate on `kernel.py` runs first (imports limited to `ttl`, `ttnn` and `math`, with `__future__`, `typing` and aliases of the three
+  accepted; no `import torch` or host code; `OPERATION` a top-level `def` decorated with `@ttl.operation`) and reports every violation
   with a remedy. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
   every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
   `harness_error` (a fault in the templates or the environment, including the setup phase).
