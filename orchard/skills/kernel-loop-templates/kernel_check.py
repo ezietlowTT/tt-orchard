@@ -416,11 +416,28 @@ def _kill_own_group(proc) -> None:
         pass
 
 
+def _die_with_parent() -> None:
+    """Runs in the simulator's process before exec: ask Linux to SIGKILL it when this check process dies
+    (PR_SET_PDEATHSIG). This covers a SIGKILL of the check, after which no handler of ours can run. Elsewhere, or
+    when prctl is missing, nothing happens."""
+    try:
+        import ctypes
+        ctypes.CDLL(None, use_errno=True).prctl(1, 9)   # PR_SET_PDEATHSIG = 1, SIGKILL = 9
+    except Exception:
+        pass
+
+
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
 def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
     """(timed_out, return code, stdout and stderr) of one simulator run. The simulator starts in its own session; on a
-    timeout its whole group is killed, so a process it started does not outlive the check."""
+    timeout its whole group is killed, so a process it started does not outlive the check. On any exception, including
+    the KeyboardInterrupt that main's handlers raise for SIGTERM, SIGINT and SIGHUP, the group is killed before the
+    exception goes on. If this process is killed outright, the simulator gets SIGKILL from its parent-death signal."""
     proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            start_new_session=True)
+                            start_new_session=True, preexec_fn=_die_with_parent)
     try:
         out, err = proc.communicate(timeout=timeout_s)
         return False, proc.returncode, (out or "") + "\n" + (err or "")
@@ -438,6 +455,24 @@ def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
 
 
 def main(argv=None) -> int:
+    """Run the check. SIGTERM, SIGINT and SIGHUP become a KeyboardInterrupt while it runs, so a watcher that stops
+    this process (run_watched sends SIGTERM to this process's group) also stops the simulator, which runs in a
+    session of its own. The previous handlers are restored at the end."""
+    import signal
+    previous = {}
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        try:
+            previous[sig] = signal.signal(sig, _raise_interrupt)
+        except ValueError:                            # not the main thread: no handler can be installed
+            pass
+    try:
+        return _main(argv)
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+
+
+def _main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--attempt-dir", default=".")
     ap.add_argument("--phase", choices=("sim",), default="sim")

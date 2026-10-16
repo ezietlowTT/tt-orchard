@@ -13,6 +13,7 @@ import json
 import re
 import os
 import shutil
+import signal as _signal_mod
 import subprocess
 import sys
 import time
@@ -924,3 +925,96 @@ def test_the_simulator_kill_never_signals_a_group_that_is_not_the_childs_own(mon
     proc = type("P", (), {"pid": os.getpgrp() if pid == "own group" else pid, "kill": lambda self: killed.append(1)})()
     CHECK._kill_own_group(proc)
     assert sent == [] and killed == [1]
+
+
+# R1: when kernel_check itself is stopped, the simulator (in its own session since m2) must not be orphaned.
+
+def _ours_alive(pid, marker):
+    """True only when `pid` is alive, not a zombie, and its environment still carries this test's marker, so a pid the
+    kernel has reused for another process is never treated as ours."""
+    if _dead_or_zombie(pid):
+        return False
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            return marker.encode() in f.read()
+    except OSError:
+        return False
+
+
+def _kill_if_ours(pid, marker):
+    if _ours_alive(pid, marker):
+        try:
+            os.kill(pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
+def _start_check_with_fake_sim(tmp_path, marker):
+    """kernel_check.py as this test's own child (its own session), running a stand-in simulator that records its pid,
+    starts a grandchild and sleeps. Returns (check process, marks directory)."""
+    tdir, adir = _attempt(tmp_path, "add_good")
+    marks = tmp_path / "pids"
+    marks.mkdir()
+    sim = tmp_path / "fake-sim"
+    sim.write_text("#!" + sys.executable + "\n"
+                   "import os, subprocess, sys, time\n"
+                   f"marks = {str(marks)!r}\n"
+                   "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                   "open(os.path.join(marks, 'grandchild'), 'w').write(str(g.pid))\n"
+                   "open(os.path.join(marks, 'sim'), 'w').write(str(os.getpid()))\n"
+                   "time.sleep(60)\n")
+    sim.chmod(0o755)
+    env = dict(os.environ, ORCHARD_TEST_MARKER=marker)
+    proc = subprocess.Popen([sys.executable, str(tdir / "kernel_check.py"), "--attempt-dir", str(adir), "--sim",
+                             str(sim), "--timeout-s", "50"], env=env, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    end = time.monotonic() + 30
+    while time.monotonic() < end and not (marks / "sim").is_file():
+        time.sleep(0.05)
+    assert (marks / "sim").is_file(), "the stand-in simulator never started"
+    return proc, marks
+
+
+def _pids(marks):
+    return [int((marks / n).read_text()) for n in ("sim", "grandchild") if (marks / n).is_file()]
+
+
+def _all_gone(pids, marker, wait_s=10.0):
+    end = time.monotonic() + wait_s
+    while time.monotonic() < end and any(_ours_alive(p, marker) for p in pids):
+        time.sleep(0.05)
+    return [p for p in pids if _ours_alive(p, marker)]
+
+
+def test_sigterm_to_kernel_check_stops_the_simulator_and_its_grandchild(tmp_path):
+    marker = f"orchard-r1-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker)
+        proc.send_signal(_signal_mod.SIGTERM)                 # our own child, by its Popen handle
+        proc.wait(timeout=20)
+        assert _all_gone(_pids(marks), marker) == []
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)
+
+
+def test_sigkill_of_kernel_check_still_stops_the_simulator(tmp_path):
+    """No handler can run after SIGKILL; the simulator dies through its parent-death signal."""
+    marker = f"orchard-r1k-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker)
+        proc.kill()
+        proc.wait(timeout=20)
+        sim_pid = int((marks / "sim").read_text())
+        assert _all_gone([sim_pid], marker) == []
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)
