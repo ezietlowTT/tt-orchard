@@ -956,6 +956,15 @@ def _agent_cell(a: dict) -> str:
     return _cell("; ".join(parts))
 
 
+def _sampling_text(sp: dict) -> str:
+    """The run's sampling in one sentence, with the seed base needed to repeat a sampled run."""
+    temps = ", ".join(f"{t:g}" for t in sp.get("temperatures") or [])
+    top_p = "the server's default" if sp.get("top_p") is None else f"{sp['top_p']:g}"
+    return (f"Sampling: temperature {temps} ({sp.get('attempts_per_temperature')} attempts each), top_p {top_p}. "
+            f"No seed is sent at temperature 0. Above 0, attempt k sends seed {sp.get('seed_base')} + k (base from "
+            f"{sp.get('seed_base_from')}; repeat it with --seed {sp.get('seed_base')}).")
+
+
 def _bars_text(b: dict) -> str:
     lo, hi = b["slope"]
     return (f"pcc >= {b['pcc']}, rel_l2 <= {b['rel_l2']}, slope in [{lo}, {hi}], "
@@ -989,6 +998,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
                 "the agent reads. A pass of `add` shows the loop works; it is not evidence that the coder can write a "
                 "kernel.", ""] if "add" in ops else []),
              *([header["budget_note"], ""] if header.get("budget_note") else []),
+             *([_sampling_text(header["sampling"]), ""] if isinstance(header.get("sampling"), dict) else []),
              *([f"{header['ignored_records']} unrelated or unreadable records ignored under {VERDICT_DIR}.", ""]
                if header.get("ignored_records") else []),
              "## tt-lang", "",
@@ -1115,6 +1125,65 @@ def _hw_line(a: dict) -> str:
     result = "passed on hardware" if h.get("passed") else (h.get("category") or "failed")
     first = f" ({h['first_line']})" if h.get("first_line") and not h.get("passed") else ""
     return f"{a['op']} {a['attempt']}: {result}{first}"
+
+
+MAX_TEMPERATURE = 2.0
+
+
+def _number(text, flag: str) -> float:
+    try:
+        value = float(str(text).strip())
+    except ValueError:
+        raise _Refused(f"{flag}: {text!r} is not a number") from None
+    return value
+
+
+def parse_sampling(args) -> dict:
+    """The run's sampling from --temperature, --temperatures, --top-p and --seed, checked; raises _Refused.
+
+    {"temperatures": [...], "top_p": float or None, "seed": int or None}. The default is one group at temperature 0
+    (greedy decoding: repeatable, good for calibration and regression checks). Every temperature must be in [0, 2] and
+    listed once, top-p in (0, 1], and the seed a whole number of 0 or more."""
+    one, many = getattr(args, "temperature", None), getattr(args, "temperatures", None)
+    if one is not None and many is not None:
+        raise _Refused("give --temperature or --temperatures, not both")
+    texts = [one] if one is not None else (str(many).split(",") if many is not None else ["0"])
+    temperatures = []
+    for text in texts:
+        t = _number(text, "--temperatures" if many is not None else "--temperature")
+        if not (0.0 <= t <= MAX_TEMPERATURE):                 # NaN fails this too
+            raise _Refused(f"temperature {text.strip()} is not between 0 and {MAX_TEMPERATURE:g}")
+        if t in temperatures:
+            raise _Refused(f"temperature {t:g} is listed twice")
+        temperatures.append(t)
+    top_p = getattr(args, "top_p", None)
+    if top_p is not None:
+        try:
+            top_p = float(str(top_p).strip())
+        except ValueError:
+            raise _Refused(f"--top-p: {top_p!r} is not a number") from None
+        if not (0.0 < top_p <= 1.0):
+            raise _Refused(f"--top-p {top_p:g} is not in (0, 1]")
+    seed = getattr(args, "seed", None)
+    if seed is not None:
+        try:
+            seed = int(str(seed).strip())
+        except ValueError:
+            raise _Refused(f"--seed: {seed!r} is not a whole number") from None
+        if seed < 0:
+            raise _Refused(f"--seed {seed} is below 0")
+    return {"temperatures": temperatures, "top_p": top_p, "seed": seed}
+
+
+def seed_base_from_probe_id(probe_id: str) -> int:
+    """A seed base derived from the probe id, for a run without --seed. The report records it, so the run can be
+    repeated with --seed <base> (if the server honours seeds)."""
+    return int(hashlib.sha256(probe_id.encode("utf-8")).hexdigest()[:8], 16) % (2 ** 31)
+
+
+def attempt_seed(base: int, k: int, temperature: float) -> int | None:
+    """The seed of the k-th attempt of the run (k counts every attempt from 1): none at temperature 0, else base + k."""
+    return None if temperature == 0 else base + k
 
 
 def new_probe_id() -> str:
@@ -1267,6 +1336,10 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     attempts = int(getattr(args, "attempts", 5) or 0)
     if attempts < 1:
         return refuse("--attempts must be at least 1")
+    try:
+        plan = parse_sampling(args)
+    except _Refused as exc:
+        return refuse(str(exc))
     env = env or default_env(args)
     results = ttlang_env.ensure(env, check_only=True, say=say)
     if not results or any(r.status != ttlang_env.OK for r in results):
@@ -1287,8 +1360,14 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         return refuse(str(exc))
     try:
         probe_id = new_probe_id()
+        base = plan["seed"] if plan["seed"] is not None else seed_base_from_probe_id(probe_id)
+        sampling = {"temperatures": plan["temperatures"], "top_p": plan["top_p"], "seed_base": base,
+                    "seed_base_from": "--seed" if plan["seed"] is not None else "probe id",
+                    "attempts_per_temperature": attempts}
         facts = tt_lang_facts(env)
-        say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts, coder {model} at {safe_url(endpoint)}")
+        temps = ", ".join(f"{t:g}" for t in plan["temperatures"])
+        say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts at temperature {temps}, coder {model} at "
+            f"{safe_url(endpoint)}")
         records: list[dict] = []
         hw, stopped, blocked, code = None, None, None, EXIT_OK
         state: dict = {}
@@ -1300,11 +1379,14 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
         try:
             where = "attempt 1"
             try:
-                for n in range(1, attempts + 1):
+                # n counts every attempt of the run from 1, across the temperature groups.
+                jobs = [t for t in plan["temperatures"] for _ in range(attempts)]
+                for n, temperature in enumerate(jobs, start=1):
                     where = f"attempt {n}"
-                    record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint, model=model,
-                                         coder_model=model, probe_id=probe_id, http=http, run_watched=run_watched_fn,
-                                         tt_lang=facts)
+                    record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint,
+                                         model=model, coder_model=model, probe_id=probe_id, http=http,
+                                         run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
+                                         top_p=plan["top_p"], seed=attempt_seed(base, n, temperature))
                     records.append(record)
                     say(_attempt_line(record))
                 if getattr(args, "phase", "sim") == "hw":
@@ -1341,6 +1423,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                 header["stopped"] = stopped
             if blocked:
                 header["blocked"] = blocked
+            header["sampling"] = sampling
             write_report(probe_dir, records, header)
             say(f"report: {probe_dir / 'kernel-probe-report.md'}")
             if stopped:

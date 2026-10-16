@@ -13,6 +13,7 @@
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
     tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
+                            [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
@@ -167,7 +168,19 @@ def _parser() -> argparse.ArgumentParser:
                         help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
                              "on the simulator (and with --phase hw, on one leased chip). Starts no server")
     kp.add_argument("--op", required=True, choices=KERNEL_PROBE_OPS, help="the op to write a kernel for")
-    kp.add_argument("--attempts", type=int, default=5, help="independent attempts, each a fresh conversation (default 5)")
+    kp.add_argument("--attempts", type=int, default=5,
+                    help="attempts per temperature, each a fresh conversation (default 5)")
+    kp.add_argument("--temperature", metavar="T",
+                    help="sampling temperature, 0 to 2 (default 0: greedy and repeatable, good for calibration and "
+                         "regression checks; raise it to explore wilder or more ingenious kernels)")
+    kp.add_argument("--temperatures", metavar="T1,T2,...",
+                    help="several temperatures, comma-separated (for example 0,0.5,1.0); --attempts runs at each. "
+                         "Not with --temperature")
+    kp.add_argument("--top-p", dest="top_p", metavar="P", help="nucleus sampling, 0 < P <= 1 (default: not sent)")
+    kp.add_argument("--seed", metavar="N",
+                    help="a base seed: above temperature 0, attempt k sends N + k (default: derived from the probe id "
+                         "and recorded in the report). It makes a sampled run repeatable only if the server honours "
+                         "seeds, which is not verified")
     kp.add_argument("--phase", choices=("sim", "hw"), default="sim",
                     help="sim (default): the simulator only. hw: then a smoke test and each simulator pass on one "
                          "chip, under `gozer run --chips 1`")

@@ -2224,3 +2224,84 @@ def test_run_attempt_is_greedy_by_default(tmp_path, fake_kenv):
         sent = server.requests[0]
     assert sent["temperature"] == 0 and "seed" not in sent and "top_p" not in sent
     assert attempt["sampling"] == {"temperature": 0.0, "top_p": None, "seed": None}
+
+
+def _recording_attempts(monkeypatch):
+    """Replace run_attempt with one that records (n, temperature, top_p, seed) and returns a canned record."""
+    seen = []
+
+    def run_attempt(*, op, n, temperature=0.0, top_p=None, seed=None, **kw):
+        seen.append((n, temperature, top_p, seed))
+        rec = canned(op, n)
+        rec["sampling"] = {"temperature": temperature, "top_p": top_p, "seed": seed}
+        return rec
+    monkeypatch.setattr(kp, "run_attempt", run_attempt)
+    return seen
+
+
+@pytest.mark.parametrize("flags,words", [
+    ({"temperature": "2.5"}, "between 0 and 2"),
+    ({"temperature": "-0.1"}, "between 0 and 2"),
+    ({"temperature": "warm"}, "not a number"),
+    ({"temperature": "nan"}, "between 0 and 2"),
+    ({"temperatures": "0,,1"}, "not a number"),
+    ({"temperatures": "0,3"}, "between 0 and 2"),
+    ({"temperatures": "0.5,0.5"}, "twice"),
+    ({"temperature": "0.5", "temperatures": "0,1"}, "--temperature or --temperatures"),
+    ({"top_p": "0"}, "top-p"),
+    ({"top_p": "1.5"}, "top-p"),
+    ({"top_p": "x"}, "top-p"),
+    ({"seed": "1.5"}, "--seed"),
+    ({"seed": "-3"}, "--seed"),
+], ids=lambda v: str(v) if isinstance(v, str) else "-".join(f"{k}={x}" for k, x in v.items()))
+def test_bad_sampling_flags_are_refused_before_anything_runs(tmp_path, fake_kenv, env_ready, monkeypatch, capsys,
+                                                             flags, words):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, **flags), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == kp.EXIT_REFUSED and seen == [] and words in err and "Traceback" not in err
+    assert not (tmp_path / "out").exists() and env_ready == []        # refused before the environment check
+
+
+def test_temperatures_run_n_attempts_each_with_seeds_base_plus_k_and_none_at_zero(tmp_path, fake_kenv, env_ready,
+                                                                                  monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=3, temperatures="0,0.7", seed="100", top_p="0.9"), env=fake_kenv,
+                   out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK
+    assert seen == [(1, 0.0, 0.9, None), (2, 0.0, 0.9, None), (3, 0.0, 0.9, None),
+                    (4, 0.7, 0.9, 104), (5, 0.7, 0.9, 105), (6, 0.7, 0.9, 106)]
+    header = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())["header"]
+    assert header["sampling"]["seed_base"] == 100 and header["sampling"]["seed_base_from"] == "--seed"
+    assert header["sampling"]["temperatures"] == [0.0, 0.7] and header["sampling"]["top_p"] == 0.9
+
+
+def test_without_a_seed_the_base_comes_from_the_probe_id_and_is_recorded(tmp_path, fake_kenv, env_ready,
+                                                                        monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    monkeypatch.setattr(kp, "new_probe_id", lambda: "20261016T000000Z-abcdef12")
+    code = kp.main(probe_args(tmp_path, attempts=2, temperature="1.0"), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_OK
+    base = kp.seed_base_from_probe_id("20261016T000000Z-abcdef12")
+    assert isinstance(base, int) and 0 <= base < 2 ** 31
+    assert seen == [(1, 1.0, None, base + 1), (2, 1.0, None, base + 2)]
+    out = tmp_path / "out"
+    header = json.loads((out / "kernel-probe-report.json").read_text())["header"]
+    assert header["sampling"]["seed_base"] == base and header["sampling"]["seed_base_from"] == "probe id"
+    assert f"--seed {base}" in (out / "kernel-probe-report.md").read_text()
+
+
+def test_the_default_is_one_greedy_group_with_no_seed(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = _recording_attempts(monkeypatch)
+    code = kp.main(probe_args(tmp_path, attempts=2), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and seen == [(1, 0.0, None, None), (2, 0.0, None, None)]
+
+
+def test_the_cli_parser_has_the_sampling_flags():
+    from orchard import cli
+    args = cli._parser().parse_args(["kernel-probe", "--op", "add", "--temperatures", "0,0.5", "--top-p", "0.9",
+                                     "--seed", "7"])
+    assert (args.temperatures, args.top_p, args.seed, args.temperature) == ("0,0.5", "0.9", "7", None)

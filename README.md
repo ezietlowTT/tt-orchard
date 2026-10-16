@@ -1136,7 +1136,16 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
 Flags:
 
 - `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`). Required.
-- `--attempts`: independent attempts (default 5).
+- `--attempts`: attempts per temperature, each a fresh conversation (default 5).
+- `--temperature`: the sampling temperature, 0 to 2 (default 0). Temperature 0 is greedy decoding: repeatable, and
+  good for calibration and regression checks, but repeated attempts at one prompt can be the same sample. Raise it
+  to explore wild or ingenious kernels.
+- `--temperatures`: several temperatures, comma-separated (for example `0,0.5,1.0`); `--attempts` runs at each, so
+  `--attempts 3 --temperatures 0,0.7` runs 6. Not with `--temperature`.
+- `--top-p`: nucleus sampling, above 0 and at most 1 (default: not sent).
+- `--seed`: a base seed. Above temperature 0, attempt k sends the base plus k; without `--seed` the base comes from
+  the probe id and the report records it. A seed makes a sampled run repeatable only if the server honours it,
+  which is not verified.
 - `--phase`: `sim` (default) for the simulator only; `hw` to add the smoke test and the one-chip runs.
 - `--out`: output directory (default `./kernel-probe`).
 - `--endpoint`: the coder's OpenAI-compatible URL, ending in `/v1` (default: from the tier config).
