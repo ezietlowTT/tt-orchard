@@ -10,6 +10,7 @@ Every hardware call goes through a fake `run_watched`, which records the argv an
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
@@ -887,3 +888,255 @@ def test_a_hung_smoke_test_names_its_last_lines_and_the_report_records_the_hang(
     kp.write_report(tmp_path, [attempt], header)
     md = (tmp_path / "kernel-probe-report.md").read_text()
     assert "hw: blocked" in md and "the smoke test hung" in md and "waiting for ARC" in md
+
+
+# ---- carry-over fixes (Task 10) ---------------------------------------------------------------------------------
+
+
+def test_an_attempt_number_must_be_plain_ascii_digits(tmp_path):
+    """str.isdigit accepts superscripts and other scripts' digits. `add-²` made int() raise and `add-٥` read as 5."""
+    probe = tmp_path / "probe"
+    good = _record(probe, "add", 1, "p")
+    _record(probe, "add", "²", "p", attempt=2)
+    _record(probe, "add", "٥", "p", attempt=5)
+    _record(probe, "add", "05", "p", attempt=5)
+    _record(probe, "add", "+5", "p", attempt=5)
+    assert kp.load_attempts(probe, ops=["add"], probe_id="p") == ([good], 4)
+
+
+def test_an_op_directory_that_is_a_link_is_replaced_and_its_target_left_alone(tmp_path, fake_kenv):
+    """DIR/<op> itself is a link: the attempt is prepared in a real directory and nothing is written through it."""
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "attempt-1").mkdir(parents=True)
+    (elsewhere / "attempt-1" / "keep.txt").write_text("keep")
+    probe = tmp_path / "probe"
+    probe.mkdir()
+    (probe / "add").symlink_to(elsewhere, target_is_directory=True)
+    kp.prepare_attempt(probe / "add" / "attempt-1", op="add", env=fake_kenv, tt_lang=FACTS)
+    assert not (probe / "add").is_symlink() and (probe / "add" / "attempt-1" / "kernel_spec.json").is_file()
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["attempt-1"]
+    assert sorted(p.name for p in (elsewhere / "attempt-1").iterdir()) == ["keep.txt"]
+
+
+# ---- the command: kernelprobe.main (Task 10) --------------------------------------------------------------------
+
+import argparse
+from types import SimpleNamespace
+
+
+def probe_args(tmp_path, **kw):
+    args = dict(op="add", attempts=1, phase="sim", out=str(tmp_path / "out"), endpoint="http://127.0.0.1:9/v1",
+                model="fake", src_dir=None, venv_dir=None, shared_python="/shared/python")
+    args.update(kw)
+    return argparse.Namespace(**args)
+
+
+@pytest.fixture
+def env_ready(monkeypatch):
+    """ttlang_env.ensure(check_only=True) answers all OK without running the simulator; the calls are recorded."""
+    calls = []
+
+    def ensure(env, *, check_only=False, say=print):
+        calls.append(check_only)
+        return [ttlang_env.Result("verify", ttlang_env.OK, "faked")]
+    monkeypatch.setattr(kp.ttlang_env, "ensure", ensure)
+    return calls
+
+
+def no_run(argv, **kw):
+    raise AssertionError(f"nothing may run: {argv}")
+
+
+def passing_check(gozer_calls, *, gozer=None):
+    """A fake run_watched: an authoritative check writes a passing result, a gozer command is recorded and answered
+    by `gozer` (default: the smoke test logs PASSED!, a kernel run writes a passing hardware result)."""
+    def fake(argv, **kw):
+        if argv[0] == "gozer":
+            gozer_calls.append(list(argv))
+            if gozer is not None:
+                return gozer(argv, **kw)
+            if "--out" in argv:
+                Path(argv[argv.index("--out") + 1]).write_text(json.dumps({"phase": "hw", "sets": [GOOD_HW_SET]}))
+            else:
+                with open(kw["log_path"], "a") as f:
+                    f.write("PASSED!\n")
+            return kp.Watched(0, None, False, 1.0)
+        Path(argv[argv.index("--out") + 1]).write_text(json.dumps(
+            {"passed": True, "category": None, "first_line": "", "sets": [dict(GOOD_HW_SET, pcc=0.9999, slope=1.0)]}))
+        return kp.Watched(0, None, False, 0.1)
+    return fake
+
+
+def writes_good_kernel_once():
+    """Attempt 1 writes the known-good kernel and stops; every later attempt writes nothing."""
+    return scripted(call("write_file", path="kernel.py", content=(KERNELS / "add_good.py").read_text()), final("done"))
+
+
+def test_main_refuses_an_unknown_op_and_runs_nothing(tmp_path, fake_kenv, env_ready, capsys):
+    code = kp.main(probe_args(tmp_path, op="softmax"), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and env_ready == [] and not (tmp_path / "out").exists()
+    assert "unknown op" in capsys.readouterr().err
+
+
+def test_main_refuses_when_the_endpoint_does_not_answer(tmp_path, fake_kenv, env_ready, capsys):
+    asked = []
+    code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: asked.append((e, m)) or False, run_watched_fn=no_run)
+    assert code == 2 and asked == [("http://127.0.0.1:9/v1", "fake")]
+    assert not (tmp_path / "out").exists()                 # no attempt directory, no report
+    err = capsys.readouterr().err
+    assert "starts no server" in err and "tt-orchard bringup" in err
+
+
+def test_main_refuses_when_the_environment_check_fails(tmp_path, fake_kenv, monkeypatch, capsys):
+    for status in (ttlang_env.FAIL, ttlang_env.TODO):
+        seen = []
+        monkeypatch.setattr(kp.ttlang_env, "ensure", lambda env, *, check_only=False, say=print: seen.append(
+            check_only) or [ttlang_env.Result("clone", ttlang_env.OK, ""), ttlang_env.Result("wheel", status, "x")])
+        asked = []
+        code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: asked.append(e) or True, run_watched_fn=no_run)
+        assert code == 2 and seen == [True] and asked == [] and not (tmp_path / "out").exists()
+        assert "tt-orchard kernel-env" in capsys.readouterr().err
+
+
+def test_main_refuses_with_no_coder_endpoint_known(tmp_path, fake_kenv, env_ready, capsys):
+    code = kp.main(probe_args(tmp_path, endpoint=None, model=None), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 2 and not (tmp_path / "out").exists()
+    err = capsys.readouterr().err
+    assert "--endpoint" in err and "--model" in err
+
+
+def test_main_takes_the_coder_from_the_tier_stage_2_uses_and_the_flags_win(tmp_path, fake_kenv, env_ready):
+    cfg = SimpleNamespace(stages={2: {"run": "small", "diagnose": "large"}}, escalation="large",
+                          tiers={"small": {"endpoint": "http://127.0.0.1:8011/v1", "model": "coder-next",
+                                           "placement": "chip"},
+                                 "large": {"endpoint": "http://127.0.0.1:8000/v1", "model": "big", "placement": "chip"}})
+    asked = []
+
+    def probe(e, m):
+        asked.append((e, m))
+        return e != "http://127.0.0.1:8011/v1"           # the tier's server is down: nothing else is contacted
+    code = kp.main(probe_args(tmp_path, endpoint=None, model=None), env=fake_kenv, out=io.StringIO(), probe=probe,
+                   run_watched_fn=no_run, tier_config=cfg)
+    assert code == 2 and asked == [("http://127.0.0.1:8011/v1", "coder-next")]
+    asked.clear()
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, endpoint=server.endpoint, model=None), env=fake_kenv, out=io.StringIO(),
+                       probe=probe, run_watched_fn=no_run, tier_config=cfg)
+    assert code == 0 and asked == [(server.endpoint, "coder-next")]
+
+
+def test_main_runs_n_attempts_writes_the_report_and_exits_0_even_when_every_attempt_fails(tmp_path, fake_kenv,
+                                                                                          env_ready):
+    out = io.StringIO()
+    with FakeModel(lambda r: final("I will not write a kernel")) as server:
+        code = kp.main(probe_args(tmp_path, attempts=3, endpoint=server.endpoint), env=fake_kenv, out=out,
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0 and env_ready == [True]
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert [a["attempt"] for a in data["attempts"]] == [1, 2, 3]
+    assert [a["category"] for a in data["attempts"]] == ["no_kernel"] * 3
+    assert data["header"]["hw"] is None and data["header"]["ignored_records"] == 0
+    assert len({a["provenance"]["probe_id"] for a in data["attempts"]}) == 1
+    assert (tmp_path / "out" / "kernel-probe-report.md").is_file()
+    lines = [l for l in out.getvalue().splitlines() if l.startswith("add ")]
+    assert len(lines) == 3 and all("no_kernel" in l and "kernel.py does not exist" in l and "turns" in l
+                                   for l in lines)
+
+
+def test_each_run_gets_a_fresh_probe_id_and_its_report_holds_only_its_own_attempts(tmp_path, fake_kenv, env_ready):
+    with FakeModel(lambda r: final("nothing")) as server:
+        kp.main(probe_args(tmp_path, attempts=3, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                probe=lambda e, m: True, run_watched_fn=no_run)
+        first = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+        kp.main(probe_args(tmp_path, attempts=1, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                probe=lambda e, m: True, run_watched_fn=no_run)
+    second = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert first["header"]["probe_id"] != second["header"]["probe_id"]
+    assert [a["attempt"] for a in second["attempts"]] == [1]
+
+
+def test_phase_sim_never_calls_gozer(tmp_path, fake_kenv, env_ready):
+    """The first attempt passes the (faked) simulator check, so a hardware phase would have work to do."""
+    gozer_calls = []
+
+    def tripwire(argv, **kw):
+        assert argv[0] != "gozer", f"the simulator phase ran gozer: {argv}"
+        return passing_check(gozer_calls)(argv, **kw)
+    with FakeModel(writes_good_kernel_once()) as server:
+        code = kp.main(probe_args(tmp_path, attempts=2, endpoint=server.endpoint, phase="sim"), env=fake_kenv,
+                       out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=tripwire)
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert code == 0 and gozer_calls == [] and data["attempts"][0]["passed_sim"] is True
+    assert data["header"]["hw"] is None and all(a["hw"] is None for a in data["attempts"])
+
+
+@needs_sim
+def test_phase_hw_runs_the_smoke_test_once_and_hardware_only_for_a_sim_pass(tmp_path, kenv, env_ready):
+    """Two attempts on the real simulator: the first writes the known-good kernel, the second writes nothing. Gozer
+    calls go to a fake; everything else runs for real."""
+    gozer_calls = []
+
+    def fake(argv, **kw):
+        if argv[0] == "gozer":
+            return passing_check(gozer_calls)(argv, **kw)
+        return kp.run_watched(argv, **kw)
+    out = io.StringIO()
+    with FakeModel(writes_good_kernel_once()) as server:
+        code = kp.main(probe_args(tmp_path, attempts=2, endpoint=server.endpoint, phase="hw"), env=kenv, out=out,
+                       probe=lambda e, m: True, run_watched_fn=fake)
+    assert code == 0
+    smoke = [c for c in gozer_calls if "--out" not in c]
+    hw = [c for c in gozer_calls if "--out" in c]
+    assert len(smoke) == 1 and len(hw) == 1
+    assert smoke[0][smoke[0].index("--") + 1] == "/shared/python"
+    assert Path(hw[0][hw[0].index("--kernel") + 1]) == kp.verdict_dir(tmp_path / "out", "add", 1) / kp.CLEAN_DIR / "kernel.py"
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    a1, a2 = data["attempts"]
+    assert a1["passed_sim"] is True and a1["hw"]["passed"] is True
+    assert a2["category"] == "no_kernel" and a2["hw"] is None
+    assert data["header"]["hw"]["available"] is True and data["first_pass"]["add"] == {"sim": 1, "hw": 1}
+
+
+def test_a_hardware_hang_exits_5_and_the_report_lists_what_ran(tmp_path, fake_kenv, env_ready):
+    gozer_calls = []
+
+    def kernel_run_hangs(argv, **kw):
+        if "--out" in argv:
+            return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
+        with open(kw["log_path"], "a") as f:
+            f.write("PASSED!\n")
+        return kp.Watched(0, None, False, 1.0)
+    with FakeModel(scripted(call("write_file", path="kernel.py", content=(KERNELS / "add_good.py").read_text()),
+                            final("done"),
+                            call("write_file", path="kernel.py", content=(KERNELS / "add_good.py").read_text()),
+                            final("done"))) as server:
+        code = kp.main(probe_args(tmp_path, attempts=3, endpoint=server.endpoint, phase="hw"), env=fake_kenv,
+                       out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=passing_check(gozer_calls, gozer=kernel_run_hangs))
+    assert code == 5
+    assert len(gozer_calls) == 2                            # the smoke test and attempt 1's run, which hung
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert [a["attempt"] for a in data["attempts"]] == [1, 2, 3]
+    assert data["attempts"][0]["hw"]["category"] == "hang" and data["attempts"][1]["hw"] is None
+    assert "add attempt 1" in data["header"]["blocked"]
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "The probe stopped" in md and "add attempt 1" in md and "| hang |" in md
+
+
+def test_a_hung_smoke_test_exits_5_and_the_report_says_hw_blocked(tmp_path, fake_kenv, env_ready):
+    gozer_calls = []
+
+    def smoke_hangs(argv, **kw):
+        return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
+    with FakeModel(writes_good_kernel_once()) as server:
+        code = kp.main(probe_args(tmp_path, attempts=1, endpoint=server.endpoint, phase="hw"), env=fake_kenv,
+                       out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=passing_check(gozer_calls, gozer=smoke_hangs))
+    assert code == 5 and len(gozer_calls) == 1
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert data["header"]["hw"]["hung"] is True and data["attempts"][0]["hw"] is None
+    assert "hw: blocked" in (tmp_path / "out" / "kernel-probe-report.md").read_text()

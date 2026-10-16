@@ -20,7 +20,9 @@ attempt. Before any gozer call the hardware path applies the kernel check's stat
 
 The probe keeps its own records outside the attempt directory, in `DIR/.verdict/<op>-<n>/`: the clean copy of
 kernel.py, the authoritative check's result and output, the hardware result and output, and the probe's attempt.json.
-The report is built from these (load_attempts). kernel.py is copied only when it is a regular file (not a link, a
+A run's report is built from the records run_attempt returned in that run (and the hardware phase added to). Each run
+gets a fresh probe id. load_attempts reads the probe-owned records back for a later resume and is not used to build a
+report. kernel.py is copied only when it is a regular file (not a link, a
 directory or a device) of at most MAX_KERNEL_BYTES; anything else ends the attempt with no check and no hardware run.
 The sha256 of the copied bytes is recorded, and the hardware phase refuses a copy whose hash has changed. A
 convenience copy of attempt.json is written into the attempt directory after whatever was at that path is removed,
@@ -34,7 +36,10 @@ background process the agent started can outlive its step and write anywhere the
 The budget (BUDGET) and the watchdog's detectors bound each attempt. Attempts are independent draws, and the report
 gives counts with no rates.
 
-`main` (the command) is wired in by a later task.
+`main` is the command `tt-orchard kernel-probe`. It starts no model server: the coder must already answer at its
+endpoint (starting it is `tt-orchard bringup`'s job), and the simulator environment must pass
+`tt-orchard kernel-env --check`. Exit 0 means a report was written, whatever the attempts' results; 2 is a refusal
+before anything ran; 5 means a hardware run hung, and the report covers what ran before it.
 """
 from __future__ import annotations
 
@@ -42,6 +47,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
+import secrets
 import shutil
 import stat
 import sys
@@ -49,6 +56,7 @@ import time
 from pathlib import Path
 
 from orchard import defaults, ttlang_env
+from orchard.agent import probe_model
 from orchard.agent import AgentStep, Tools, agent_env
 from orchard.canary import post_json
 from orchard.ledger import Ledger
@@ -407,12 +415,14 @@ def _save_attempt(adir: Path, attempt: dict) -> None:
 
 
 RECORD_MAX_BYTES = 64 * 1024 * 1024
+ATTEMPT_NUMBER = re.compile(r"[1-9][0-9]*")         # a positive whole number in ASCII digits, no leading zero
 
 
 def _load_record(entry: Path, ops, probe_id) -> dict | None:
     """One `.verdict/<op>-<n>/attempt.json`, or None when it does not belong to this probe (see load_attempts)."""
     op, sep, number = entry.name.rpartition("-")
-    if not sep or op not in ops or not number.isdigit() or number.startswith("0"):
+    # ASCII digits only: str.isdigit also accepts superscripts and other scripts' digits ("²", "٥").
+    if not sep or op not in ops or not ATTEMPT_NUMBER.fullmatch(number):
         return None
     try:
         if not stat.S_ISDIR(os.lstat(entry).st_mode) or not stat.S_ISREG(os.lstat(entry / "attempt.json").st_mode):
@@ -715,6 +725,8 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines.append(f"- {op}, hardware: {_bars_text(b['hw'])}")
     lines += ["", "## Hardware", ""]
     hw = header.get("hw")
+    if header.get("blocked"):
+        lines += [f"The probe stopped: {header['blocked']}", ""]
     if hw is None:
         lines.append("hw: not run")
     elif hw.get("available"):
@@ -749,3 +761,146 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
                          else f"none of {len(rows)} attempts passed on hardware")
     (probe_dir / "kernel-probe-report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return data
+
+
+# ---- the command ------------------------------------------------------------------------------------------------
+
+EXIT_OK, EXIT_REFUSED, EXIT_BLOCKED = 0, 2, 5
+CODER_STAGE = 2              # the probe's agent is the coder that writes stage 2's code, so it uses stage 2's tier
+
+
+class _Refused(Exception):
+    """The command stops before anything runs. The message says what to do."""
+
+
+def default_env(args) -> ttlang_env.KEnv:
+    """The tt-lang environment the flags or the ORCHARD_TTLANG_* variables name, as `tt-orchard kernel-env` sees it."""
+    home = Path.home()
+    return ttlang_env.KEnv(
+        src_dir=Path(getattr(args, "src_dir", None) or os.environ.get("ORCHARD_TTLANG_SRC")
+                     or home / "orchard-src" / "tt-lang"),
+        venv_dir=Path(getattr(args, "venv_dir", None) or os.environ.get("ORCHARD_TTLANG_VENV")
+                      or home / "orchard-venvs" / "ttlang"),
+        scratch_dir=Path(os.environ.get("ORCHARD_SCRATCH") or home / "orchard-src" / "scratch"),
+        environ=dict(os.environ))
+
+
+def coder_endpoint(args, tier_config, probe) -> tuple[str, str]:
+    """(endpoint, model) of the coder the attempts talk to.
+
+    --endpoint and --model always win. A value that neither flag gives comes from the tier stage 2 runs on, in the tier
+    config. With both flags missing, the tier's endpoint is found as the supervisor finds it (resolve_endpoint: another
+    chip tier serving the same model may stand in). With no tier config, the missing flag is refused by name."""
+    from orchard.stages import TierUnavailable, resolve_endpoint, tier_for
+    endpoint, model = getattr(args, "endpoint", None), getattr(args, "model", None)
+    if endpoint and model:
+        return endpoint, model
+    if tier_config is None:
+        raise _Refused("no coder endpoint is known: pass --endpoint URL and --model NAME, or keep a bringup.toml "
+                       "whose tier config names the coder")
+    tier = tier_for(tier_config, CODER_STAGE, phase="main", escalated=False)
+    if endpoint:
+        return endpoint, tier_config.tiers[tier]["model"]
+    if model:
+        return tier_config.tiers[tier]["endpoint"], model
+    try:
+        used, endpoint, _note = resolve_endpoint(tier_config, tier, probe)
+    except TierUnavailable as exc:
+        raise _Refused(f"{exc}. The probe starts no server: start the coder with `tt-orchard bringup`, or pass "
+                       "--endpoint and --model for a server that runs") from None
+    return endpoint, tier_config.tiers[used]["model"]
+
+
+def _attempt_line(a: dict) -> str:
+    """One line for an attempt that has ended: op, number, result, first line, turns, wall time."""
+    result = "passed in the simulator" if a.get("passed_sim") else (a.get("category") or "failed")
+    first = f" ({a['first_line']})" if a.get("first_line") and not a.get("passed_sim") else ""
+    return f"{a['op']} {a['attempt']}: {result}{first}, {a.get('turns')} turns, {a.get('agent_wall_s')} s"
+
+
+def _hw_line(a: dict) -> str:
+    h = a["hw"]
+    result = "passed on hardware" if h.get("passed") else (h.get("category") or "failed")
+    first = f" ({h['first_line']})" if h.get("first_line") and not h.get("passed") else ""
+    return f"{a['op']} {a['attempt']}: {result}{first}"
+
+
+def new_probe_id() -> str:
+    """A token no earlier run used: the UTC time and 8 random hex digits."""
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime()) + "-" + secrets.token_hex(4)
+
+
+def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_watched_fn=run_watched,
+         tier_config=None) -> int:
+    """`tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
+    [--src-dir D] [--venv-dir D] [--shared-python P]`.
+
+    Order: the op is checked; the simulator environment must pass `ttlang_env.ensure(check_only=True)`; the coder's
+    endpoint and model are resolved and must answer `probe`. Each refusal returns 2 before any attempt directory
+    exists. Then N attempts run one after another, each printing one line as it ends. With --phase hw, run_hardware
+    runs one smoke test and then each attempt that passed the simulator, each on one leased chip. The report is
+    written from the records this run's attempts returned. A hung hardware run (ProbeBlocked) ends the hardware
+    phase; the report is still written, and the exit is 5. `tier_config` is the TierConfig the coder comes from when
+    a flag is missing (the CLI loads it from bringup.toml)."""
+    say = (lambda line: print(line, file=out)) if out is not None else print
+
+    def refuse(message: str) -> int:
+        print(f"refused: {message}", file=sys.stderr)
+        return EXIT_REFUSED
+
+    if args.op not in OPS:
+        return refuse(f"unknown op {args.op!r}; the ops are {', '.join(OPS)}")
+    attempts = int(getattr(args, "attempts", 5) or 0)
+    if attempts < 1:
+        return refuse("--attempts must be at least 1")
+    env = env or default_env(args)
+    results = ttlang_env.ensure(env, check_only=True, say=say)
+    if not results or any(r.status != ttlang_env.OK for r in results):
+        return refuse("the tt-lang simulator environment is not ready: run `tt-orchard kernel-env`")
+    try:
+        endpoint, model = coder_endpoint(args, tier_config, probe)
+    except _Refused as exc:
+        return refuse(str(exc))
+    if not probe(endpoint, model):
+        return refuse(f"the coder at {endpoint} does not answer with the model {model!r}. The probe starts no "
+                      "server: start the coder with `tt-orchard bringup`, or pass --endpoint and --model for a "
+                      "server that runs")
+
+    probe_dir = Path(getattr(args, "out", None) or "kernel-probe")
+    probe_id = new_probe_id()
+    facts = tt_lang_facts(env)
+    say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts, coder {model} at {endpoint}")
+    records = []
+    for n in range(1, attempts + 1):
+        record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint, model=model,
+                             coder_model=model, probe_id=probe_id, http=http, run_watched=run_watched_fn,
+                             tt_lang=facts)
+        records.append(record)
+        say(_attempt_line(record))
+
+    hw, blocked = None, None
+    if getattr(args, "phase", "sim") == "hw":
+        shared = getattr(args, "shared_python", None) or str(Path.home() / ".tenstorrent-venv" / "bin" / "python")
+        try:
+            hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
+                              run_watched=run_watched_fn)
+        except ProbeBlocked as exc:
+            blocked = str(exc)
+            # A hung smoke test carries its own hardware block. A hung kernel run comes after a passing smoke test.
+            hw = exc.hw if exc.hw is not None else {"available": True, "smoke_tail": []}
+        for a in records:
+            if isinstance(a.get("hw"), dict):
+                say(_hw_line(a))
+        if hw and not hw.get("available") and not hw.get("hung"):
+            say("hardware unavailable: the smoke test failed (the report has its last lines)")
+
+    header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
+                           ignored_records=0)
+    if blocked:
+        header["blocked"] = blocked
+    write_report(probe_dir, records, header)
+    say(f"report: {probe_dir / 'kernel-probe-report.md'}")
+    if blocked:
+        say(f"blocked: {blocked}")
+        return EXIT_BLOCKED
+    return EXIT_OK
