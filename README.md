@@ -1037,6 +1037,8 @@ venv with the simulator wheel. It needs no `bringup.toml`, so it can run on a ma
 The simulator wheel does not ship `diagnostics.py`, so a diagnosed kernel error ends as a
 `FileNotFoundError`. The command copies the checkout's file into the venv. This is a local patch of a
 vendor package and is labelled as a patch wherever the probe reports tt-lang versions.
+An interrupted clone (a `.git` with no HEAD and the right origin) is completed. A clone at another commit is
+reported and never reset.
 
 Flags:
 
@@ -1063,6 +1065,11 @@ installed ttnn version, so nothing is claimed.
 
 - The word `refresh-ttnn` is reserved. To trace a directory with that name, pass it as `./refresh-ttnn`.
 - The dump is written into the package's own `orchard/data` directory, which must be writable (an editable checkout is).
+- Counts are per static node of the traced graph, so a loop body that runs many times counts once. The report
+  scales in-layer ops by the layers in the config over the layers traced, and says when it cannot scale.
+- The trace follows higher-order-op bodies. Python-level nodes such as `getitem` stay out of the op list and appear under
+  `python_nodes`; wrappers appear under `higher_order_nodes` (nodes, not bodies).
+- The mapping table is a name match. `rsub` is exact only for alpha=1, and `conv1d` takes prepared weights.
 - If gozer queues the lease (exit 10), the command says so and exits 2. Run `gozer wait <ticket>` or retry.
 - Names that raised when ttnn was inspected are listed under `skipped` in the dump file.
 
@@ -1094,13 +1101,21 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   `user:password@` part.
 - It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`.
 - The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
-  `kernel.py`. The agent's own `check.json` is never believed; when it disagrees, the report marks it untrusted.
+  `kernel.py` made as a regular file of at most 256 KiB, under `<out>/.verdict/<op>-<n>/`. The agent's own `check.json`
+  is never believed; when it disagrees, the report marks it `agent_check_untrusted`. This boundary is best effort
+  against shortcuts and accidents.
+- The check needs more than PCC. A static gate on `kernel.py` runs first (imports limited to `ttl`, `ttnn` and `math`; no
+  `import torch` or host code; `OPERATION` a top-level `def` decorated with `@ttl.operation`) and reports every violation
+  with a remedy. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
+  every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
+  `harness_error` (a fault in the templates or the environment, including the setup phase).
 - The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
   set). Attempts are independent draws, so the report gives counts and no rates.
 - `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
   runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
   The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress
-  is killed by the stall watcher, the probe stops, and the command exits 5 with the report written for what ran.
+  is stopped by the stall watcher (SIGTERM to the whole process group first, so `gozer run` can release its lease, then
+  SIGKILL after a grace period), the probe stops, and the command exits 5 with the report written for what ran.
 - Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
   attempts' results.
 - A run that stops early still writes its report from the attempts that finished, with the reason. An exception
