@@ -10,6 +10,8 @@ Defaults come from DIR/check_config.json: {"sim": "<tt-lang-sim>", "timeout_s": 
 kernel_harness.py from the directory THIS file is in, so the harness that judges a kernel is the copy next to the check
 that was run. Exit 0 and `PASS` when the kernel passed; exit 1 and `FAIL: <category>: <first line>` when it did not;
 exit 2 on a usage error. It writes check.json with sha256 values of the files that took part and the bars it applied.
+An interrupt (SIGTERM, or SIGINT or SIGHUP unless they started ignored) stops the simulator and everything it started,
+and ends the run with that signal's exit and no check.json.
 
 Before the simulator runs, a static gate (`check_kernel_source`) reads kernel.py with `ast` and refuses the shortcuts a
 model is likely to try: importing anything but ttl, ttnn and math (and a short list of names from typing and
@@ -402,6 +404,8 @@ def _kill_own_group(proc) -> None:
     lead its own group (the guards orchard/stallwatch.py uses; this template stands alone, so it has its own copy).
     Anything else gets a plain kill of the child alone."""
     import signal
+    if getattr(proc, "returncode", None) is not None:
+        return                                       # already reaped: its pid may belong to another process now
     pgid = proc.pid
     try:
         leads = isinstance(pgid, int) and pgid > 1 and pgid != os.getpgrp() and os.getpgid(pgid) == pgid
@@ -416,15 +420,28 @@ def _kill_own_group(proc) -> None:
         pass
 
 
-def _die_with_parent() -> None:
-    """Runs in the simulator's process before exec: ask Linux to SIGKILL it when this check process dies
-    (PR_SET_PDEATHSIG). This covers a SIGKILL of the check, after which no handler of ours can run. Elsewhere, or
-    when prctl is missing, nothing happens."""
+def _die_with_parent_fn(parent: int | None = None):
+    """A preexec function for the simulator. Its parts are resolved here, in the parent, so the forked child only
+    calls them: prctl(PR_SET_PDEATHSIG, SIGKILL) asks Linux to kill the simulator when this check process dies (it
+    covers a SIGKILL of the check, after which no handler of ours runs). A parent that died between the fork and the
+    prctl is caught by comparing os.getppid() with `parent` (this process's pid, recorded before the fork): the child
+    exits at once. Where prctl is missing only the parent check runs."""
+    parent = os.getpid() if parent is None else parent
     try:
         import ctypes
-        ctypes.CDLL(None, use_errno=True).prctl(1, 9)   # PR_SET_PDEATHSIG = 1, SIGKILL = 9
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
     except Exception:
-        pass
+        prctl = None
+
+    def child() -> None:
+        if prctl is not None:
+            try:
+                prctl(1, 9)                              # PR_SET_PDEATHSIG = 1, SIGKILL = 9
+            except Exception:
+                pass
+        if os.getppid() != parent:
+            os._exit(1)
+    return child
 
 
 def _raise_interrupt(signum, frame):
@@ -437,7 +454,7 @@ def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
     the KeyboardInterrupt that main's handlers raise for SIGTERM, SIGINT and SIGHUP, the group is killed before the
     exception goes on. If this process is killed outright, the simulator gets SIGKILL from its parent-death signal."""
     proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            start_new_session=True, preexec_fn=_die_with_parent)
+                            start_new_session=True, preexec_fn=_die_with_parent_fn())
     try:
         out, err = proc.communicate(timeout=timeout_s)
         return False, proc.returncode, (out or "") + "\n" + (err or "")
@@ -455,12 +472,15 @@ def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
 
 
 def main(argv=None) -> int:
-    """Run the check. SIGTERM, SIGINT and SIGHUP become a KeyboardInterrupt while it runs, so a watcher that stops
-    this process (run_watched sends SIGTERM to this process's group) also stops the simulator, which runs in a
-    session of its own. The previous handlers are restored at the end."""
+    """Run the check. SIGTERM, SIGINT and SIGHUP (the last two only when they did not start ignored) become a
+    KeyboardInterrupt while it runs, so a watcher that stops this process (run_watched sends SIGTERM to this
+    process's group) also stops the simulator, which runs in a session of its own. The previous handlers are restored
+    at the end."""
     import signal
     previous = {}
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        if sig != signal.SIGTERM and signal.getsignal(sig) == signal.SIG_IGN:
+            continue                                  # a signal that starts ignored (nohup) stays ignored
         try:
             previous[sig] = signal.signal(sig, _raise_interrupt)
         except ValueError:                            # not the main thread: no handler can be installed

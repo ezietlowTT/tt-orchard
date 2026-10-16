@@ -949,7 +949,7 @@ def _kill_if_ours(pid, marker):
             pass
 
 
-def _start_check_with_fake_sim(tmp_path, marker):
+def _start_check_with_fake_sim(tmp_path, marker, preexec_fn=None):
     """kernel_check.py as this test's own child (its own session), running a stand-in simulator that records its pid,
     starts a grandchild and sleeps. Returns (check process, marks directory)."""
     tdir, adir = _attempt(tmp_path, "add_good")
@@ -967,7 +967,7 @@ def _start_check_with_fake_sim(tmp_path, marker):
     env = dict(os.environ, ORCHARD_TEST_MARKER=marker)
     proc = subprocess.Popen([sys.executable, str(tdir / "kernel_check.py"), "--attempt-dir", str(adir), "--sim",
                              str(sim), "--timeout-s", "50"], env=env, start_new_session=True,
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, preexec_fn=preexec_fn)
     end = time.monotonic() + 30
     while time.monotonic() < end and not (marks / "sim").is_file():
         time.sleep(0.05)
@@ -1036,3 +1036,63 @@ def test_the_cleanup_helper_leaves_a_process_without_the_marker_alone(tmp_path):
     finally:
         other.kill()
         other.wait(timeout=5)
+
+
+
+# M2: smaller guards around the simulator.
+
+def test_a_simulator_that_was_already_reaped_is_never_signalled(monkeypatch):
+    """After communicate() has reaped the simulator its pid may be reused; nothing may be looked up or signalled."""
+    calls = []
+    monkeypatch.setattr(os, "killpg", lambda *a: calls.append(("killpg", a)))
+    monkeypatch.setattr(os, "getpgid", lambda *a: calls.append(("getpgid", a)) or a[0])
+    proc = type("P", (), {"pid": 424242, "returncode": 0, "kill": lambda self: calls.append(("kill",))})()
+    CHECK._kill_own_group(proc)
+    assert calls == []
+
+
+def test_a_simulator_whose_parent_is_already_gone_exits_before_it_runs(tmp_path):
+    """The parent-death signal only covers a parent that dies after prctl. The child compares its parent with the
+    pid recorded before the fork and exits at once when they differ. A fake parent pid stands in for a dead parent."""
+    marker = f"orchard-m2p-{os.getpid()}-{time.monotonic_ns()}"
+    env = dict(os.environ, ORCHARD_TEST_MARKER=marker)
+    orphan = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env,
+                              preexec_fn=CHECK._die_with_parent_fn(parent=os.getpid() + 999999))
+    normal = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], env=env,
+                              preexec_fn=CHECK._die_with_parent_fn())
+    try:
+        assert orphan.wait(timeout=10) == 1
+        time.sleep(0.3)
+        assert normal.poll() is None
+    finally:
+        for p in (orphan, normal):
+            p.kill()
+            p.wait(timeout=5)
+
+
+def test_a_sighup_that_starts_ignored_stays_ignored(tmp_path):
+    """kernel_check started with SIGHUP ignored (as under nohup) keeps ignoring it; SIGTERM still stops it."""
+    marker = f"orchard-m2h-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+
+    def ignore_hup():
+        _signal_mod.signal(_signal_mod.SIGHUP, _signal_mod.SIG_IGN)
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker, preexec_fn=ignore_hup)
+        proc.send_signal(_signal_mod.SIGHUP)
+        time.sleep(0.5)
+        assert proc.poll() is None
+        proc.send_signal(_signal_mod.SIGTERM)
+        proc.wait(timeout=20)
+        assert _all_gone(_pids(marks), marker) == []
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)
+
+
+def test_the_check_docstring_says_what_an_interrupt_does():
+    doc = " ".join(CHECK.__doc__.split())
+    assert "interrupt" in doc and "no check.json" in doc
