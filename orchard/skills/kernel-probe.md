@@ -9,8 +9,9 @@ few support files. You write one file: `kernel.py`.
 
 Reference files:
 - `reference/eltwise_add.py`: a working kernel for the tt-lang the check runs. Start here.
-- `reference/eltwise_broadcast_reduce.py`: a working kernel with `ttl.math.reduce_sum`, `ttl.block.broadcast` and
-  `ttl.block.fill`, for the same tt-lang.
+- `reference/eltwise_broadcast_reduce.py`: a simulator example with `ttl.math.reduce_sum`, `ttl.block.broadcast` and
+  `ttl.block.fill`. It passes in the simulator. tt-lang's CI marks it `TTLANG_HARDWARE_CI: xfail-compiler`: it is
+  expected to fail on the hardware compiler.
 - `reference/TTLangSpecification.md`: the specification of that tt-lang (version 0.20). It is long: search it with
   `grep -n "reduce_sum" reference/TTLangSpecification.md` and read the lines around a hit.
 - `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written

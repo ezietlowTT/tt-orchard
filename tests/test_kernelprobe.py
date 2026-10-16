@@ -2910,3 +2910,15 @@ def test_the_skill_names_every_construct_the_gate_refuses_in_a_shipped_reference
     assert violations, "a shipped example with host code should break at least one rule"
     for v in violations:
         assert _needle(v) in flat, (path.name, v)
+
+
+@pytest.mark.parametrize("path", _shipped_reference_pys(), ids=lambda p: p.name)
+def test_the_skill_repeats_each_references_hardware_ci_tag(path):
+    """Review I2: tt-lang's CI tags eltwise_broadcast_reduce.py `TTLANG_HARDWARE_CI: xfail-compiler` (run, but expect a
+    non-zero exit on the hardware compiler). The skill must say so wherever a reference carries such a tag, and must not
+    call that example a working kernel."""
+    flat = " ".join(kp.SKILL.read_text().split())
+    tags = re.findall(r"^#\s*(TTLANG_HARDWARE_CI:\s*\S+)", path.read_text(), flags=re.M)
+    for tag in tags:
+        assert " ".join(tag.split()) in flat, tag
+    assert "`reference/eltwise_broadcast_reduce.py`: a working kernel" not in flat
