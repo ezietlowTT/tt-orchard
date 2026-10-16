@@ -362,9 +362,10 @@ def _count(runner: ReadOnlyRunner, root: str, repo: str, head: str, remote: str)
     return None, None
 
 
-def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, update: Callable[[str, str | None], str],
+def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, update: Callable[..., str],
                 reuse_s: float = 0.0, branch_warning: bool = True, untracked: bool = True) -> Freshness:
-    """Compare a git checkout's HEAD with its origin's main branch. `update(root, branch)` gives the update hint.
+    """Compare a git checkout's HEAD with its origin's main branch. `update(root, branch, remote)` gives the update
+    hint; `remote` is upstream main's sha once it is known, else None.
     `untracked` False leaves untracked files out of the dirty-tree warning."""
     path = str(path)
     root = _out(runner, ["git", "-C", path, "rev-parse", "--show-toplevel"])
@@ -407,6 +408,7 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     else:
         ahead, behind = _count(runner, root, repo, result.local, remote)
         result.ahead, result.behind = ahead, behind
+        result.update = update(root, result.branch, remote)
         if behind is None:
             result.state = DIFFERS
             result.detail = (f"HEAD {result.local[:9]} is not upstream main {remote[:9]} ({repo}); how far apart they "
@@ -424,7 +426,7 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     return result
 
 
-def skills_update(root: str, branch: str | None) -> str:
+def skills_update(root: str, branch: str | None, remote: str | None = None) -> str:
     """How to bring a tenstorrent/skills clone up to date. On a branch other than main a pull would merge main into
     that branch, so the hint says what to do and leaves the choice to the operator."""
     if branch in (None, "main"):
@@ -455,12 +457,14 @@ def check_skills_dirs(dirs, *, run=None, cache: Cache | None = None, reuse_s: fl
     return out
 
 
-def ttlang_update(root: str, branch: str | None) -> str:
-    """How to move to tt-lang's latest main. The checkout is pinned in code (defaults.TTLANG_PIN), so this is a code
-    change and a rebuild; the override runs on the pinned version."""
-    return ("tt-lang main has moved past the pin. Moving it is a code change: set TTLANG_PIN in orchard/defaults.py to "
-            "upstream main (and check TTLANG_DIAGNOSTICS_SHA256 against python/ttl/diagnostics.py there), move "
-            f"{root} aside, and run `tt-orchard kernel-env`. To run on the pinned version for now, pass {OVERRIDE}")
+def ttlang_update(root: str, branch: str | None, remote: str | None = None) -> str:
+    """How to move to tt-lang's latest main. The checkout is pinned in code (defaults.TTLANG_PIN), so the fix is a
+    code change and a rebuild; the override runs on the pinned version."""
+    target = f"upstream main {remote}" if remote else "upstream main"
+    return (f"The fix is to move the pin: in orchard/defaults.py set TTLANG_PIN to {target} and set "
+            "TTLANG_DIAGNOSTICS_SHA256 to the sha256 of python/ttl/diagnostics.py at that commit (review the file if it "
+            f"changed), move {root} aside, then run `tt-orchard kernel-env`. To run on the pinned version until then, "
+            f"pass {OVERRIDE}")
 
 
 def check_ttlang_source(src_dir, *, run=None, cache: Cache | None = None, reuse_s: float = 0.0,

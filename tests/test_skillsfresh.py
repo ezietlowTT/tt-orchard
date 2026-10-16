@@ -574,3 +574,22 @@ def test_the_printed_line_of_a_real_unknown_says_compare_again_and_names_no_upda
     got = sf.check_ttlang_source(src, run=fake, cache=sf.Cache(tmp_path / "c.json"))
     (line,) = ttlang_env.skills_lines([got])
     assert "Compare again when GitHub answers" in line and "TTLANG_PIN" not in line
+
+
+def test_the_tt_lang_block_says_plainly_that_moving_the_pin_is_the_fix():
+    """The operator's rule blocks the probe while the pin is behind. The message must say what fixes it: move the pin
+    to upstream main (named by sha), the two constants, and the command."""
+    text = sf.ttlang_update("/src/tt-lang", None, MAIN)
+    assert text.startswith("The fix is to move the pin")
+    for needle in ("TTLANG_PIN", "TTLANG_DIAGNOSTICS_SHA256", "orchard/defaults.py", "`tt-orchard kernel-env`", MAIN,
+                   "/src/tt-lang", "--allow-stale-skills"):
+        assert needle in text, needle
+
+
+def test_a_behind_tt_lang_result_names_upstream_mains_sha_in_its_update(tmp_path):
+    src = tmp_path / "tt-lang"
+    src.mkdir()
+    gh = {f"repos/tenstorrent/tt-lang/compare/{HEAD}...{MAIN}": {"ahead_by": 1, "behind_by": 0}}
+    fake = FakeSys({src: {"head": HEAD, "origin": TTLANG_URL}}, {TTLANG_URL: MAIN}, gh)
+    got = sf.check_ttlang_source(src, run=fake, cache=sf.Cache(tmp_path / "c.json"))
+    assert MAIN in got.update
