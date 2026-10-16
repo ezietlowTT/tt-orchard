@@ -2180,3 +2180,24 @@ def test_the_lock_is_held_while_attempts_run_and_removed_after_a_crash(tmp_path,
                    run_watched_fn=no_run)
     assert code == kp.EXIT_ERROR and held == [os.getpid()]
     assert not (out_dir / kp.LOCK_NAME).exists()
+
+
+def test_an_os_error_inside_the_lock_is_a_plain_refusal(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    """A5. os.fstat failing on the lock file (called from kernelprobe only; every other caller gets the real one)
+    must give exit 2 with a plain message. Before the fix it escaped as a raw OSError."""
+    import errno as _errno
+    real_fstat = os.fstat
+
+    def fstat(fd):
+        if _sys._getframe(1).f_globals.get("__name__") == "orchard.kernelprobe":
+            raise OSError(_errno.EIO, "Input/output error")
+        return real_fstat(fd)
+    monkeypatch.setattr(os, "fstat", fstat)
+    with pytest.raises(kp._Refused) as info:
+        kp.acquire_lock(tmp_path / "direct")
+    assert "Input/output error" in str(info.value)
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == kp.EXIT_REFUSED and seen == [] and "Traceback" not in err and "Input/output error" in err

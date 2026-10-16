@@ -1194,11 +1194,13 @@ def acquire_lock(probe_dir: Path) -> ProbeLock:
             except OSError:
                 pass                                     # the pid is information only; the flock is the lock
             return ProbeLock(fd, path)
-        except BaseException:
+        except BaseException as exc:
             try:
                 os.close(fd)
             except OSError:
                 pass
+            if isinstance(exc, OSError):                 # fstat, stat or another call on the lock file failed
+                raise _Refused(f"cannot use the lock {path}: {exc.strerror or exc}") from None
             raise
     raise _Refused(f"another probe is using {probe_dir}: its lock file kept changing while this probe took it")
 
