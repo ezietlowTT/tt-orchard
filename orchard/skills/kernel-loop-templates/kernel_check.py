@@ -12,7 +12,8 @@ that was run. Exit 0 and `PASS` when the kernel passed; exit 1 and `FAIL: <categ
 exit 2 on a usage error. It writes check.json with sha256 values of the files that took part and the bars it applied.
 
 Before the simulator runs, a static gate (`check_kernel_source`) reads kernel.py with `ast` and refuses the shortcuts a
-model is likely to try: importing anything but ttl, ttnn and math, calling open/exec/eval and similar, naming dunder
+model is likely to try: importing anything but ttl, ttnn and math (and a short list of names from typing and
+__future__), calling open/exec/eval and similar or reaching them or os/sys as an attribute, naming dunder
 attributes, naming ttnn's to_torch/from_torch, and an OPERATION that is not a top-level def decorated with
 ttl.operation. A refused kernel ends `forbidden_code` and never runs. The gate is best effort. The kernel still runs in
 the harness's own process, so a determined kernel can find a way around a static check; the gate stops the easy ways.
@@ -56,6 +57,16 @@ DEFAULT_BARS = {
 # The static gate's tables.
 ALLOWED_IMPORTS = {"ttl", "ttnn", "math"}
 HARMLESS_FROM_MODULES = {"__future__", "typing"}       # `from __future__ import ...` and `from typing import ...`
+# The only names `from typing import` and `from __future__ import` may bring in. typing's namespace also holds modules
+# (sys, and re or io in some Python versions), and `from typing import sys as s` would hand the kernel sys under a name
+# that is not forbidden. A fixed list is used because the gate cannot know which Python the harness runs; a test
+# checks that none of these is a module in the interpreter that runs the tests.
+TYPING_NAMES = {"Any", "Optional", "Union", "List", "Tuple", "Dict", "Set", "FrozenSet", "Callable", "Sequence",
+                "Mapping", "Iterable", "Iterator", "Literal", "Final", "ClassVar", "TypeVar", "Generic", "Protocol",
+                "NamedTuple", "TypedDict", "TYPE_CHECKING", "Annotated", "Type", "NoReturn", "cast", "overload"}
+FUTURE_NAMES = {"annotations", "division", "absolute_import", "print_function", "unicode_literals", "generator_stop",
+                "nested_scopes", "generators", "with_statement"}
+FROM_NAME_ALLOWED = {"typing": TYPING_NAMES, "__future__": FUTURE_NAMES}
 FORBIDDEN_NAMES = {"open", "exec", "eval", "compile", "__import__", "globals", "locals", "setattr", "getattr",
                    "delattr", "vars", "breakpoint", "sys", "os", "atexit", "builtins", "subprocess", "importlib",
                    "references"}
@@ -203,7 +214,19 @@ def _analyse(path) -> tuple[list, bool]:
                 if a.name == "*":
                     found.append(_violation(line, "import", f"from {module} import *",
                                             "import the names you need one by one"))
-                elif a.name in READBACK_NAMES:
+                    continue
+                if not node.level and module in FROM_NAME_ALLOWED and a.name not in FROM_NAME_ALLOWED[module]:
+                    found.append(_violation(line, "import", f"from {module} import {a.name}",
+                                            f"from {module}, import only these names: "
+                                            + ", ".join(sorted(FROM_NAME_ALLOWED[module]))))
+                # A forbidden name is refused when it is imported and when it is the name an import binds, so
+                # `from ttnn import os as o` and `from typing import Any as sys` are both caught.
+                for bound in (a.name, a.asname):
+                    if bound and (bound in FORBIDDEN_NAMES
+                                  or (_is_dunder(bound) and bound not in HARMLESS_DUNDER_NAMES)):
+                        found.append(_violation(line, "name", f"import of {bound}" if bound == a.name
+                                                else f"import bound to {bound}"))
+                if a.name in READBACK_NAMES:
                     found.append(_violation(line, "readback", f"import of {a.name}"))
         elif isinstance(node, ast.Name):
             if node.id in FORBIDDEN_NAMES or (_is_dunder(node.id) and node.id not in HARMLESS_DUNDER_NAMES):
@@ -217,6 +240,8 @@ def _analyse(path) -> tuple[list, bool]:
                 found.append(_violation(line, "dunder", f"attribute {node.attr}"))
             elif node.attr in READBACK_NAMES:
                 found.append(_violation(line, "readback", f"attribute {node.attr}"))
+            elif node.attr in FORBIDDEN_NAMES:          # ttnn.os, x.sys, y.open: a module or builtin reached by name
+                found.append(_violation(line, "name", f"attribute {node.attr}"))
 
     bindings = _module_bindings(tree)
     alias_kinds = {"import ttl", "ttl operation"}
@@ -246,8 +271,9 @@ def _analyse(path) -> tuple[list, bool]:
 def kernel_source_violations(path) -> list[dict]:
     """Every rule kernel.py breaks, as dicts {rule, line, detail, remedy}, sorted by line. Empty when it breaks none.
 
-    Rules: `import` (only ttl, ttnn and math, plus `from __future__` and `from typing`; no star imports),
-    `name` (FORBIDDEN_NAMES, a call of input(), any dunder name but __name__ and __all__), `dunder` (an attribute
+    Rules: `import` (only ttl, ttnn and math, plus `from __future__` and `from typing` with the names in
+    FROM_NAME_ALLOWED; no star imports), `name` (FORBIDDEN_NAMES as a name, an attribute, an imported name or the name
+    an import binds; a call of input(); any dunder name but __name__ and __all__), `dunder` (an attribute
     whose name starts and ends with two underscores), `readback` (to_torch and from_torch, as an attribute, a name
     or an imported name), `operation` (OPERATION must be bound only by one top-level def whose only decorator is ttl's
     operation, reached through `import ttl [as x]` or `from ttl import operation [as x]`, names nothing rebinds).

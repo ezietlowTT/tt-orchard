@@ -10,6 +10,7 @@ real simulator in the ttlang venv. They skip, and say so, when that venv is abse
 """
 import importlib.util
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -138,6 +139,8 @@ def test_add_good_passes(tmp_path):
     ("forbidden_stacked_decorator", "forbidden_code", (), "add"),
     ("forbidden_for_binding", "forbidden_code", (), "add"),
     ("forbidden_walrus", "forbidden_code", (), "add"),
+    ("forbidden_typing_sys", "forbidden_code", (), "add"),
+    ("forbidden_attr_os", "forbidden_code", (), "add"),
 ])
 @needs_sim
 def test_each_broken_kernel_gets_its_category(tmp_path, kernel, category, extra, op):
@@ -439,6 +442,9 @@ def test_the_loader_alone_does_not_count_as_the_diagnostics_file(tmp_path):
     ("forbidden_stacked_decorator", ["operation"]),
     ("forbidden_for_binding", ["operation"]),
     ("forbidden_walrus", ["operation"]),
+    # I4: `from typing import sys as s`, then `s.modules["builtins"].open(...)`
+    ("forbidden_typing_sys", ["import", "name", "name"]),
+    ("forbidden_attr_os", ["name"]),                       # ttnn.os
 ])
 def test_the_gate_refuses_each_rule(kernel, rules):
     ok, reason = CHECK.check_kernel_source(KERNELS / f"{kernel}.py")
@@ -478,12 +484,48 @@ GATE_HEADER = 'import ttl\nimport ttnn\n\n\n@ttl.operation(grid="full")\ndef OPE
     ("    x = os", "name"), ("    x = __builtins__", "name"), ("    x = references", "name"),
     ("    x = a.__dict__", "dunder"), ("    x = ttl.__spec__", "dunder"),
     ("    x = ttnn.to_torch", "readback"), ("    x = ttnn.from_torch", "readback"),
+    # I4: a forbidden name imported under another name, or bound by an import as, or reached as an attribute
+    ("    from ttnn import os as o", "name"), ("    from typing import Any as sys", "name"),
+    ("    from ttl import Thing as builtins", "name"), ("    x = ttl.something.os", "name"),
+    ("    x = a.subprocess", "name"), ("    x = a.open", "name"),
+    # I4: from typing, only the type names a kernel plausibly uses (typing.re is a module in some versions)
+    ("    from typing import re", "import"), ("    from typing import get_type_hints", "import"),
+    ("    from __future__ import braces", "import"),
 ])
 def test_the_gate_rules_in_detail(tmp_path, line, rule):
     p = tmp_path / "kernel.py"
     p.write_text(GATE_HEADER + line + "\n")
     ok, reason = CHECK.check_kernel_source(p)
     assert ok is False and reason.startswith(f"1 violation: {rule} at line 7: "), reason
+
+
+def test_the_gate_allows_common_typing_names(tmp_path):
+    """I4. The typing names a kernel plausibly uses still pass, with or without an alias that is not forbidden."""
+    p = tmp_path / "kernel.py"
+    p.write_text("from __future__ import annotations\nfrom typing import Any, Optional, Tuple as T, Callable\n"
+                 + GATE_HEADER + "    x: Optional[Any] = None\n")
+    assert CHECK.check_kernel_source(p) == (True, "")
+
+
+def test_every_allowed_typing_name_is_not_a_module():
+    """I4. The allow-list of typing names holds no module in the interpreter running the tests."""
+    import inspect
+    import typing
+    for name in CHECK.TYPING_NAMES:
+        assert not inspect.ismodule(getattr(typing, name, None)), name
+
+
+@needs_sim
+@pytest.mark.parametrize("kernel", ["forbidden_typing_sys", "forbidden_attr_os"])
+def test_a_module_reached_through_typing_or_an_attribute_is_forbidden_code(tmp_path, kernel):
+    """I4. The check ends forbidden_code and names the rule in its first line; nothing reaches the simulator."""
+    tdir, adir = _attempt(tmp_path, kernel)
+    done, check = _run_check(tdir, adir)
+    assert done.stdout.startswith("FAIL: forbidden_code: "), done.stdout
+    first = check["first_line"]
+    assert re.match(r"\d+ violations?: (import|name) at line \d+: ", first), first
+    assert "name at line" in first
+    assert check["sets"] == [] and not (adir / "harness-result.json").exists()
 
 
 def test_the_gate_allows_math(tmp_path):

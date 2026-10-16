@@ -25,10 +25,11 @@ Advice:
 
 Rules the check enforces. It reads `kernel.py` before running it and answers `FAIL: forbidden_code: ...` with every
 rule broken, its line, and what to do instead:
-- Imports: import only `ttl`, `ttnn` and `math`. `from __future__ import ...` and `from typing import ...` are also
-  allowed. Do not import torch. A star import (`from X import *`) is refused.
-- Forbidden names: `open`, `exec`, `eval`, `compile`, `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`,
-  `sys`, `os`, `subprocess`, `importlib`, `builtins`, `breakpoint`, `atexit`, `references`, and calling `input()`.
+- Imports: import only `ttl`, `ttnn` and `math`. `from __future__ import annotations` and type names such as
+  `from typing import Any, Optional` are also allowed. Do not import torch. A star import (`from X import *`) is refused.
+- Forbidden names, refused as a name, an attribute (`ttnn.os`) or an import (also under an alias): `open`, `exec`,
+  `eval`, `compile`, `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`, `sys`, `os`, `subprocess`,
+  `importlib`, `builtins`, `breakpoint`, `atexit`, `references`, and calling `input()`.
 - Names and attributes with double underscores are refused, except `__name__` and `__all__`.
 - Read-back: `to_torch` and `from_torch` are refused, as a name, an attribute or an import.
 - `OPERATION`: one plain top-level `def`, with one decorator, `@ttl.operation(...)`. `import ttl as tl` with
