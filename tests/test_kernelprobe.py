@@ -1840,3 +1840,99 @@ def test_a_hang_row_says_whether_the_backstop_or_the_stall_rule_stopped_it(tmp_p
     kp.write_report(tmp_path, [attempt], {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"]})
     row = next(l for l in (tmp_path / "kernel-probe-report.md").read_text().splitlines() if l.startswith("| 1 |"))
     assert f"| hang | {word}" in row
+
+
+# ---- one probe per output directory (S6) ---------------------------------------------------------------------------
+
+from orchard.server import proc_identity as _proc_identity
+
+
+def _write_lock(probe_dir, pid, identity):
+    probe_dir.mkdir(parents=True, exist_ok=True)
+    boot, start = identity if identity else (None, None)
+    (probe_dir / kp.LOCK_NAME).write_text(json.dumps({"pid": pid, "boot_id": boot, "start_time": start}))
+
+
+def test_a_second_probe_on_the_same_directory_is_refused(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    """The lock names a live process (this test's own pid, with its real identity), so the probe refuses with exit 2
+    and runs no attempt."""
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    out_dir = tmp_path / "out"
+    _write_lock(out_dir, os.getpid(), _proc_identity(os.getpid()))
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_REFUSED and seen == []
+    assert f"another probe is using {out_dir}" in capsys.readouterr().err
+    assert (out_dir / kp.LOCK_NAME).is_file()                 # someone else's lock is left alone
+
+
+def test_a_lock_left_by_a_dead_probe_is_taken_over_and_removed_at_exit(tmp_path, fake_kenv, env_ready, monkeypatch):
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    dead = _subprocess.Popen([_sys.executable, "-c", "pass"])
+    dead.wait(timeout=10)
+    out_dir = tmp_path / "out"
+    _write_lock(out_dir, dead.pid, ("old-boot", 1))
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and seen == [1]
+    assert not (out_dir / kp.LOCK_NAME).exists()
+
+
+def test_a_lock_whose_pid_was_reused_by_another_process_is_taken_over(tmp_path, fake_kenv, env_ready, monkeypatch):
+    """Our own pid is alive, but the lock records another start time: the probe that wrote it is gone."""
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    out_dir = tmp_path / "out"
+    boot, start = _proc_identity(os.getpid())
+    _write_lock(out_dir, os.getpid(), (boot, start - 1))
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_OK and seen == [1] and not (out_dir / kp.LOCK_NAME).exists()
+
+
+def test_the_lock_is_held_while_attempts_run_and_removed_after_a_crash(tmp_path, fake_kenv, env_ready, monkeypatch):
+    out_dir = tmp_path / "out"
+    held = []
+
+    def on_n(n):
+        held.append(json.loads((out_dir / kp.LOCK_NAME).read_text())["pid"])
+        raise OSError("crash")
+    fake_attempts(monkeypatch, on_n)
+    code = kp.main(probe_args(tmp_path, attempts=2), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_ERROR and held == [os.getpid()]
+    assert not (out_dir / kp.LOCK_NAME).exists()
+
+
+def test_an_unreadable_lock_is_refused_and_left_alone(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    """A link (or garbage) at the lock path is not followed or removed; the operator is told to look."""
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    target = tmp_path / "operator.txt"
+    target.write_text("keep me\n")
+    (out_dir / kp.LOCK_NAME).symlink_to(target)
+    code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                   run_watched_fn=no_run)
+    assert code == kp.EXIT_REFUSED and seen == [] and target.read_text() == "keep me\n"
+    assert (out_dir / kp.LOCK_NAME).is_symlink() and kp.LOCK_NAME in capsys.readouterr().err
+
+
+def test_a_lock_held_by_a_zombie_is_taken_over(tmp_path, fake_kenv, env_ready, monkeypatch):
+    """A zombie keeps its pid and start time until it is reaped, so only the liveness check sees that it has ended.
+    The zombie is this test's own child, reaped in the finally."""
+    seen = fake_attempts(monkeypatch, lambda n: None)
+    child = _subprocess.Popen([_sys.executable, "-c", "pass"])
+    try:
+        end = _time.monotonic() + 10
+        while _time.monotonic() < end:
+            stat = Path(f"/proc/{child.pid}/stat").read_text()
+            if stat[stat.rfind(")") + 2:].split()[0] == "Z":
+                break
+            _time.sleep(0.02)
+        out_dir = tmp_path / "out"
+        _write_lock(out_dir, child.pid, _proc_identity(child.pid))
+        code = kp.main(probe_args(tmp_path, attempts=1), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
+                       run_watched_fn=no_run)
+        assert code == kp.EXIT_OK and seen == [1]
+    finally:
+        child.wait(timeout=10)

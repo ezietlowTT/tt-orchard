@@ -1088,6 +1088,75 @@ def safe_url(url) -> str:
     return urlunsplit(parts._replace(netloc=parts.netloc.rsplit("@", 1)[1]))
 
 
+LOCK_NAME = "probe.lock"
+
+
+def _lock_record(path: Path) -> dict | None:
+    """The lock's {"pid", "boot_id", "start_time"}, or None when the file is not a regular file holding that."""
+    raw = _read_regular(path, 4096)
+    try:
+        rec = json.loads(raw.decode("utf-8")) if raw is not None else None
+    except ValueError:
+        return None
+    if not isinstance(rec, dict) or not isinstance(rec.get("pid"), int) or isinstance(rec.get("pid"), bool):
+        return None
+    return rec
+
+
+def _holder_alive(rec: dict) -> bool:
+    """Whether the process that wrote the lock still runs: the pid is alive and no zombie, and its boot id and start
+    time are the ones recorded (a pid the kernel reused for another process has another start time)."""
+    from orchard.server import proc_identity
+    from orchard.status import _pid_alive
+    pid = rec["pid"]
+    if pid <= 0 or not _pid_alive(pid):
+        return False
+    return proc_identity(pid) == (rec.get("boot_id"), rec.get("start_time"))
+
+
+def acquire_lock(probe_dir: Path) -> Path:
+    """Take `probe_dir/probe.lock` for this process, or raise _Refused. Two probes on one directory would write the
+    same attempt directories, and each one's sweep would stop the other's agent processes.
+
+    The file is created with O_CREAT | O_EXCL | O_NOFOLLOW and holds our pid, boot id and start time. A lock whose
+    process is gone (or whose pid now belongs to another process) is removed and taken over. A lock that cannot be read
+    (a link, garbage) is left alone and refused, with the path named."""
+    from orchard.server import proc_identity
+    Path(probe_dir).mkdir(parents=True, exist_ok=True)
+    path = Path(probe_dir) / LOCK_NAME
+    boot, start = proc_identity(os.getpid()) or (None, None)
+    for _ in range(3):
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        except FileExistsError:
+            rec = _lock_record(path)
+            if rec is None:
+                raise _Refused(f"{path} exists and is not a probe lock this command can read; remove it if no probe "
+                               f"is using {probe_dir}") from None
+            if _holder_alive(rec):
+                raise _Refused(f"another probe is using {probe_dir} (pid {rec['pid']}); wait for it to end or "
+                               "pass another --out") from None
+            try:
+                os.unlink(path)                          # the probe that held it is gone: take it over
+            except FileNotFoundError:
+                pass
+            continue
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump({"pid": os.getpid(), "boot_id": boot, "start_time": start}, f)
+        return path
+    raise _Refused(f"another probe is using {probe_dir}: its lock kept changing while this probe tried to take it")
+
+
+def release_lock(path: Path) -> None:
+    """Remove the lock if it is still ours. Never raises."""
+    try:
+        rec = _lock_record(path)
+        if rec is not None and rec.get("pid") == os.getpid():
+            os.unlink(path)
+    except OSError:
+        pass
+
+
 def _raise_interrupt(signum, frame):
     """SIGTERM handler while the probe runs: stop the way Ctrl-C does, so the report is still written."""
     raise KeyboardInterrupt
@@ -1108,6 +1177,10 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     runs one smoke test and then each attempt that passed the simulator, each on one leased chip. The report is
     written from the records this run's attempts returned. `tier_config` is the TierConfig the coder comes from when a
     flag is missing (the CLI loads it from bringup.toml).
+
+    The output directory is locked (`probe.lock`) from the first write to the end, on every path. A second probe on a
+    directory whose lock names a live probe is refused with exit 2; a lock left by a probe that has ended is taken
+    over.
 
     A run that stops early still writes its report from what finished, with "The probe stopped: <reason>" in it:
     a hung hardware run (ProbeBlocked) exits 5, an exception in an attempt or in the hardware phase exits 3, and Ctrl-C
@@ -1138,69 +1211,78 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                       "server that runs")
 
     probe_dir = Path(getattr(args, "out", None) or "kernel-probe")
-    probe_id = new_probe_id()
-    facts = tt_lang_facts(env)
-    say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts, coder {model} at {safe_url(endpoint)}")
-    records: list[dict] = []
-    hw, stopped, blocked, code = None, None, None, EXIT_OK
-    state: dict = {}
-    hw_started = False
     try:
-        previous = signal.signal(signal.SIGTERM, _raise_interrupt)
-    except ValueError:                                  # not the main thread: no handler can be installed
-        previous = None
+        lock = acquire_lock(probe_dir)
+    except _Refused as exc:
+        return refuse(str(exc))
     try:
-        where = "attempt 1"
+        probe_id = new_probe_id()
+        facts = tt_lang_facts(env)
+        say(f"kernel probe {probe_id}: op {args.op}, {attempts} attempts, coder {model} at {safe_url(endpoint)}")
+        records: list[dict] = []
+        hw, stopped, blocked, code = None, None, None, EXIT_OK
+        state: dict = {}
+        hw_started = False
         try:
-            for n in range(1, attempts + 1):
-                where = f"attempt {n}"
-                record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint, model=model,
-                                     coder_model=model, probe_id=probe_id, http=http, run_watched=run_watched_fn,
-                                     tt_lang=facts)
-                records.append(record)
-                say(_attempt_line(record))
-            if getattr(args, "phase", "sim") == "hw":
-                where, hw_started = "the hardware phase", True
-                shared = getattr(args, "shared_python", None) or str(Path.home() / ".tenstorrent-venv" / "bin" / "python")
-                try:
-                    hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
-                                      run_watched=run_watched_fn, state=state)
-                except ProbeBlocked as exc:
-                    blocked = stopped = str(exc)
-                    code = EXIT_BLOCKED
-                    # A hung smoke test carries its own hardware block. A kernel hang came after a passing smoke test.
-                    hw = exc.hw if exc.hw is not None else state.get("smoke")
-        except KeyboardInterrupt:
-            stopped, code = f"interrupted during {where}", EXIT_ABORTED
-        except Exception as exc:
-            stopped, code = _crash(where, exc), EXIT_ERROR
+            previous = signal.signal(signal.SIGTERM, _raise_interrupt)
+        except ValueError:                                  # not the main thread: no handler can be installed
+            previous = None
+        try:
+            where = "attempt 1"
+            try:
+                for n in range(1, attempts + 1):
+                    where = f"attempt {n}"
+                    record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint, model=model,
+                                         coder_model=model, probe_id=probe_id, http=http, run_watched=run_watched_fn,
+                                         tt_lang=facts)
+                    records.append(record)
+                    say(_attempt_line(record))
+                if getattr(args, "phase", "sim") == "hw":
+                    where, hw_started = "the hardware phase", True
+                    shared = (getattr(args, "shared_python", None)
+                              or str(Path.home() / ".tenstorrent-venv" / "bin" / "python"))
+                    try:
+                        hw = run_hardware(records, probe_dir=probe_dir, env=env, shared_python=shared,
+                                          run_watched=run_watched_fn, state=state)
+                    except ProbeBlocked as exc:
+                        blocked = stopped = str(exc)
+                        code = EXIT_BLOCKED
+                        # A hung smoke test carries its own hardware block. A kernel hang came after a passing
+                        # smoke test.
+                        hw = exc.hw if exc.hw is not None else state.get("smoke")
+            except KeyboardInterrupt:
+                stopped, code = f"interrupted during {where}", EXIT_ABORTED
+            except Exception as exc:
+                stopped, code = _crash(where, exc), EXIT_ERROR
+        finally:
+            if previous is not None:
+                signal.signal(signal.SIGTERM, previous)
+        if hw_started and hw is None:
+            hw = state.get("smoke")                         # a crash or an interrupt after the smoke test ran
+        try:
+            for a in records:
+                if isinstance(a.get("hw"), dict):
+                    say(_hw_line(a))
+            if hw and not hw.get("available") and not hw.get("hung"):
+                say("hardware unavailable: the smoke test failed (the report has its last lines)")
+            header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
+                                   ignored_records=0)
+            if stopped:
+                header["stopped"] = stopped
+            if blocked:
+                header["blocked"] = blocked
+            write_report(probe_dir, records, header)
+            say(f"report: {probe_dir / 'kernel-probe-report.md'}")
+            if stopped:
+                say(f"stopped: {stopped}")
+        except Exception as exc:                            # never let the last step lose the records
+            try:
+                print(f"the report could not be written ({type(exc).__name__}: {exc}); the attempt records follow",
+                      file=sys.stderr)
+                print(json.dumps({"stopped": stopped, "attempts": records}, default=str), file=sys.stderr)
+            except Exception:
+                pass
+            return EXIT_ERROR
+        return code
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
-    if hw_started and hw is None:
-        hw = state.get("smoke")                         # a crash or an interrupt after the smoke test ran
-    try:
-        for a in records:
-            if isinstance(a.get("hw"), dict):
-                say(_hw_line(a))
-        if hw and not hw.get("available") and not hw.get("hung"):
-            say("hardware unavailable: the smoke test failed (the report has its last lines)")
-        header = report_header(env=env, coder_model=model, probe_id=probe_id, ops=[args.op], hw=hw, tt_lang=facts,
-                               ignored_records=0)
-        if stopped:
-            header["stopped"] = stopped
-        if blocked:
-            header["blocked"] = blocked
-        write_report(probe_dir, records, header)
-        say(f"report: {probe_dir / 'kernel-probe-report.md'}")
-        if stopped:
-            say(f"stopped: {stopped}")
-    except Exception as exc:                            # never let the last step lose the records
-        try:
-            print(f"the report could not be written ({type(exc).__name__}: {exc}); the attempt records follow",
-                  file=sys.stderr)
-            print(json.dumps({"stopped": stopped, "attempts": records}, default=str), file=sys.stderr)
-        except Exception:
-            pass
-        return EXIT_ERROR
-    return code
+        release_lock(lock)
