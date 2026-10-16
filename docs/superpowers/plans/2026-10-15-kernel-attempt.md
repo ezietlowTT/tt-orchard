@@ -2783,3 +2783,101 @@ These need real hardware, a real model server, or network, and run after Task 12
 
 Stop conditions for the live steps: a `harness_error`, a hung process, a lease held longer than its run, or a model server that
 stops answering ends the step and is reported, not retried in a loop.
+
+---
+
+## Task 13: UI parity (added 2026-10-16, operator request: "make sure this all has parity in the UI")
+
+**Goal:** `tt-orchard ui` shows everything the new commands produce: the op inventory of a run, the kernel environment's
+status, the list of kernel probes with live progress, and a probe's attempts with each kernel. The page stays read-only for
+kernel work: it launches no probe, no inventory and no hardware action. (Ruling: the page has no login with `--lan`; a button
+that starts hardware-capable runs is a security decision for the operator. The existing `bringup` launch and the pause, resume
+and abort controls are unchanged.)
+
+**Prerequisites:** the final fix wave (branch `ka-final-fixes`) is merged into `kernel-attempt`, and the live probe batch has
+ended (the batch uses the shipped templates from that checkout). Work in a new worktree from the merged head.
+
+**Precedent to copy:** the base research view. `orchard/webui.py` `research_view` (a bounded, redacted summary; text from a
+downloaded repo is never trusted), `run_research`, the route `/api/runs/<name>/research`, the file allow-list regex `ALLOWED`
+(line ~103), `REPORT_MAX_BYTES`, and `tests/test_webui_research.py`. Read `orchard/webui.py` (1273 lines) and
+`orchard/web/{index.html,app.js,app.css}` before writing anything; read the module docstring's list of what the page may write
+and read.
+
+### 13a. Make probes discoverable (CLI side; `orchard/kernelprobe.py`, `orchard/cli.py`, `README.md`)
+- `kernelprobe.probe_root(runs_root=None)` returns `<runs root>/kernel-probes`, where the runs root is the bringup config's
+  runs directory when a config is found (the way `cli._inventory` and `bringup_config.run_dir` find it) and `~/orchard-runs`
+  otherwise. `--out` defaults to `<probe root>/<UTC stamp>-<op>` (was `./kernel-probe`); an explicit `--out` is unchanged.
+  Update the README flag text and the parser help.
+- `main` writes `probe.json` into the probe directory at the start and rewrites it at the end (atomic: temp file in the same
+  directory plus `os.replace`; never through a link): `{"probe_id", "op", "attempts", "phase", "pid", "started_at", "state",
+  "endpoint" (credentials stripped), "coder_model"}` with `state` `running` at the start and, at the end, one of `finished`,
+  `blocked`, `crashed`, `interrupted`, plus `exit_code` and `finished_at`. Writing it must never stop a probe (an OSError is
+  ignored).
+- Tests first, a mutation each: default out under the probe root; explicit `--out` unchanged; `probe.json` is `running` before
+  the first attempt and carries the final state and exit code for each exit path (0, 3, 4, 5); atomic write (a crash between the
+  write and the replace leaves no truncated file); credentials stripped from the endpoint.
+
+### 13b. Server (`orchard/webui.py`)
+All new text read from disk is bounded, redacted with the existing redaction (home paths, tokens, host name) and set in the
+page with `textContent`. All reads of files an agent could have written use a capped regular-file reader (no symlink follow, no
+FIFO, size cap); the probe-owned `.verdict/<op>-<n>/` files are preferred over anything under the attempt directories. IDs and
+names that name directories are matched by strict ASCII regexes before use.
+- `GET /api/runs/<name>/inventory`: the view of `stages/0/ops-inventory.json` (2 MiB cap): traced class, `skipped`, `failures`,
+  the dump version or note, counts by status (`mapped`, `composable`, `unmapped`, `unchecked`, `ignored`), up to 20 `unmapped`
+  ops (most frequent by scaled count first, op name only), `python_nodes` and `higher_order_nodes` counts, `scaling`, and the
+  label sentence that `mapped` is a name match. Add `stages/0/ops-inventory.(json|md)` to the allow-list.
+  Malformed input never raises: the view says the file is unreadable.
+- `GET /api/kernel/env`: the status of the simulator environment WITHOUT running the verification examples: clone at the pin,
+  venv present, simulator version, diagnostics file present with the pinned sha256 (a read-only version of
+  `ttlang_env` steps; add a `ttlang_env.status(env) -> list[Result]` that runs no `uv`, no `git` write and no example; it may
+  call `git rev-parse` and `tt-lang-sim --version`). Cached for 60 s like the gozer cache. States `ok`, `missing`, `stale`,
+  with the command to run (`tt-orchard kernel-env`).
+- `GET /api/probes`: up to 50 probe directories under the probe root (newest first) that hold a `probe.json` or a
+  `kernel-probe-report.json`: id, op, state, attempts done of total (from the records under `.verdict`), simulator passes,
+  hardware state (`not run`, `unavailable`, `blocked`, or passes of runs), coder model, started and finished times. A
+  `running` state whose pid is no longer alive (use the same liveness helper `orchard/status.py` uses for supervisors, which
+  checks the process start time) is reported as `died`.
+- `GET /api/probes/<id>`: the header (tt-lang versions and source SHA, patch applied, bars with the word provisional, coder,
+  budgets, the `hw` line) and up to 200 attempt rows: attempt number, status and first line of the status detail when not
+  `done`, simulator pass, category, first line, turns, wall seconds, smallest PCC, largest relative L2 error, slope range,
+  `agent_check_untrusted`, `violations` count, swept stray processes count, hardware outcome. Built from `kernel-probe-report.json`
+  when present, and from the `.verdict` records while the probe runs.
+- `GET /api/probes/<id>/kernel?op=<op>&n=<int>`: the text of the probe-owned clean copy
+  `.verdict/<op>-<n>/authoritative/kernel.py` (256 KiB cap, redacted); `GET /api/probes/<id>/report`: the report Markdown
+  (1 MiB cap). No other file under a probe directory is served.
+- Tests first in a new `tests/test_webui_kernels.py` in the style of `tests/test_webui_research.py`, a mutation per guard:
+  redaction of every text field (plant a home path and an `hf_` token in an op name, a first line and a kernel file);
+  strict id/op/n validation (path traversal, `..`, unicode digits, leading zeros); a symlinked `probe.json`, `.verdict` entry or
+  `kernel.py` is refused; a FIFO is refused without blocking (hard timeout); size caps; a malformed inventory or probe record
+  never raises; a dead pid shows `died`; `kernel/env` runs no verification example and no subprocess other than the two read-only
+  ones (assert on a fake runner); cache honoured; the page's CSP and the existing request checks (Host header, Origin) apply to
+  the new GET routes unchanged.
+
+### 13c. Page (`orchard/web/index.html`, `app.js`, `app.css`)
+- A run's Details tab gets an "Ops and kernels" section from `/api/runs/<name>/inventory`: counts by status as small labelled
+  bars (text first, bar second), the unmapped list, the dump line, and the caption that `mapped` is a name match. States for
+  `skipped`, unreadable and no inventory.
+- A new left-rail section "Kernels": the kernel environment row (status and the command to run) and the probes list (op, state
+  badge `running`/`finished`/`blocked`/`crashed`/`interrupted`/`died`, `n of m attempts`, passes, newest first). Selecting a
+  probe opens a pane with the header (provisional bars and the `hw: not run` line shown plainly, the calibration note for
+  `add`, the simulator float32 note), the attempt table (the columns in 13b; `escalate`/`error` status and `untrusted`
+  flags visibly marked), and a kernel viewer (read-only, monospace, `textContent`).
+- Same conventions as the rest of the page: keyboard-accessible tabs (`role="tab"`), `aria-live` for the running probe's
+  progress, light and dark themes from the existing tokens, the farm look, the polling rules that avoid rebuilding focused
+  controls (only on change; 30 s when the tab is hidden), no external hosts, no inline script.
+- Do NOT add any control that starts or stops a probe, an inventory or hardware.
+- Checks: `node --check` if node exists on the box (it did not on 2026-10-12: say so in the report); a headless-Chrome browser
+  check as the 2026-10-08 UI entry did (the official `playwright` package in a scratch venv with `executable_path` set to
+  `/usr/bin/google-chrome`, no browser download, run against a temporary server with fixture probe and run directories):
+  load the page at 1440, 1024, 768 and 400 px, assert no horizontal page scroll, take screenshots of the Kernels section and the
+  Ops section in light and dark, and save them in the scratch directory (not in the repository); report what the screenshots show
+  and anything that looked wrong.
+
+### 13d. Docs and version
+README "Web page" section: the new panels and that they are read-only; `CLAUDE.md` log entry (what was added, the decision that
+the page launches nothing for kernel work and why, what the browser check found); version 0.6.1.
+
+**Review focus for this task:** (1) a hostile probe directory (symlinks, FIFOs, huge files, a planted `probe.json` with
+script text in every field) must not break the page or leak a path; (2) nothing in the new routes can write or start a
+process; (3) the page works with no probes, no inventory, no kernel environment; (4) every number shown is labelled with what it
+is (simulator, provisional, name match).
