@@ -780,3 +780,43 @@ def test_inventory_with_no_interpreter_anywhere_refuses_and_calls_neither(monkey
     code = cli.main(["inventory", "somedir", "--config", str(tmp_path / "missing.toml")],
                     env={"HOME": str(tmp_path)}, stdout=io.StringIO())
     assert code == 2 and calls == {"dump": [], "inv": []}
+
+
+# ---------------------------------------------------------------- kernel-probe
+
+def _fake_probe_main(monkeypatch):
+    from orchard import kernelprobe
+    calls = []
+    monkeypatch.setattr(kernelprobe, "main", lambda args, **kw: calls.append((args, kw)) or 0)
+    return calls
+
+
+def test_kernel_probe_refuses_an_unknown_op_and_calls_nothing(monkeypatch, tmp_path, capsys):
+    calls = _fake_probe_main(monkeypatch)
+    with pytest.raises(SystemExit) as info:
+        cli.main(["kernel-probe", "--op", "softmax"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert info.value.code == 2 and calls == []
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_kernel_probe_passes_the_parsed_flags_to_kernelprobe_main(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    code = cli.main(["kernel-probe", "--op", "rmsnorm", "--attempts", "3", "--phase", "hw", "--out", str(tmp_path / "o"),
+                     "--endpoint", "http://127.0.0.1:8011/v1", "--model", "coder", "--src-dir", "/s", "--venv-dir", "/v",
+                     "--shared-python", "/sp"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 0 and len(calls) == 1
+    args, kw = calls[0]
+    assert (args.op, args.attempts, args.phase, args.out) == ("rmsnorm", 3, "hw", str(tmp_path / "o"))
+    assert (args.endpoint, args.model, args.src_dir, args.venv_dir, args.shared_python) == \
+        ("http://127.0.0.1:8011/v1", "coder", "/s", "/v", "/sp")
+    assert kw["tier_config"] is None                       # both flags given: no config is read
+
+
+def test_kernel_probe_defaults(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    cli.main(["kernel-probe", "--op", "add", "--config", str(tmp_path / "missing.toml")], env={"HOME": str(tmp_path)},
+             stdout=io.StringIO())
+    args, kw = calls[0]
+    assert (args.attempts, args.phase, args.out, args.endpoint, args.model) == (5, "sim", "kernel-probe", None, None)
+    assert args.shared_python == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
+    assert kw["tier_config"] is None                       # no config: kernelprobe.main refuses, naming the flags

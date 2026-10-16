@@ -1076,6 +1076,49 @@ Flags:
 - `--class`: the transformers class to trace, when it is not the first architecture in `config.json`.
 - `--out`: output directory (default `./ops-inventory`).
 
+### 5.9c Kernel probe
+
+```bash
+tt-orchard kernel-probe --op add --endpoint http://127.0.0.1:8011/v1 --model <coder model id>
+tt-orchard kernel-probe --op rmsnorm --attempts 5 --phase hw      # coder from the tier config; then one chip
+```
+
+The kernel probe measures whether the local coder can write a working tt-lang kernel for one op. Each attempt is a
+fresh conversation in `<out>/<op>/attempt-<n>/`. The agent writes `kernel.py` and may run the kernel check as often as
+it likes. The ops are `add` (a calibration op whose working kernel is upstream's example), `silu_mul`, `rmsnorm` and
+`linear_scan`.
+
+- It starts no model server. The coder must already answer at its endpoint; starting it is `tt-orchard bringup`'s
+  job. For a flag you leave out it uses the tier stage 2 runs on, from the tier config that `bringup.toml`
+  names. With a flag missing and no config it refuses and names the two flags. A URL is printed without any
+  `user:password@` part.
+- It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`.
+- The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
+  `kernel.py`. The agent's own `check.json` is never believed; when it disagrees, the report marks it untrusted.
+- The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
+  set). Attempts are independent draws, so the report gives counts and no rates.
+- `--phase hw` takes one chip at a time: each hardware run is a `gozer run` that leases exactly one chip. It first
+  runs a smoke test (upstream's `eltwise_add.py`). When that passes, it runs each attempt that passed the simulator.
+  The lease's release resets the chip; the probe never resets one itself. A hardware run that stops making progress
+  is killed by the stall watcher, the probe stops, and the command exits 5 with the report written for what ran.
+- Exit 0 means a report was written (`kernel-probe-report.md` and `.json` in the output directory), whatever the
+  attempts' results.
+- A run that stops early still writes its report from the attempts that finished, with the reason. An exception
+  exits 3, Ctrl-C or SIGTERM exits 4, and no hardware run starts after either.
+
+Flags:
+
+- `--op`: the op to write a kernel for (`add`, `silu_mul`, `rmsnorm`, `linear_scan`). Required.
+- `--attempts`: independent attempts (default 5).
+- `--phase`: `sim` (default) for the simulator only; `hw` to add the smoke test and the one-chip runs.
+- `--out`: output directory (default `./kernel-probe`).
+- `--endpoint`: the coder's OpenAI-compatible URL, ending in `/v1` (default: from the tier config).
+- `--model`: the model id the coder serves (default: from the tier config).
+- `--src-dir`: the tt-lang checkout (default `~/orchard-src/tt-lang`, or `$ORCHARD_TTLANG_SRC`).
+- `--venv-dir`: the simulator venv (default `~/orchard-venvs/ttlang`, or `$ORCHARD_TTLANG_VENV`).
+- `--shared-python`: the interpreter with ttnn and tt-lang that the hardware phase runs (default
+  `~/.tenstorrent-venv/bin/python`).
+
 ### 5.10 Tensor caches and disk
 
 Each chip configuration keeps a tensor cache under `cache_root`, named by model and package

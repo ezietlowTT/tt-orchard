@@ -12,6 +12,8 @@
     tt-orchard coder    [status | stop [--yes]]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
+    tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
+                            [--src-dir D] [--venv-dir D] [--shared-python P]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -160,6 +162,23 @@ def _parser() -> argparse.ArgumentParser:
     inv.add_argument("--seq", type=int, default=8, help="sequence length to trace (default 8)")
     inv.add_argument("--class", dest="cls", help="the transformers class to trace if not config.json's first architecture")
     inv.add_argument("--out", help="output directory (default ./ops-inventory)")
+    from orchard.defaults import KERNEL_PROBE_OPS
+    kp = sub.add_parser("kernel-probe", parents=[common],
+                        help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
+                             "on the simulator (and with --phase hw, on one leased chip). Starts no server")
+    kp.add_argument("--op", required=True, choices=KERNEL_PROBE_OPS, help="the op to write a kernel for")
+    kp.add_argument("--attempts", type=int, default=5, help="independent attempts, each a fresh conversation (default 5)")
+    kp.add_argument("--phase", choices=("sim", "hw"), default="sim",
+                    help="sim (default): the simulator only. hw: then a smoke test and each simulator pass on one "
+                         "chip, under `gozer run --chips 1`")
+    kp.add_argument("--out", default="kernel-probe", help="output directory (default ./kernel-probe)")
+    kp.add_argument("--endpoint", help="the coder's OpenAI-compatible URL, ending in /v1 (default: the tier stage 2 "
+                                       "uses, from the tier config bringup.toml names)")
+    kp.add_argument("--model", help="the model id the coder serves (default: that tier's model)")
+    kp.add_argument("--src-dir", help="the tt-lang checkout (default ~/orchard-src/tt-lang, or $ORCHARD_TTLANG_SRC)")
+    kp.add_argument("--venv-dir", help="the simulator venv (default ~/orchard-venvs/ttlang, or $ORCHARD_TTLANG_VENV)")
+    kp.add_argument("--shared-python", help="the interpreter with ttnn and tt-lang that the hardware phase runs "
+                                            "(default ~/.tenstorrent-venv/bin/python)")
     return p
 
 
@@ -182,6 +201,22 @@ def _inventory(args, env, home, out) -> int:
     return opinventory.run_inventory(args.target, python=python, ttnn_python=ttnn_python,
                                      out_dir=args.out or "ops-inventory", layers=args.layers, seq=args.seq,
                                      cls=args.cls, against=args.against, say=say)
+
+
+def _kernel_probe(args, env, home, out) -> int:
+    """`kernel-probe`: the coder comes from --endpoint and --model, or else from the tier config that bringup.toml
+    names. No config is needed when both flags are given; with neither flags nor a config the probe refuses."""
+    from orchard import kernelprobe, tiers
+    if not args.shared_python:
+        args.shared_python = str(home / ".tenstorrent-venv" / "bin" / "python")
+    tier_config = None
+    if not (args.endpoint and args.model):
+        try:
+            cfg = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home))
+            tier_config = tiers.load(cfg.tiers)
+        except (NoConfig, bringup_config.BringupConfigError, tiers.TierConfigError) as exc:
+            print(f"note: no tier config read ({exc})", file=out)
+    return kernelprobe.main(args, out=out, tier_config=tier_config)
 
 
 def _refuse(message: str) -> int:
@@ -459,6 +494,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return ttlang_env.main(args, out=out)
     if args.cmd == "inventory":
         return _inventory(args, env, home, out)
+    if args.cmd == "kernel-probe":
+        return _kernel_probe(args, env, home, out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
     if args.cmd == "caches":

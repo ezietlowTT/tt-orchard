@@ -202,3 +202,7 @@ TTLANG_NEGATIVE_EXAMPLES = (
     ("compiler_only_external_call.py", ("ttl.call_extern_func is not supported by the Python simulator",
                                         "use tt-lang-sim --backend=emule")),
 )
+
+# The ops the kernel probe can ask for (orchard/kernelprobe.py re-exports this as OPS). It lives here so the CLI can
+# offer the choices without importing the probe and the agent machinery behind it.
+KERNEL_PROBE_OPS = ("add", "silu_mul", "rmsnorm", "linear_scan")
