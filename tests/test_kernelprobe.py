@@ -43,6 +43,22 @@ def kenv(tmp_path):
     return ttlang_env.KEnv(src_dir=SRC, venv_dir=VENV, scratch_dir=tmp_path / "scratch")
 
 
+SKILL_FILES = {"guide.md": "# stand-in for the tt-lang skill's guide\n", "examples.md": "# stand-in examples\n",
+               "SKILL.md": "---\nname: ttm-tt-lang\n---\n"}
+
+
+@pytest.fixture(autouse=True)
+def ttlang_skill(tmp_path, monkeypatch):
+    """Every test gets a stand-in tt-lang skill directory through ORCHARD_TTLANG_SKILL, so no test reads the one
+    installed in the operator's home."""
+    d = tmp_path / "skill-ttm-tt-lang"
+    d.mkdir()
+    for name, text in SKILL_FILES.items():
+        (d / name).write_text(text)
+    monkeypatch.setenv(ttlang_env.TTLANG_SKILL_ENV, str(d))
+    return d
+
+
 FACTS = {"sim_version": "1.1.10+gtest", "source_sha": "a" * 40, "diagnostics_patched": True, "patch_sha256": "b" * 64}
 
 
@@ -52,6 +68,9 @@ def fake_kenv(tmp_path):
     src = tmp_path / "src"
     (src / "examples").mkdir(parents=True)
     (src / "examples" / "eltwise_add.py").write_text("# stand-in for upstream's example\nprint('PASSED!')\n")
+    (src / "examples" / "eltwise_broadcast_reduce.py").write_text("# stand-in for upstream's reduce example\n")
+    (src / "docs" / "sphinx" / "specs").mkdir(parents=True)
+    (src / "docs" / "sphinx" / "specs" / "TTLangSpecification.md").write_text("# stand-in specification\n")
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     (venv / "bin" / "tt-lang-sim").write_text("#!/bin/sh\nexit 1\n")
@@ -686,7 +705,9 @@ def test_the_skill_states_every_rule_the_gate_enforces():
     assert "`__name__` and `__all__`" in flat and "from __future__" in flat
     # the file rule belongs to the probe, which applies it when it takes kernel.py
     assert "The probe also refuses" in flat
-    assert len(kp.SKILL.read_text().splitlines()) <= 55
+    # The reference-file section (Task 14) took the skill from 46 to about 80 lines; the bound keeps it short enough
+    # for a small coder to read in one turn.
+    assert len(kp.SKILL.read_text().splitlines()) <= 90
 
 
 def test_the_report_header_says_the_wall_budget_can_overrun_by_one_tool_timeout(tmp_path, fake_kenv):
@@ -2486,3 +2507,220 @@ def test_phase_hw_with_two_temperatures_runs_one_smoke_test_and_every_sim_pass(t
     assert by_n[1]["hw"]["passed"] is True and by_n[3]["hw"]["passed"] is True
     assert by_n[2]["hw"] is None and by_n[4]["hw"] is None
     assert by_n[3]["sampling"]["temperature"] == 0.7
+
+
+# ---- the coder's reference files (Task 14: the tt-lang skill and the checkout's examples and specification) --------
+
+REF_NAMES = ["guide.md", "examples.md", "TTLangSpecification.md", "eltwise_add.py", "eltwise_broadcast_reduce.py"]
+
+
+def test_read_references_reads_the_skill_and_the_checkout_once_with_sha256s(fake_kenv, ttlang_skill):
+    refs, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert problems == []
+    assert [r["name"] for r in refs] == REF_NAMES
+    by = {r["name"]: r for r in refs}
+    assert by["guide.md"]["source"] == "tt-lang skill" and by["guide.md"]["path"] == str(ttlang_skill / "guide.md")
+    assert by["eltwise_broadcast_reduce.py"]["source"] == "tt-lang checkout"
+    assert by["TTLangSpecification.md"]["path"] == str(fake_kenv.src_dir / "docs" / "sphinx" / "specs" /
+                                                      "TTLangSpecification.md")
+    for r in refs:
+        assert r["data"] == Path(r["path"]).read_bytes()
+        assert r["sha256"] == hashlib.sha256(r["data"]).hexdigest()
+
+
+def test_prepare_attempt_writes_the_references_as_regular_files_and_returns_their_shas(tmp_path, fake_kenv, ttlang_skill):
+    refs, _ = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    adir = tmp_path / "add" / "attempt-1"
+    copied = kp.prepare_attempt(adir, op="add", env=fake_kenv, tt_lang=FACTS, references=refs)
+    assert [c["name"] for c in copied] == [f"reference/{n}" for n in REF_NAMES]
+    for c, r in zip(copied, refs):
+        p = adir / c["name"]
+        assert p.is_file() and not p.is_symlink()
+        assert p.read_bytes() == r["data"] and c["sha256"] == r["sha256"] and c["source"] == r["source"]
+        assert "data" not in c
+
+
+@pytest.mark.parametrize("name", ["guide.md", "examples.md"])
+def test_a_missing_skill_file_is_a_problem_that_names_it(fake_kenv, ttlang_skill, name):
+    (ttlang_skill / name).unlink()
+    refs, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert len(problems) == 1 and str(ttlang_skill / name) in problems[0] and "does not exist" in problems[0]
+
+
+def test_a_missing_skill_directory_is_a_problem(fake_kenv, tmp_path):
+    _, problems = ttlang_env.read_references(fake_kenv, tmp_path / "nowhere")
+    assert problems and all("does not exist" in p for p in problems[:2])
+
+
+def test_a_missing_checkout_example_is_a_problem(fake_kenv, ttlang_skill):
+    (fake_kenv.src_dir / "examples" / "eltwise_broadcast_reduce.py").unlink()
+    _, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert len(problems) == 1 and "eltwise_broadcast_reduce.py" in problems[0]
+
+
+def test_a_reference_that_is_a_link_is_refused_and_its_target_never_read(fake_kenv, ttlang_skill, tmp_path):
+    secret = tmp_path / "secret.txt"
+    secret.write_text("token=abc\n")
+    (ttlang_skill / "guide.md").unlink()
+    (ttlang_skill / "guide.md").symlink_to(secret)
+    refs, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert len(problems) == 1 and "link" in problems[0]
+    assert all(b"token=abc" not in r["data"] for r in refs)
+
+
+def test_a_linked_reference_is_named_a_link_by_the_lstat_layer(fake_kenv, ttlang_skill, tmp_path):
+    (tmp_path / "other.md").write_text("x\n")
+    (ttlang_skill / "guide.md").unlink()
+    (ttlang_skill / "guide.md").symlink_to(tmp_path / "other.md")
+    _, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert problems == [f"{ttlang_skill / 'guide.md'} is a link; put the file itself there"]
+
+
+def test_a_linked_reference_is_not_followed_even_when_lstat_was_fooled(fake_kenv, ttlang_skill, tmp_path, monkeypatch):
+    """The open-side layer alone: the open does not follow the link, so the target's bytes are never read."""
+    secret = tmp_path / "secret.txt"
+    secret.write_text("token=abc\n")
+    (ttlang_skill / "guide.md").unlink()
+    (ttlang_skill / "guide.md").symlink_to(secret)
+    real = os.lstat
+
+    def fake(p, *a, **kw):
+        st = real(p, *a, **kw)
+        if Path(p) == ttlang_skill / "guide.md":
+            return os.stat_result((_stat.S_IFREG | 0o644,) + tuple(st)[1:6] + (10,) + tuple(st)[7:])
+        return st
+    monkeypatch.setattr(ttlang_env.os, "lstat", fake)
+    refs, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert len(problems) == 1 and "cannot be opened" in problems[0]
+    assert all(b"token=abc" not in r["data"] for r in refs)
+
+
+def test_a_fifo_reference_is_refused_without_blocking(fake_kenv, ttlang_skill):
+    (ttlang_skill / "examples.md").unlink()
+    os.mkfifo(ttlang_skill / "examples.md")
+    try:
+        hung, value = _in_thread(lambda: ttlang_env.read_references(fake_kenv, ttlang_skill), timeout=10)
+    finally:
+        _unblock(ttlang_skill / "examples.md")
+    assert not hung
+    _, problems = value
+    assert len(problems) == 1 and "not a regular file" in problems[0]
+
+
+def test_an_oversized_reference_is_refused(fake_kenv, ttlang_skill):
+    (ttlang_skill / "guide.md").write_bytes(b"x" * (ttlang_env.REFERENCE_MAX_BYTES + 1))
+    _, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert len(problems) == 1 and "larger than" in problems[0]
+
+
+def test_a_reference_linked_to_dev_zero_is_refused_in_a_limited_child(tmp_path):
+    """The hostile read runs in a child with a 2 GiB address-space limit and a timeout (hostile-input rule): a reader
+    that followed the link would read without end."""
+    import subprocess
+    import sys
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "guide.md").symlink_to("/dev/zero")
+    (skill / "examples.md").write_text("x\n")
+    code = ("import resource, sys; resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30)); "
+            f"sys.path.insert(0, {str(REPO)!r}); from pathlib import Path; from orchard import ttlang_env as t; "
+            f"env = t.KEnv(src_dir=Path({str(tmp_path / 'src')!r}), venv_dir=Path('/nonexistent'), scratch_dir=Path('/tmp')); "
+            f"refs, problems = t.read_references(env, Path({str(skill)!r})); print([p for p in problems if 'guide.md' in p])")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr[-500:]
+    assert "link" in done.stdout
+
+
+def test_the_skill_directory_comes_from_the_flag_then_the_environment_then_the_home(tmp_path):
+    from types import SimpleNamespace
+    home = tmp_path / "home"
+    assert ttlang_env.skill_dir_from(SimpleNamespace(tt_lang_skill_dir="/f"), environ={"ORCHARD_TTLANG_SKILL": "/e"},
+                                     home=home) == Path("/f")
+    assert ttlang_env.skill_dir_from(SimpleNamespace(tt_lang_skill_dir=None), environ={"ORCHARD_TTLANG_SKILL": "/e"},
+                                     home=home) == Path("/e")
+    assert ttlang_env.skill_dir_from(SimpleNamespace(), environ={}, home=home) == \
+        home / ".claude" / "skills" / "ttm-tt-lang"
+
+
+def test_main_refuses_when_the_tt_lang_skill_is_missing_and_starts_nothing(tmp_path, fake_kenv, env_ready, monkeypatch,
+                                                                          capsys):
+    monkeypatch.setenv(ttlang_env.TTLANG_SKILL_ENV, str(tmp_path / "no-skill"))
+    asked = []
+    code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: asked.append(1) or True,
+                   run_watched_fn=no_run)
+    err = capsys.readouterr().err
+    assert code == 2 and not (tmp_path / "out").exists() and asked == []
+    assert str(tmp_path / "no-skill") in err and "--tt-lang-skill-dir" in err
+
+
+def test_main_gives_every_attempt_the_references_and_records_them(tmp_path, fake_kenv, env_ready, ttlang_skill):
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, attempts=2, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == 0
+    want = {f"reference/{r['name']}": r["sha256"] for r in ttlang_env.read_references(fake_kenv, ttlang_skill)[0]}
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert {r["name"]: r["sha256"] for r in data["header"]["references"]} == want
+    assert data["header"]["tt_lang_skill_dir"] == str(ttlang_skill)
+    for a in data["attempts"]:
+        adir = tmp_path / "out" / "add" / f"attempt-{a['attempt']}"
+        assert {r["name"]: r["sha256"] for r in a["provenance"]["references"]} == want
+        for name, sha in want.items():
+            assert hashlib.sha256((adir / name).read_bytes()).hexdigest() == sha
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "## Reference files" in md and str(ttlang_skill / "guide.md") in md
+    assert all(sha in md for sha in want.values())
+
+
+def test_the_agent_can_read_and_grep_the_reference_files(tmp_path, fake_kenv, ttlang_skill):
+    refs, _ = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    adir = tmp_path / "add" / "attempt-1"
+    kp.prepare_attempt(adir, op="add", env=fake_kenv, tt_lang=FACTS, references=refs)
+    tools = kp.attempt_tools(adir)
+    assert tools.read_file("reference/guide.md") == SKILL_FILES["guide.md"]
+    got = tools.shell("grep -n stand-in reference/TTLangSpecification.md")
+    assert got.startswith("exit 0") and "stand-in specification" in got
+
+
+def test_reading_the_reference_files_is_not_forbidden_code(tmp_path):
+    """A kernel that names the reference files in a comment is judged by the gate like any other: the gate does not
+    refuse the word `reference` or the file names."""
+    gate = kp._template("kernel_check")
+    kernel = tmp_path / "kernel.py"
+    kernel.write_text((KERNELS / "add_good.py").read_text()
+                      + "\n# read reference/guide.md, reference/examples.md and reference/TTLangSpecification.md\n")
+    assert gate.kernel_source_violations(kernel) == []
+
+
+def test_the_skill_names_every_reference_file_and_what_to_read_for_each_kind_of_op():
+    flat = " ".join(kp.SKILL.read_text().split())
+    for name in REF_NAMES:
+        assert f"reference/{name}" in flat, name
+    for op in kp.OPS:
+        assert f"`{op}`" in flat, op
+    # the rules that answer the live probe's failures (element loops, an invented ttl.zeros, reduce_sum's arguments)
+    for needle in ("`x_blk[i, j]`", "`ttl.zeros`", "`ttl.block.fill(0.0, shape=(...))`",
+                   "`ttl.math.reduce_sum(expr, dims=[...], shape=(...))`", "There is no scaler argument",
+                   "`@ttl.operation(grid=...)`", "block_count=2)`", "specification 0.12"):
+        assert needle in flat, needle
+
+
+SIM = SRC / "python" / "sim"
+
+
+@pytest.mark.skipif(not (SIM / "__init__.py").is_file(), reason="SKIPPED: no tt-lang checkout with python/sim")
+def test_the_skills_api_rules_match_the_simulator_at_the_pin():
+    """The skill tells the coder which names exist. This reads the simulator's own source in the checkout (nothing is
+    imported, so no device is touched) and checks each claim: the names the skill gives exist, the old names it warns
+    about do not."""
+    init = (SIM / "__init__.py").read_text()
+    for present in ("self.operation = operation", "self.fill = block_module.fill",
+                    "self.broadcast = block_module.broadcast", "self.reduce_sum = math_module.reduce_sum"):
+        assert present in init, present
+    for absent in ("self.kernel =", "self.zeros ="):
+        assert absent not in init, absent
+    reduce_sum = re.search(r"def reduce_sum\(([^)]*)\)", (SIM / "math.py").read_text()).group(1)
+    assert "shape" in reduce_sum and "scaler" not in reduce_sum
+    assert "block_count" in re.search(r"def make_dataflow_buffer_like\(([^)]*)\)",
+                                      (SIM / "dfb.py").read_text()).group(1)
+    assert "def broadcast(" not in (SIM / "math.py").read_text()

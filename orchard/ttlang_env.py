@@ -26,6 +26,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -250,6 +251,80 @@ def ensure(env: KEnv, *, check_only: bool = False, say: Callable = print) -> lis
     results.append(r)
     say(f"{r.status:5s} {r.name}: {r.detail}")
     return results
+
+
+# ---- the coder's reference files --------------------------------------------------------------------------------
+#
+# The kernel probe gives the coder these files in its attempt directory, under reference/ (spec section 11, item 28).
+# Two come from the installed tt-lang skill (vendored by tt-warp from tenstorrent/tt-metal, branch
+# agentic-research/fast-models-fast); three come from the tt-lang checkout this module builds the simulator from. The
+# skill's guide and examples document tt-lang specification 0.12; the checkout's specification and examples are the
+# version the simulator runs (0.20 at the pin), so they go in too and the probe's skill says which wins.
+
+TTLANG_SKILL_ENV = "ORCHARD_TTLANG_SKILL"
+SKILL_SOURCE, CHECKOUT_SOURCE = "tt-lang skill", "tt-lang checkout"
+REFERENCE_MAX_BYTES = 1024 * 1024       # choice: the largest file is the checkout's specification, 92 KB
+# (name under reference/, source, path under that source's directory)
+REFERENCES = (
+    ("guide.md", SKILL_SOURCE, "guide.md"),
+    ("examples.md", SKILL_SOURCE, "examples.md"),
+    ("TTLangSpecification.md", CHECKOUT_SOURCE, "docs/sphinx/specs/TTLangSpecification.md"),
+    ("eltwise_add.py", CHECKOUT_SOURCE, "examples/eltwise_add.py"),
+    ("eltwise_broadcast_reduce.py", CHECKOUT_SOURCE, "examples/eltwise_broadcast_reduce.py"),
+)
+
+
+def skill_dir_from(args, environ: dict | None = None, home: Path | None = None) -> Path:
+    """The installed tt-lang skill: --tt-lang-skill-dir, else $ORCHARD_TTLANG_SKILL, else ~/.claude/skills/ttm-tt-lang."""
+    environ = os.environ if environ is None else environ
+    flag = getattr(args, "tt_lang_skill_dir", None)
+    if flag:
+        return Path(flag)
+    if environ.get(TTLANG_SKILL_ENV):
+        return Path(environ[TTLANG_SKILL_ENV])
+    return Path(home or Path.home()) / ".claude" / "skills" / "ttm-tt-lang"
+
+
+def _read_reference(path: Path) -> tuple[bytes | None, str | None]:
+    """(bytes, None) for a regular file of at most REFERENCE_MAX_BYTES, else (None, why). The file is opened without
+    following a link and without blocking on a FIFO, and checked on the open file, so a link is never followed and a
+    device is never read."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None, f"{path} does not exist"
+    except OSError as exc:
+        return None, f"{path} cannot be read: {exc.strerror or exc}"
+    if stat.S_ISLNK(st.st_mode):
+        return None, f"{path} is a link; put the file itself there"
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    except OSError as exc:
+        return None, f"{path} cannot be opened: {exc.strerror or exc}"
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            return None, f"{path} is not a regular file"
+        data = f.read(REFERENCE_MAX_BYTES + 1)
+    if len(data) > REFERENCE_MAX_BYTES:
+        return None, f"{path} is larger than {REFERENCE_MAX_BYTES // 1024} KiB"
+    return data, None
+
+
+def read_references(env: KEnv, skill_dir: Path) -> tuple[list[dict], list[str]]:
+    """Read every reference file once. (files, problems): each file is {"name", "source", "path", "sha256", "data"};
+    each problem is a sentence naming a file that is missing, a link, not a regular file or too large. The probe
+    refuses to start while any problem remains, and writes these same bytes into every attempt."""
+    roots = {SKILL_SOURCE: Path(skill_dir), CHECKOUT_SOURCE: Path(env.src_dir)}
+    files, problems = [], []
+    for name, source, rel in REFERENCES:
+        path = roots[source] / rel
+        data, why = _read_reference(path)
+        if why:
+            problems.append(why)
+            continue
+        files.append({"name": name, "source": source, "path": str(path),
+                      "sha256": hashlib.sha256(data).hexdigest(), "data": data})
+    return files, problems
 
 
 def main(args, *, env: KEnv | None = None, out=None, run=None) -> int:

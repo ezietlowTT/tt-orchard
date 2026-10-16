@@ -147,8 +147,28 @@ def tt_lang_facts(env) -> dict:
             "diagnostics_patched": patched, "patch_sha256": defaults.TTLANG_DIAGNOSTICS_SHA256}
 
 
-def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None) -> None:
+def write_references(adir: Path, references: list[dict]) -> list[dict]:
+    """Write the reference files (ttlang_env.read_references) into `adir/reference/` as new regular files and return
+    what was written: [{"name": "reference/<name>", "source", "path", "sha256"}], the sha256 of the bytes written."""
+    ref_dir = Path(adir) / "reference"
+    _real_dir(ref_dir)
+    out = []
+    for r in references:
+        data = r["data"]
+        _write_new(ref_dir / r["name"], data)
+        out.append({"name": f"reference/{r['name']}", "source": r["source"], "path": r["path"],
+                    "sha256": hashlib.sha256(data).hexdigest()})
+    return out
+
+
+def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
+                    references: list[dict] | None = None) -> list[dict]:
     """Fill an EMPTY attempt directory with what the agent reads and runs. `tt_lang` defaults to tt_lang_facts(env).
+    Returns the reference files written, with their sha256 (write_references).
+
+    `references` are the files ttlang_env.read_references read once for the whole probe (the tt-lang skill's guide and
+    examples, the checkout's specification and two examples). `main` always passes them, after refusing to start when
+    any is missing. Without them (unit tests of other parts) only the checkout's eltwise_add.py is copied, as before.
 
     Whatever is at the attempt's path is removed first, without following a link (a real directory is removed with its
     contents, a link or a file is unlinked), so nothing an earlier run left there (a kernel.py, a check.json) can be
@@ -164,10 +184,13 @@ def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None) ->
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
     (adir / "check_config.json").write_text(json.dumps({"sim": str(env.sim), "timeout_s": BUDGET["sim_timeout_s"],
                                                         "tt_lang": facts}, indent=2) + "\n", encoding="utf-8")
+    if references is not None:
+        return write_references(adir, references)
     ref = Path(env.src_dir) / "examples" / "eltwise_add.py"
     if ref.is_file():
         (adir / "reference").mkdir(exist_ok=True)
         shutil.copy2(ref, adir / "reference" / "eltwise_add.py")
+    return []
 
 
 def attempt_tools(adir: Path) -> Tools:
@@ -364,11 +387,12 @@ def set_measures(sets: list) -> dict:
 
 
 def provenance(*, kernel_sha256, tt_lang, coder_model, probe_id, simulator_pcc_min, hardware_pcc_min=None,
-               sampling: dict | None = None) -> dict:
-    """The provenance block of a probe attempt (spec section 6), with the sampling the coder was asked for."""
+               sampling: dict | None = None, references: list[dict] | None = None) -> dict:
+    """The provenance block of a probe attempt (spec section 6), with the sampling the coder was asked for and the
+    reference files it was given (name, source, path and sha256 of each)."""
     return {"origin": "kernel", "kernel_sha256": kernel_sha256, "tt_lang": tt_lang, "coder_model": coder_model,
             "probe_id": probe_id, "simulator_pcc_min": simulator_pcc_min, "hardware_pcc_min": hardware_pcc_min,
-            "sampling": sampling}
+            "sampling": sampling, "references": references}
 
 
 def _shipped_hashes(op: str) -> dict:
@@ -680,13 +704,14 @@ def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
 def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, max_turns=BUDGET["max_turns"],
                 wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
                 tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
-                seed: int | None = None) -> dict:
+                seed: int | None = None, references: list[dict] | None = None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
-    The sampling (temperature, top_p, seed) goes to the coder and into the record as `sampling`."""
+    The sampling (temperature, top_p, seed) goes to the coder and into the record as `sampling`; the reference files
+    written into the attempt (with their sha256) go into the provenance block."""
     sampling = {"temperature": temperature, "top_p": top_p, "seed": seed}
     adir = Path(probe_dir) / op / f"attempt-{n}"
     facts = tt_lang if tt_lang is not None else tt_lang_facts(env)
-    prepare_attempt(adir, op=op, env=env, tt_lang=facts)
+    copied = prepare_attempt(adir, op=op, env=env, tt_lang=facts, references=references)
     control = ProbeControl(wall_s=wall_s)
     ledger = Ledger(adir / "ledger.jsonl")
     started = time.monotonic()
@@ -698,7 +723,8 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
                          clock=clock, guard=RetryGuard(), max_turns=max_turns, temperature=temperature, top_p=top_p,
                          seed=seed)
         user = (f"Write kernel.py for the op `{op}` in kernel_spec.json. "
-                "Start by reading kernel_spec.json and reference/eltwise_add.py.")
+                "Start by reading kernel_spec.json and reference/eltwise_add.py, then the reference files the skill "
+                "names for this kind of op.")
         outcome = step.run(SKILL.read_text(encoding="utf-8"), user)
     finally:
         ledger.close()
@@ -718,7 +744,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         "swept": swept, "sampling": dict(sampling),
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
-                                 sampling=dict(sampling)),
+                                 sampling=dict(sampling), references=copied or None),
     }
     _save_attempt(adir, attempt)
     return attempt
@@ -1041,6 +1067,20 @@ def _distinct_lines(g: dict) -> list[str]:
     return lines
 
 
+def _reference_lines(header: dict) -> list[str]:
+    """The report's list of the files the coder was given, each with its source and sha256."""
+    refs = header.get("references")
+    if not isinstance(refs, list) or not refs:
+        return []
+    lines = ["## Reference files", "",
+             f"Each attempt's reference/ directory held these files (tt-lang skill directory: "
+             f"{header.get('tt_lang_skill_dir')}):", ""]
+    for r in refs:
+        if isinstance(r, dict):
+            lines.append(f"- {r.get('name')}: from the {r.get('source')}, {r.get('path')}, sha256 {r.get('sha256')}")
+    return lines + [""]
+
+
 def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     """Write kernel-probe-report.json (header, attempts, attempts to first pass per op, and per op and temperature the
     distinct-kernel counts) and kernel-probe-report.md."""
@@ -1080,6 +1120,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
              f"- source SHA: {t.get('source_sha')}",
              f"- diagnostics patch applied: {'yes' if t.get('diagnostics_patched') else 'no'} "
              f"(a local patch of the tt-lang-sim wheel; patch sha256 {t.get('patch_sha256')})", "",
+             *_reference_lines(header),
              "## Bars (provisional: none has been measured)", ""]
     for op, b in (header.get("bars") or {}).items():
         lines.append(f"- {op}, simulator: {_bars_text(b['sim'])}")
@@ -1424,6 +1465,14 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     results = ttlang_env.ensure(env, check_only=True, say=say)
     if not results or any(r.status != ttlang_env.OK for r in results):
         return refuse("the tt-lang simulator environment is not ready: run `tt-orchard kernel-env`")
+    skill_dir = ttlang_env.skill_dir_from(args)
+    references, problems = ttlang_env.read_references(env, skill_dir)
+    if problems:
+        return refuse("the coder's reference files are not ready: " + "; ".join(problems) + ". The tt-lang skill is "
+                      "installed by `tt-warp fastmodels sync`; name another directory with --tt-lang-skill-dir or "
+                      f"{ttlang_env.TTLANG_SKILL_ENV}")
+    reference_record = [{"name": f"reference/{r['name']}", "source": r["source"], "path": r["path"],
+                         "sha256": r["sha256"]} for r in references]
     try:
         endpoint, model = coder_endpoint(args, tier_config, probe)
     except _Refused as exc:
@@ -1468,7 +1517,8 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                     record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint,
                                          model=model, coder_model=model, probe_id=probe_id, http=http,
                                          run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
-                                         top_p=plan["top_p"], seed=attempt_seed(base, n, temperature))
+                                         top_p=plan["top_p"], seed=attempt_seed(base, n, temperature),
+                                         references=references)
                     records.append(record)
                     say(_attempt_line(record))
                 if getattr(args, "phase", "sim") == "hw":
@@ -1506,6 +1556,8 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             if blocked:
                 header["blocked"] = blocked
             header["sampling"] = sampling
+            header["tt_lang_skill_dir"] = str(skill_dir)
+            header["references"] = reference_record
             write_report(probe_dir, records, header)
             say(f"report: {probe_dir / 'kernel-probe-report.md'}")
             if stopped:

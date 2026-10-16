@@ -1,16 +1,47 @@
 ---
 name: kernel-probe
-status: draft. For the kernel probe (spec 2026-10-15-kernel-attempt-design.md, section 5). Not yet run with a real coder.
+status: draft. For the kernel probe (spec 2026-10-15-kernel-attempt-design.md, section 5 and section 11, item 28).
 ---
 # Write a tt-lang kernel
 
-Your directory holds `kernel_spec.json` (the op), `kernel_check.py` (the check), `reference/eltwise_add.py` (a working
-tt-lang example) and a few support files. You write one file: `kernel.py`.
+Your directory holds `kernel_spec.json` (the op), `kernel_check.py` (the check), reference files in `reference/` and a
+few support files. You write one file: `kernel.py`.
+
+Reference files:
+- `reference/eltwise_add.py`: a working kernel for the tt-lang the check runs. Start here.
+- `reference/eltwise_broadcast_reduce.py`: a working kernel with `ttl.math.reduce_sum`, `ttl.block.broadcast` and
+  `ttl.block.fill`, for the same tt-lang.
+- `reference/TTLangSpecification.md`: the specification of that tt-lang (version 0.20). It is long: search it with
+  `grep -n "reduce_sum" reference/TTLangSpecification.md` and read the lines around a hit.
+- `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written
+  for specification 0.12, so take every name and signature from the two .py files and the specification.
+
+Read first, by kind of op:
+- Elementwise (`add`, `silu_mul`): eltwise_add.py, then the specification's row for each function you need
+  (`grep -n "ttl.math.silu" reference/TTLangSpecification.md`).
+- A reduction (`rmsnorm`): eltwise_broadcast_reduce.py, then the specification's rows for `ttl.math.reduce_sum`,
+  `ttl.block.broadcast` and `ttl.block.fill`.
+- A recurrence along a dimension (`linear_scan`): both .py files, then the specification's "Block" section. No upstream
+  example has a recurrence.
+
+Rules from the specification and the examples:
+- A block is used whole. On a compute thread a block is an operand of a block expression (Python operators and
+  `ttl.math` functions), and `blk.store(expr)` writes an expression into a block whose shape it matches exactly. On a
+  data movement thread a block is the source or destination of `ttl.copy`. Do not index a block element by element
+  (`x_blk[i, j]`) or loop over its elements.
+- The decorator is `@ttl.operation(grid=...)`. The guide's `@ttl.kernel` is the old name.
+- `ttl.make_dataflow_buffer_like(tensor, shape=(R, C), block_count=2)`; the shape counts tiles. The guide's
+  `buffer_factor` is the old name.
+- `ttl.math.reduce_sum(expr, dims=[...], shape=(...))`, and `ttl.math.reduce_max` the same way: `shape` is the
+  result's shape, 1 in each reduced dimension. There is no scaler argument; the guide's `reduce_sum(x, s, dims=...)`
+  is the old form.
+- `ttl.block.broadcast(expr, dims=[...], shape=(...))` and `ttl.block.fill(value, shape=(...))`. There is no
+  `ttl.zeros`: `ttl.block.fill(0.0, shape=(...))` is a block of zeros. The guide's `ttl.math.broadcast` and
+  `ttl.math.fill` moved to `ttl.block`.
 
 Steps:
 1. Read `kernel_spec.json`. It lists the inputs, their shapes, the output shape, and what the op computes.
-2. Read `reference/eltwise_add.py` once. It shows `@ttl.operation(grid="full")`, the dataflow buffers, and the reader,
-   compute and writer functions.
+2. Read `reference/eltwise_add.py` once, then the files listed above for your kind of op.
 3. Write `kernel.py` with write_file. Define `OPERATION`: it takes the inputs in the order `kernel_spec.json` lists
    them, then the output tensor last.
 4. Run `python3 kernel_check.py`. It prints `PASS`, or `FAIL: <category>: <first line>`.
@@ -21,7 +52,7 @@ Advice:
   function with `@ttl.compute()`, and a writer with `@ttl.datamovement()`. Without them the simulator fails with
   `ModuleNotFoundError: ttl.dfb_reset`.
 - Delete the example's `main()` and its `if __name__ == "__main__":` block. Do not open a device: the check opens it,
-  builds the inputs and reads the result back.
+  builds the inputs and reads the result back. The guide's advice to add a main block does not apply here.
 
 Rules the check enforces. It reads `kernel.py` before running it and answers `FAIL: forbidden_code: ...` with every
 rule broken, its line, and what to do instead:
