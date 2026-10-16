@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -594,7 +595,7 @@ def test_load_attempts_reads_the_probe_owned_records(tmp_path, fake_kenv):
     with FakeModel(lambda r: final("nothing")) as server:
         attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL))
     (tmp_path / "probe" / "add" / "attempt-1" / "attempt.json").write_text(json.dumps(dict(attempt, passed_sim=True)))
-    assert kp.load_attempts(tmp_path / "probe") == [attempt]
+    assert kp.load_attempts(tmp_path / "probe", ops=["add"], probe_id="t") == ([attempt], 0)
 
 
 def test_a_smoke_test_killed_by_the_watcher_blocks_the_probe(tmp_path, fake_kenv):
@@ -616,7 +617,8 @@ def test_a_smoke_test_that_exits_non_zero_is_unavailable_without_blocking(tmp_pa
 
 
 def test_the_skill_states_every_rule_the_gate_enforces():
-    """Each rule in the gate's REMEDIES has a plain-word counterpart in the skill, so the two cannot drift apart."""
+    """The skill's rules are compared with the gate's own tables, so a rule added to the gate fails this test until the
+    skill names it. Each REMEDIES rule needs its word; every name the gate refuses or allows by name must appear."""
     gate = kp._template("kernel_check")
     words = {"import": "import only", "name": "getattr", "dunder": "double underscores",
              "readback": "to_torch", "operation": "OPERATION"}
@@ -624,7 +626,17 @@ def test_the_skill_states_every_rule_the_gate_enforces():
     flat = " ".join(kp.SKILL.read_text().split())
     for rule, word in words.items():
         assert word in flat, rule
+    named = (gate.FORBIDDEN_NAMES | gate.CALL_ONLY_NAMES | gate.READBACK_NAMES | gate.ALLOWED_IMPORTS
+             | gate.HARMLESS_FROM_MODULES | gate.HARMLESS_DUNDER_NAMES)
+    for name in sorted(named):
+        if gate._is_dunder(name) and name not in gate.HARMLESS_DUNDER_NAMES:
+            continue                                      # covered by the double-underscore rule
+        assert re.search(rf"`[^`]*\b{re.escape(name)}\b[^`]*`", flat), name
+    # the star-import refusal (its remedy text lives in the gate's import branch)
+    assert "import *" in gate.Path(gate.__file__).read_text() and "`from X import *`" in flat
     assert "`__name__` and `__all__`" in flat and "from __future__" in flat
+    # the file rule belongs to the probe, which applies it when it takes kernel.py
+    assert "The probe also refuses" in flat
     assert len(kp.SKILL.read_text().splitlines()) <= 55
 
 
@@ -649,3 +661,229 @@ def test_a_stale_verdict_from_an_earlier_run_is_not_read(tmp_path, fake_kenv):
     with FakeModel(agent_does(lambda: (adir / "kernel.py").write_text((KERNELS / "add_good.py").read_text()))) as server:
         attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=writes_nothing)
     assert attempt["passed_sim"] is False and attempt["category"] == "harness_error"
+
+
+# ---- fix round 2: records of this probe only, capped regular-file reads, fresh attempt directories ---------------
+
+import stat as _stat
+import threading
+
+
+def _record(probe_dir, op, n, probe_id, **extra):
+    vdir = kp.verdict_dir(probe_dir, op, n)
+    vdir.mkdir(parents=True, exist_ok=True)
+    rec = {"op": op, "attempt": n, "passed_sim": True, "category": None, "hw": None, "turns": 1, "agent_wall_s": 1.0,
+           "pcc_min": 0.9999, "first_line": "", "agent_check_untrusted": False,
+           "provenance": {"probe_id": probe_id}, **extra}
+    (vdir / "attempt.json").write_text(json.dumps(rec))
+    return rec
+
+
+def test_a_stale_record_from_a_longer_earlier_run_is_not_in_the_new_report(tmp_path, fake_kenv):
+    probe = tmp_path / "probe"
+    _record(probe, "add", 5, "old-run")                    # an earlier 5-attempt run left add-5 behind
+    with FakeModel(lambda r: final("nothing")) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, probe_id="new-run", run_watched=check_writer(NO_KERNEL))
+    got, ignored = kp.load_attempts(probe, ops=["add"], probe_id="new-run")
+    assert got == [attempt] and ignored == 1
+    header = kp.report_header(env=fake_kenv, coder_model="c", probe_id="new-run", ops=["add"], tt_lang=FACTS,
+                              ignored_records=ignored)
+    data = kp.write_report(probe, got, header)
+    assert data["first_pass"]["add"] == {"sim": None, "hw": None}
+    md = (probe / "kernel-probe-report.md").read_text()
+    assert "1 unrelated or unreadable records ignored" in md and "| 5 |" not in md
+
+
+def test_planted_and_malformed_records_are_ignored(tmp_path):
+    probe = tmp_path / "probe"
+    good = _record(probe, "add", 1, "p")
+    _record(probe, "add", 99, "someone-else")             # another probe id
+    _record(probe, "add", 7, "p", attempt=8)              # the number does not match its directory
+    _record(probe, "add", 3, "p", attempt="3")            # not an int: must not make the sort raise
+    _record(probe, "add", 4, "p", attempt=True)           # a bool is not an attempt number
+    _record(probe, "rmsnorm", 1, "p")                     # an op this probe did not run
+    (probe / ".verdict" / "add-x").mkdir()
+    (probe / ".verdict" / "add-0").mkdir()
+    (probe / ".verdict" / "notes").mkdir()
+    # links whose targets hold records that would otherwise match their directory names
+    outside = tmp_path / "outside"
+    _record(outside, "add", 6, "p")
+    _record(outside, "add", 2, "p")
+    linked = probe / ".verdict" / "add-6"
+    linked.mkdir()
+    (linked / "attempt.json").symlink_to(kp.verdict_dir(outside, "add", 6) / "attempt.json")
+    (probe / ".verdict" / "add-2").symlink_to(kp.verdict_dir(outside, "add", 2), target_is_directory=True)
+    got, ignored = kp.load_attempts(probe, ops=["add"], probe_id="p")
+    assert got == [good] and ignored == 10                  # every entry above but add-1
+
+
+def test_a_bool_attempt_number_is_ignored(tmp_path):
+    """True == 1 in Python, so the number check alone would accept it in add-1."""
+    _record(tmp_path / "probe", "add", 1, "p", attempt=True)
+    assert kp.load_attempts(tmp_path / "probe", ops=["add"], probe_id="p") == ([], 1)
+
+
+def test_a_reused_attempt_directory_starts_empty(tmp_path, fake_kenv):
+    adir = tmp_path / "add" / "attempt-1"
+    adir.mkdir(parents=True)
+    (adir / "kernel.py").write_text("# left by an earlier run\n")
+    (adir / "check.json").write_text(json.dumps({"passed": True}))
+    kp.prepare_attempt(adir, op="add", env=fake_kenv, tt_lang=FACTS)
+    assert not (adir / "kernel.py").exists() and not (adir / "check.json").exists()
+    assert (adir / "kernel_spec.json").is_file()
+
+
+def test_an_attempt_directory_that_is_a_link_is_replaced_and_its_target_left_alone(tmp_path, fake_kenv):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "keep.txt").write_text("keep")
+    (tmp_path / "add").mkdir()
+    (tmp_path / "add" / "attempt-1").symlink_to(elsewhere, target_is_directory=True)
+    kp.prepare_attempt(tmp_path / "add" / "attempt-1", op="add", env=fake_kenv, tt_lang=FACTS)
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["keep.txt"]
+    assert not (tmp_path / "add" / "attempt-1").is_symlink()
+
+
+def _in_thread(fn, timeout=20):
+    """Run fn in a thread; fail (without hanging the suite) if it has not returned within `timeout` seconds."""
+    box = {}
+
+    def target():
+        box["value"] = fn()
+    th = threading.Thread(target=target, daemon=True)
+    th.start()
+    th.join(timeout)
+    return th.is_alive(), box.get("value")
+
+
+def _unblock(fifo):
+    """Open the FIFO's write end once, so a reader blocked on it gets EOF (cleanup after a failing run)."""
+    try:
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+    except OSError:
+        pass
+
+
+def test_read_regular_refuses_links_and_fifos_and_caps_its_read(tmp_path):
+    f = tmp_path / "f.txt"
+    f.write_bytes(b"x" * 10)
+    assert kp._read_regular(f, 100) == b"x" * 10
+    assert kp._read_regular(f, 4) == b"xxxxx"             # limit + 1 bytes: the caller sees it is too large
+    link = tmp_path / "link"
+    link.symlink_to(f)
+    assert kp._read_regular(link, 100) is None
+    fifo = tmp_path / "fifo"
+    os.mkfifo(fifo)
+    try:
+        hung, value = _in_thread(lambda: kp._read_regular(fifo, 100), timeout=10)
+    finally:
+        _unblock(fifo)
+    assert not hung and value is None
+
+
+def test_agent_check_json_that_is_a_fifo_or_a_link_is_untrusted_and_never_blocks(tmp_path):
+    big = tmp_path / "big.json"
+    big.write_text(json.dumps({"passed": False, "pad": "x" * (2 * 1024 * 1024)}))
+    cases = {}
+    fifo = tmp_path / "fifo-check.json"
+    os.mkfifo(fifo)
+    try:
+        cases["fifo"] = _in_thread(lambda: kp._read_agent_check(fifo), timeout=10)
+    finally:
+        _unblock(fifo)
+    for name, target in (("big", big),):
+        link = tmp_path / f"{name}-check.json"
+        link.symlink_to(target)
+        cases[name] = _in_thread(lambda link=link: kp._read_agent_check(link), timeout=10)
+    oversized = tmp_path / "oversized-check.json"
+    oversized.write_bytes(big.read_bytes())
+    cases["oversized"] = _in_thread(lambda: kp._read_agent_check(oversized), timeout=10)
+    for name, (hung, value) in cases.items():
+        assert not hung, name
+        assert value == "unreadable", (name, value)
+        assert kp.agent_check_untrusted(value, {"passed": False}, "add") is True
+    assert kp._read_agent_check(tmp_path / "missing.json") is None
+
+
+def test_agent_check_json_linked_to_dev_zero_is_refused_without_reading_it(tmp_path):
+    """Run in a child process with a 2 GiB address-space limit and a timeout: a reader that follows the link and reads
+    to the end would exhaust memory, and the limit turns that into a MemoryError in the child alone."""
+    import subprocess
+    import sys
+    link = tmp_path / "check.json"
+    link.symlink_to("/dev/zero")
+    code = ("import resource, sys; resource.setrlimit(resource.RLIMIT_AS, (2 << 30, 2 << 30)); "
+            f"sys.path.insert(0, {str(REPO)!r}); from pathlib import Path; from orchard import kernelprobe as kp; "
+            f"print(kp._read_agent_check(Path({str(link)!r})))")
+    done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr[-500:]
+    assert done.stdout.strip() == "unreadable"
+
+
+def test_a_fifo_check_json_left_by_the_agent_does_not_block_the_attempt(tmp_path, fake_kenv):
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    with FakeModel(agent_does(lambda: os.mkfifo(adir / "check.json"))) as server:
+        try:
+            hung, attempt = _in_thread(lambda: run_attempt(tmp_path, fake_kenv, server,
+                                                           run_watched=check_writer(NO_KERNEL)), timeout=30)
+        finally:
+            _unblock(adir / "check.json")
+    assert not hung and attempt["agent_check_untrusted"] is True
+
+
+def _lstat_says_regular(monkeypatch, path):
+    """os.lstat reports a regular file for `path`, as if it changed between the lstat and the open."""
+    real = os.lstat
+
+    def fake(p, *a, **kw):
+        st = real(p, *a, **kw)
+        if Path(p) == path:
+            return os.stat_result((_stat.S_IFREG | 0o644,) + tuple(st)[1:6] + (10,) + tuple(st)[7:])
+        return st
+    monkeypatch.setattr(kp.os, "lstat", fake)
+
+
+def test_copy_kernel_refuses_a_link_even_when_lstat_was_fooled(tmp_path, monkeypatch):
+    """The read-side layer alone: the open does not follow the link."""
+    secret = tmp_path / "secret.py"
+    secret.write_text("import ttl\n")
+    adir = tmp_path / "a"
+    adir.mkdir()
+    (adir / "kernel.py").symlink_to(secret)
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    _lstat_says_regular(monkeypatch, adir / "kernel.py")
+    category, sha, line = kp.copy_kernel(adir, clean)
+    assert category == "forbidden_code" and sha is None and not (clean / "kernel.py").exists()
+
+
+def test_copy_kernel_refuses_a_fifo_even_when_lstat_was_fooled(tmp_path, monkeypatch):
+    """The read-side layer alone: fstat on the open file says it is not a regular file."""
+    adir = tmp_path / "a"
+    adir.mkdir()
+    os.mkfifo(adir / "kernel.py")
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    _lstat_says_regular(monkeypatch, adir / "kernel.py")
+    try:
+        hung, got = _in_thread(lambda: kp.copy_kernel(adir, clean), timeout=10)
+    finally:
+        _unblock(adir / "kernel.py")
+    assert not hung and got[0] == "forbidden_code" and not (clean / "kernel.py").exists()
+
+
+def test_a_hung_smoke_test_names_its_last_lines_and_the_report_records_the_hang(tmp_path, fake_kenv):
+    def hangs(argv, **kw):
+        with open(kw["log_path"], "a") as f:
+            f.write("opening device 0\nwaiting for ARC\n")
+        return kp.Watched(-9, "stalled: no output and no CPU use for 60 s", True, 70.0)
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv)
+    with pytest.raises(kp.ProbeBlocked) as info:
+        kp.run_hardware([attempt], probe_dir=tmp_path, env=fake_kenv, shared_python="/p", run_watched=hangs)
+    assert "waiting for ARC" in str(info.value)
+    hw = info.value.hw
+    assert hw["available"] is False and hw["hung"] is True and "waiting for ARC" in hw["smoke_tail"]
+    header = kp.report_header(env=fake_kenv, coder_model="c", probe_id="t", ops=["add"], hw=hw, tt_lang=FACTS)
+    kp.write_report(tmp_path, [attempt], header)
+    md = (tmp_path / "kernel-probe-report.md").read_text()
+    assert "hw: blocked" in md and "the smoke test hung" in md and "waiting for ARC" in md

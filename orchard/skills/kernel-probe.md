@@ -26,14 +26,16 @@ Advice:
 Rules the check enforces. It reads `kernel.py` before running it and answers `FAIL: forbidden_code: ...` with every
 rule broken, its line, and what to do instead:
 - Imports: import only `ttl`, `ttnn` and `math`. `from __future__ import ...` and `from typing import ...` are also
-  allowed. Do not import torch.
+  allowed. Do not import torch. A star import (`from X import *`) is refused.
 - Forbidden names: `open`, `exec`, `eval`, `compile`, `getattr`, `setattr`, `delattr`, `globals`, `locals`, `vars`,
   `sys`, `os`, `subprocess`, `importlib`, `builtins`, `breakpoint`, `atexit`, `references`, and calling `input()`.
 - Names and attributes with double underscores are refused, except `__name__` and `__all__`.
 - Read-back: `to_torch` and `from_torch` are refused, as a name, an attribute or an import.
 - `OPERATION`: one plain top-level `def`, with one decorator, `@ttl.operation(...)`. `import ttl as tl` with
   `@tl.operation(...)`, and `from ttl import operation` with `@operation(...)`, are accepted.
-- The file: `kernel.py` must be a plain file of at most 256 KiB. A link is refused.
+
+The probe also refuses a `kernel.py` that is a link or larger than 256 KiB, when it takes the file after you finish.
+Write it with write_file as a plain file.
 
 Other rules:
 - Write only `kernel.py`. Your result is judged afterwards by an unedited copy of the check.

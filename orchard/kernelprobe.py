@@ -83,7 +83,14 @@ SMOKE_TAIL_LINES = 20
 
 
 class ProbeBlocked(Exception):
-    """A hardware run hung. The probe stops and names the attempt; nothing is reset by hand."""
+    """A hardware run hung. The probe stops and names the attempt; nothing is reset by hand.
+
+    `hw` is the hardware block for the report header when the smoke test hung (None for a kernel hang, which is
+    recorded in that attempt's own record)."""
+
+    def __init__(self, message: str, *, hw: dict | None = None):
+        super().__init__(message)
+        self.hw = hw
 
 
 def load_spec(op: str) -> dict:
@@ -114,10 +121,16 @@ def tt_lang_facts(env) -> dict:
 
 
 def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None) -> None:
-    """Fill an attempt directory with what the agent reads and runs. `tt_lang` defaults to tt_lang_facts(env)."""
+    """Fill an EMPTY attempt directory with what the agent reads and runs. `tt_lang` defaults to tt_lang_facts(env).
+
+    Whatever is at the attempt's path is removed first, without following a link (a real directory is removed with its
+    contents, a link or a file is unlinked), so nothing an earlier run left there (a kernel.py, a check.json) can be
+    picked up."""
     load_spec(op)                                       # refuses an unknown op before anything is written
     adir = Path(adir)
-    adir.mkdir(parents=True, exist_ok=True)
+    _real_dir(adir.parent)
+    _remove(adir)
+    adir.mkdir()
     for name in TEMPLATE_FILES:
         shutil.copy2(TEMPLATES / name, adir / name)
     shutil.copy2(TEMPLATES / "ops" / f"{op}.json", adir / "kernel_spec.json")
@@ -353,12 +366,27 @@ def agent_check_untrusted(agent_check, authoritative: dict, op: str) -> bool:
     return any(recorded.get(name) != want for name, want in _shipped_hashes(op).items())
 
 
+AGENT_CHECK_MAX_BYTES = 1024 * 1024     # choice: a real check.json is a few KiB
+
+
 def _read_agent_check(path: Path):
-    if not path.exists():
-        return None
+    """The agent's own check.json: the parsed object, None when there is none, or "unreadable" when it is not a regular
+    file (a link, a FIFO, a device), is larger than AGENT_CHECK_MAX_BYTES, or is not a JSON object. It is read through
+    _read_regular, so a FIFO cannot block the probe and a link to /dev/zero is never read."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "unreadable"
+    if not stat.S_ISREG(st.st_mode):
+        return "unreadable"
+    raw = _read_regular(path, AGENT_CHECK_MAX_BYTES)
+    if raw is None or len(raw) > AGENT_CHECK_MAX_BYTES:
+        return "unreadable"
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
         return "unreadable"
     return data if isinstance(data, dict) else "unreadable"
 
@@ -378,21 +406,61 @@ def _save_attempt(adir: Path, attempt: dict) -> None:
         pass                                            # the convenience copy is optional
 
 
-def load_attempts(probe_dir) -> list[dict]:
-    """Every attempt record the probe wrote, read from the probe-owned directory (never from an attempt directory),
-    ordered by op (OPS order) and attempt number."""
-    out = []
+RECORD_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _load_record(entry: Path, ops, probe_id) -> dict | None:
+    """One `.verdict/<op>-<n>/attempt.json`, or None when it does not belong to this probe (see load_attempts)."""
+    op, sep, number = entry.name.rpartition("-")
+    if not sep or op not in ops or not number.isdigit() or number.startswith("0"):
+        return None
+    try:
+        if not stat.S_ISDIR(os.lstat(entry).st_mode) or not stat.S_ISREG(os.lstat(entry / "attempt.json").st_mode):
+            return None
+    except OSError:
+        return None
+    raw = _read_regular(entry / "attempt.json", RECORD_MAX_BYTES)
+    if raw is None or len(raw) > RECORD_MAX_BYTES:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
+    if not isinstance(data, dict) or data.get("op") != op:
+        return None
+    n = data.get("attempt")
+    if not isinstance(n, int) or isinstance(n, bool) or n != int(number):
+        return None
+    prov = data.get("provenance")
+    if not isinstance(prov, dict) or prov.get("probe_id") != probe_id:
+        return None
+    return data
+
+
+def load_attempts(probe_dir, *, ops, probe_id) -> tuple[list[dict], int]:
+    """(this probe's attempt records, the number of other entries ignored), for resuming a probe. A run's own report is
+    built from the records run_attempt returned in that run.
+
+    Only `.verdict/<op>-<n>/attempt.json` counts, where <op> is one of `ops`, <n> is a positive whole number without a
+    leading zero, the directory and the file are real (no links), the file is a regular file of at most
+    RECORD_MAX_BYTES, its `op` is <op>, its `attempt` is the int <n>, and its provenance names `probe_id`. Every other
+    entry under `.verdict` (an earlier run's records, a planted one, a malformed one) is skipped and counted."""
     root = Path(probe_dir) / VERDICT_DIR
-    for path in sorted(root.glob("*/attempt.json")) if root.is_dir() else []:
-        raw = _read_regular(path, 64 * 1024 * 1024)
-        try:
-            data = json.loads(raw.decode("utf-8")) if raw is not None else None
-        except ValueError:
-            data = None
-        if isinstance(data, dict) and "op" in data and "attempt" in data:
-            out.append(data)
-    order = {op: i for i, op in enumerate(OPS)}
-    return sorted(out, key=lambda a: (order.get(a["op"], len(OPS)), a["op"], a["attempt"]))
+    try:
+        if not stat.S_ISDIR(os.lstat(root).st_mode):
+            return [], 0
+        entries = sorted(root.iterdir())
+    except OSError:
+        return [], 0
+    out, ignored = [], 0
+    for entry in entries:
+        rec = _load_record(entry, ops, probe_id)
+        if rec is None:
+            ignored += 1
+        else:
+            out.append(rec)
+    order = {op: i for i, op in enumerate(ops)}
+    return sorted(out, key=lambda a: (order[a["op"]], a["attempt"])), ignored
 
 
 def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
@@ -473,12 +541,14 @@ def smoke_test(*, env, shared_python, run_watched=run_watched) -> tuple[bool, li
     argv = _gozer("kernel-probe smoke test", str(shared_python), str(Path(env.src_dir) / "examples" / "eltwise_add.py"))
     got = run_watched(argv, cwd=env.scratch_dir, env=None, log_path=log, watcher=StallWatcher(quiet_s=60),
                       backstop_s=BUDGET["hw_backstop_s"])
-    if got.killed:
-        # A hang blocks the probe. gozer was killed with the example, so its lease may outlive it.
-        raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its lease may be held by a dead process: use "
-                           "gozer-gatekeeper or `gozer reconcile`, never reset by hand")
     text = _new_text(log, start)
     tail = text.splitlines()[-SMOKE_TAIL_LINES:]
+    if got.killed:
+        # A hang blocks the probe. gozer was killed with the example, so its lease may outlive it.
+        hw = {"available": False, "hung": True, "reason": got.reason, "smoke_tail": tail}
+        last = " / ".join(tail[-5:]) or "(no output)"
+        raise ProbeBlocked(f"the smoke test hung: {got.reason}. Its last lines: {last}. Its lease may be held by a dead "
+                           "process: use gozer-gatekeeper or `gozer reconcile`, never reset by hand", hw=hw)
     return (got.returncode == 0 and "PASSED!" in text), tail
 
 
@@ -568,7 +638,8 @@ def run_hardware(attempts: list[dict], *, probe_dir, env, shared_python, run_wat
 
 # ---- the report -------------------------------------------------------------------------------------------------
 
-def report_header(*, env, coder_model, probe_id, ops, hw=None, tt_lang: dict | None = None) -> dict:
+def report_header(*, env, coder_model, probe_id, ops, hw=None, tt_lang: dict | None = None,
+                  ignored_records: int = 0) -> dict:
     """The report's header: the tt-lang facts, the coder's model id, the probe id, the provisional bars of each op,
     the budget, and the hardware phase's result (None when it was not run)."""
     check = _template("kernel_check")
@@ -578,7 +649,7 @@ def report_header(*, env, coder_model, probe_id, ops, hw=None, tt_lang: dict | N
         bars[op] = {phase: check.bars_from_spec(spec, phase) for phase in ("sim", "hw")}
     return {"tt_lang": tt_lang if tt_lang is not None else tt_lang_facts(env), "coder_model": coder_model,
             "probe_id": probe_id, "ops": list(ops), "bars": bars, "provisional": True, "budget": dict(BUDGET),
-            "inputs": "synthetic", "hw": hw,
+            "inputs": "synthetic", "hw": hw, "ignored_records": ignored_records,
             "budget_note": (f"The wall budget ({BUDGET['wall_s']:.0f} s) is checked between turns, so an attempt can "
                             f"overrun it by up to one tool timeout ({AGENT_TOOL_TIMEOUT_S:.0f} s at most, for the "
                             "kernel check).")}
@@ -631,6 +702,8 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
              "and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
              "outliers. A kernel that passes them can still fail on real activations.", "",
              *([header["budget_note"], ""] if header.get("budget_note") else []),
+             *([f"{header['ignored_records']} unrelated or unreadable records ignored under {VERDICT_DIR}.", ""]
+               if header.get("ignored_records") else []),
              "## tt-lang", "",
              f"- simulator version: {t.get('sim_version')}",
              f"- source SHA: {t.get('source_sha')}",
@@ -646,6 +719,9 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
         lines.append("hw: not run")
     elif hw.get("available"):
         lines.append("hw: available (the smoke test passed)")
+    elif hw.get("hung"):
+        lines += [f"hw: blocked. The probe stopped: the smoke test hung ({hw.get('reason')}). Its last lines:", "",
+                  "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
     else:
         lines += ["hw: unavailable. The smoke test (upstream's eltwise_add.py on one chip) failed. Its last lines:", "",
                   "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
