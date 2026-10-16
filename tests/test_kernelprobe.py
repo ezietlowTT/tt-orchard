@@ -1638,6 +1638,7 @@ def test_a_process_still_there_after_the_sigkill_is_reported_as_not_stopped(tmp_
     The record says it was not stopped, and the report says so with its pid."""
     monkeypatch.setattr(kp, "scan_strays", lambda run_dir, **kw: [999999999])
     monkeypatch.setattr(kp, "_environ_has", lambda *a: True)
+    monkeypatch.setattr(kp, "_gone", lambda *a: False)               # /proc keeps showing it running
     sent = []
     record = lambda *a: sent.append(a)                           # noqa: E731
     now = [0.0]
@@ -1649,9 +1650,77 @@ def test_a_process_still_there_after_the_sigkill_is_reported_as_not_stopped(tmp_
     assert swept == [{"pid": 999999999, "cmdline": "", "stopped": False}]
     md = _report_md(tmp_path / "r", [_row_attempt(swept=swept)])
     row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
-    assert "1 stray agent process could not be stopped (pid 999999999)" in row and "process stopped" not in row
+    assert "1 stray agent process could not be confirmed stopped (pid 999999999)" in row
+    assert "process stopped" not in row
     md = _report_md(tmp_path / "r2", [_row_attempt(swept=[dict(swept[0], stopped=True)])])
     assert "1 stray agent process stopped" in md
+
+
+def test_an_interrupt_during_the_sigterm_pass_still_sends_the_sigkill(tmp_path):
+    """M3. Ctrl-C arrives while the sweep is sending SIGTERM (the first group signal raises KeyboardInterrupt and is
+    not sent). The SIGKILL pass must still run before the interrupt goes on."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    stray = _child(adir)
+    sent, violations = [], []
+    try:
+        _wait_for_env(stray.pid, str(adir.resolve()))
+        kill, killpg = _guarded_kills({stray.pid}, sent, violations)
+        first = []
+
+        def interrupted_killpg(pgid, sig):
+            if not first:
+                first.append(sig)
+                raise KeyboardInterrupt
+            killpg(pgid, sig)
+        with pytest.raises(KeyboardInterrupt):
+            kp.sweep_strays(adir, kill=kill, killpg=interrupted_killpg)
+        assert stray.wait(timeout=5) == -_signal.SIGKILL and violations == []
+    finally:
+        _stop(stray)
+
+
+def test_a_stray_that_execs_without_the_marker_is_not_confirmed_stopped(tmp_path):
+    """M3. On SIGTERM the stray execs a new program with an environment that lacks ORCHARD_RUN_DIR. /proc no longer
+    shows the marker, but the process runs: the record must say it was not confirmed stopped."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    code = ("import os, signal, sys, time\n"
+            "def on_term(*a):\n"
+            "    env = {k: v for k, v in os.environ.items() if k != 'ORCHARD_RUN_DIR'}\n"
+            "    os.execve(sys.executable, [sys.executable, '-c', 'import time; time.sleep(60)'], env)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "print('ready', flush=True)\n"
+            "time.sleep(60)\n")
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stray = _subprocess.Popen([_sys.executable, "-c", code], env=env, start_new_session=True,
+                              stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent, violations = [], []
+    try:
+        assert stray.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills({stray.pid}, sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=2.0)
+        assert stray.poll() is None                                   # it is still running, under a new program
+        assert [(r["pid"], r["stopped"]) for r in swept] == [(stray.pid, False)] and violations == []
+    finally:
+        _stop(stray)
+
+
+def test_gone_means_no_entry_a_zombie_or_another_process_under_the_pid(tmp_path):
+    """M3, on a fake /proc: a running process with the recorded start time is not gone; a zombie, a missing entry and
+    a process with another start time (the pid was reused) are."""
+    proc = tmp_path / "proc"
+
+    def stat(pid, state, start):
+        (proc / str(pid)).mkdir(parents=True)
+        fields = [state, "1"] + ["0"] * 17 + [str(start)] + ["0"] * 10
+        (proc / str(pid) / "stat").write_text(f"{pid} (py thon) " + " ".join(fields) + "\n")
+    stat(500, "S", 1234)
+    stat(501, "Z", 1234)
+    assert kp._gone(str(proc), 500, 1234) is False
+    assert kp._gone(str(proc), 500, 1233) is True
+    assert kp._gone(str(proc), 501, 1234) is True
+    assert kp._gone(str(proc), 502, 1234) is True
 
 
 class _BackgroundingStep:
