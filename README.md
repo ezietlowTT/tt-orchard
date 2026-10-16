@@ -1061,6 +1061,11 @@ installed ttnn version, so nothing is claimed.
 `refresh-ttnn` imports ttnn, which opens the device, so it runs under a one-chip gozer lease and writes
 `orchard/data/ttnn_ops-<version>.json`. Run it once per ttnn version. The supervisor never runs it.
 
+- The word `refresh-ttnn` is reserved. To trace a directory with that name, pass it as `./refresh-ttnn`.
+- The dump is written into the package's own `orchard/data` directory, which must be writable (an editable checkout is).
+- If gozer queues the lease (exit 10), the command says so and exits 2. Run `gozer wait <ticket>` or retry.
+- Names that raised when ttnn was inspected are listed under `skipped` in the dump file.
+
 Flags:
 
 - `--python`: interpreter with torch and transformers (default `$ORCHARD_REFERENCE_PYTHON`, then `reference_python` in `bringup.toml`).

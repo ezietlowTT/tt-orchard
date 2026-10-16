@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -20,16 +21,38 @@ MARK = "ORCHARD_TTNN_DUMP "
 SCRIPT = r'''
 import importlib.metadata as m, json, types
 import ttnn
+
+_MISSING = object()
+skipped = []
+
+
+def safe_get(obj, name, label):
+    """getattr that survives a lazy or deprecated attribute raising anything. The name is recorded in `skipped`."""
+    try:
+        return getattr(obj, name)
+    except Exception:
+        skipped.append(label)
+        return _MISSING
+
+
+def is_op(obj):
+    # Classes (Tensor, MemoryConfig, ...) are types and are left out. Functions, builtins and callable objects are ops.
+    return obj is not _MISSING and callable(obj) and not isinstance(obj, type)
+
+
 names = []
 for n in sorted(dir(ttnn)):
     if n.startswith("_"):
         continue
-    obj = getattr(ttnn, n, None)
-    if callable(obj):
+    obj = safe_get(ttnn, n, n)
+    if is_op(obj):
         names.append(n)
     elif isinstance(obj, types.ModuleType) and n in ("experimental", "transformer"):
-        names += [f"{n}.{k}" for k in sorted(dir(obj)) if not k.startswith("_") and callable(getattr(obj, k, None))]
-print("ORCHARD_TTNN_DUMP " + json.dumps({"ttnn_version": m.version("ttnn"), "names": names}))
+        for k in sorted(dir(obj)):
+            if not k.startswith("_") and is_op(safe_get(obj, k, f"{n}.{k}")):
+                names.append(f"{n}.{k}")
+# The leading newline keeps the marker at the start of its line even if ttnn printed text without one.
+print("\n" + "ORCHARD_TTNN_DUMP " + json.dumps({"ttnn_version": m.version("ttnn"), "names": names, "skipped": skipped}))
 '''
 
 
@@ -40,11 +63,16 @@ def dump_command(python, who: str = "claude:orchard-inventory") -> list[str]:
 
 
 def parse(stdout: str) -> dict:
-    """The dump the script printed on its marked line. Other output (logs, warnings) is ignored."""
+    """The dump the script printed on its marked line. Other output (logs, warnings) is ignored. The marker may follow
+    banner text on its line, and when several lines carry it the last one wins."""
+    found = None
     for line in stdout.splitlines():
-        if line.startswith(MARK):
-            return json.loads(line[len(MARK):])
-    raise ValueError("the dump printed no ORCHARD_TTNN_DUMP line")
+        i = line.find(MARK)
+        if i >= 0:
+            found = line[i + len(MARK):]
+    if found is None:
+        raise ValueError("the dump printed no ORCHARD_TTNN_DUMP line")
+    return json.loads(found)
 
 
 def write_dump(dump: dict, data_dir) -> Path:
@@ -54,9 +82,17 @@ def write_dump(dump: dict, data_dir) -> Path:
         raise ValueError(f"ttnn version {version!r} is not a plain version token")
     names = sorted(set(dump["names"]))
     out = Path(data_dir) / f"ttnn_ops-{version}.json"
-    out.write_text(json.dumps({"ttnn_version": version, "names": names,
-                               "sha256": hashlib.sha256(json.dumps(names).encode()).hexdigest()}, indent=2) + "\n",
-                   encoding="utf-8")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # sha256 = sha256 of json.dumps(names) with default separators, over the sorted, de-duplicated names.
+    body = json.dumps({"ttnn_version": version, "names": names, "skipped": sorted(set(dump.get("skipped", []))),
+                       "sha256": hashlib.sha256(json.dumps(names).encode()).hexdigest()}, indent=2) + "\n"
+    # Write beside the target and rename, so a crash never leaves a half-written file under the final name.
+    tmp = out.with_name(out.name + ".tmp")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, out)
+    finally:
+        tmp.unlink(missing_ok=True)
     return out
 
 
@@ -71,14 +107,17 @@ def _real_run(argv, timeout):
 def main(python, *, run=_real_run, data_dir=opinventory.DATA_DIR, say=print) -> int:
     """Show the command, run it, write the file. 0 on success, 2 when the dump failed or could not be read."""
     argv = dump_command(python)
-    say("running (it takes a one-chip lease): " + " ".join(argv[:11]) + " -c <script>")
+    say("running (it takes a one-chip lease): " + " ".join(argv[:12]) + " -c <script>")
     rc, out, err = run(argv, 1800)
+    if rc == 10:
+        say("gozer queued the lease (exit 10): run `gozer wait <ticket>` or retry")
+        return 2
     if rc != 0:
         say(f"the dump failed (exit {rc}): {(err or out).strip()[-300:]}")
         return 2
     try:
         path = write_dump(parse(out), data_dir)
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, OSError) as exc:
         say(f"the dump could not be read: {exc}")
         return 2
     say(f"wrote {path}")
