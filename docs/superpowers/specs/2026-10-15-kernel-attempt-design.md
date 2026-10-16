@@ -298,8 +298,8 @@ Each item changes or adds to the approved design above. Reasons come from the im
 8. **A fifth inventory status, `ignored`**, for metadata no-ops (`orchard/data/ignored_ops.json`: alias, contiguous, detach and
    similar). Section 4.3 listed four statuses. Without `ignored` the unmapped list was mostly noise.
 9. **The inventory traverses higher-order-op bodies.** Python-level nodes (for example `getitem`) stay out of the op list and are
-   recorded under `python_nodes`. Higher-order wrappers are recorded under `higher_order_nodes`. Both count nodes, not bodies (a
-   `cond` node has two bodies). Before this, the rotary embedding's `cos`, `sin` and `to.device` were missed.
+   recorded under `python_nodes`. Higher-order wrappers are recorded under `higher_order_nodes`. Both count nodes (a
+   `cond` node has two bodies and counts once). Before this, the rotary embedding's `cos`, `sin` and `to.device` were missed.
 10. **The ttnn dump** lists public non-class callables at the top level and one level into `experimental` and `transformer`
     (named `experimental.x`). A real dump for ttnn 0.65.1rc17.dev6200 (821 names) is committed. `mapped` is a name match only:
     `rsub` is exact only for alpha=1, and `conv1d` takes prepared weights.

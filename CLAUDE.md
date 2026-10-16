@@ -1216,8 +1216,7 @@ Notable moments and mistakes:
   That test now runs in a child process limited to 2 GiB with a 60 s timeout. Tests that spawn or kill processes run under `setsid -w`.
 - I ran a stray `gozer run` while a suite was running. Nothing was hurt, and the chips were free afterwards.
 - The first parse of the ttnn dump listed classes as ops, which led to the `callable()` fix above.
-- Nothing ran both prepare steps in one directory before, and nothing fed the real simulator a scaled kernel; each gap was found by a
-  reviewer, not by the author's tests.
+- Reviewers found the large gaps (the scale-blind check, the forgeable verdict, the lost report); the authors' own tests had passed.
 Process: two parallel worktree streams (`ka-inventory`: tasks 4 to 7 and 11; `ka-probe`: tasks 8 to 10) merged into `kernel-attempt`;
 more than 20 review rounds; every task had a mutation table checked by running the mutations; the ledger is the record. Full suite after
 the merge: 3,860 passed, 2 skipped.

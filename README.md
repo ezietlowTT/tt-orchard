@@ -1068,7 +1068,7 @@ installed ttnn version, so nothing is claimed.
 - Counts are per static node of the traced graph, so a loop body that runs many times counts once. The report
   scales in-layer ops by the layers in the config over the layers traced, and says when it cannot scale.
 - The trace follows higher-order-op bodies. Python-level nodes such as `getitem` stay out of the op list and appear under
-  `python_nodes`; wrappers appear under `higher_order_nodes` (nodes, not bodies).
+  `python_nodes`; wrappers appear under `higher_order_nodes` (they count nodes).
 - The mapping table is a name match. `rsub` is exact only for alpha=1, and `conv1d` takes prepared weights.
 - If gozer queues the lease (exit 10), the command says so and exits 2. Run `gozer wait <ticket>` or retry.
 - Names that raised when ttnn was inspected are listed under `skipped` in the dump file.
