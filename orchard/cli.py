@@ -11,6 +11,7 @@
     tt-orchard caches   [--lab] [--prune --older-than DAYS [--yes]]
     tt-orchard coder    [status | stop [--yes]]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR]
+    tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -146,7 +147,41 @@ def _parser() -> argparse.ArgumentParser:
                                      "$ORCHARD_TTLANG_SRC)")
     k.add_argument("--venv-dir", help="where the simulator venv lives (default ~/orchard-venvs/ttlang, or "
                                       "$ORCHARD_TTLANG_VENV)")
+    inv = sub.add_parser("inventory", parents=[common],
+                         help="list the ops a model's reference code uses and which ones ttnn has; "
+                              "`inventory refresh-ttnn` records ttnn's op names (takes a one-chip lease)")
+    inv.add_argument("target", help="a model directory with a config.json, or the word refresh-ttnn")
+    inv.add_argument("--python", help="interpreter with torch and transformers (default $ORCHARD_REFERENCE_PYTHON, "
+                                      "then reference_python in bringup.toml)")
+    inv.add_argument("--ttnn-python", help="interpreter whose installed ttnn version is read, and that refresh-ttnn "
+                                           "runs under a lease (default ~/.tenstorrent-venv/bin/python)")
+    inv.add_argument("--against", metavar="FILE", help="an ops-inventory.json of a nearest model, to mark shared ops")
+    inv.add_argument("--layers", type=int, default=2, help="layers to trace (default 2)")
+    inv.add_argument("--seq", type=int, default=8, help="sequence length to trace (default 8)")
+    inv.add_argument("--class", dest="cls", help="the transformers class to trace if not config.json's first architecture")
+    inv.add_argument("--out", help="output directory (default ./ops-inventory)")
     return p
+
+
+def _inventory(args, env, home, out) -> int:
+    """`inventory refresh-ttnn` records ttnn's op names (takes a lease); `inventory DIR` traces a model."""
+    from orchard import opinventory, ttnn_dump
+    say = lambda line: print(line, file=out)
+    ttnn_python = args.ttnn_python or str(home / ".tenstorrent-venv" / "bin" / "python")
+    if args.target == "refresh-ttnn":
+        return ttnn_dump.main(ttnn_python, say=say)
+    python = args.python or env.get("ORCHARD_REFERENCE_PYTHON")
+    if not python:
+        try:
+            python = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home)).reference_python
+        except (NoConfig, bringup_config.BringupConfigError):
+            python = None
+    if not python:
+        return _refuse("no interpreter with torch and transformers: pass --python, set ORCHARD_REFERENCE_PYTHON, "
+                       "or set reference_python in bringup.toml")
+    return opinventory.run_inventory(args.target, python=python, ttnn_python=ttnn_python,
+                                     out_dir=args.out or "ops-inventory", layers=args.layers, seq=args.seq,
+                                     cls=args.cls, against=args.against, say=say)
 
 
 def _refuse(message: str) -> int:
@@ -422,6 +457,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
     if args.cmd == "kernel-env":
         from orchard import ttlang_env
         return ttlang_env.main(args, out=out)
+    if args.cmd == "inventory":
+        return _inventory(args, env, home, out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
     if args.cmd == "caches":
