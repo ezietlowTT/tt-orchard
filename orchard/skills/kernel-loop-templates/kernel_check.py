@@ -396,6 +396,47 @@ def classify(*, kernel_present, timed_out, returncode, text, result, bar, phase=
     return None, ""
 
 
+def _kill_own_group(proc) -> None:
+    """SIGKILL the process group the simulator leads, so whatever it started goes with it. Only a group the child
+    leads itself is signalled: never id 1 or below, never this process's own group, and never a pid that does not
+    lead its own group (the guards orchard/stallwatch.py uses; this template stands alone, so it has its own copy).
+    Anything else gets a plain kill of the child alone."""
+    import signal
+    pgid = proc.pid
+    try:
+        leads = isinstance(pgid, int) and pgid > 1 and pgid != os.getpgrp() and os.getpgid(pgid) == pgid
+    except OSError:
+        leads = False
+    try:
+        if leads:
+            os.killpg(pgid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except OSError:
+        pass
+
+
+def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
+    """(timed_out, return code, stdout and stderr) of one simulator run. The simulator starts in its own session; on a
+    timeout its whole group is killed, so a process it started does not outlive the check."""
+    proc = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
+    try:
+        out, err = proc.communicate(timeout=timeout_s)
+        return False, proc.returncode, (out or "") + "\n" + (err or "")
+    except subprocess.TimeoutExpired:
+        _kill_own_group(proc)
+        try:
+            out, err = proc.communicate(timeout=10)   # bounded: a process that left the group may hold the pipes
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            out, err = "", ""
+        return True, None, (out or "") + "\n" + (err or "")
+    except BaseException:
+        _kill_own_group(proc)
+        raise
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--attempt-dir", default=".")
@@ -436,14 +477,9 @@ def main(argv=None) -> int:
             category, line = ("no_kernel", "kernel.py defines no OPERATION") if reason.startswith("no-operation") \
                 else ("forbidden_code", reason)
     if category is None and kernel.is_file():
-        try:
-            done = subprocess.run([sim, str(HERE / "kernel_harness.py"), "--", "--spec", str(spec_path), "--kernel",
-                                   str(kernel), "--out", str(result_path), "--phase", "sim"],
-                                  capture_output=True, text=True, timeout=timeout_s, cwd=adir)
-            rc, text = done.returncode, (done.stdout or "") + "\n" + (done.stderr or "")
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            text = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        timed_out, rc, text = run_sim([sim, str(HERE / "kernel_harness.py"), "--", "--spec", str(spec_path),
+                                       "--kernel", str(kernel), "--out", str(result_path), "--phase", "sim"],
+                                      timeout_s=timeout_s, cwd=adir)
     log_path.write_text(text, encoding="utf-8")
     result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.is_file() else None
     if category is None:

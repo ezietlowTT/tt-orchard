@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -867,3 +868,59 @@ def test_check_json_lists_every_violation(tmp_path):
     assert check["category"] == "forbidden_code"
     assert check["first_line"].startswith("5 violations: ")
     assert [v["rule"] for v in check["violations"]] == ["import"] + ["readback"] * 4
+
+
+# m2: a simulator that times out is stopped with everything it started.
+
+def _dead_or_zombie(pid):
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
+            text = f.read()
+    except OSError:
+        return True
+    return text[text.rfind(")") + 2:].split()[0] == "Z"
+
+
+def test_a_simulator_timeout_stops_the_grandchild_too(tmp_path):
+    """A stand-in for tt-lang-sim starts a grandchild in its own process group and sleeps. The check's timeout must
+    stop both. Every process here is one this test started; leftovers are killed by pid in the finally."""
+    tdir, adir = _attempt(tmp_path, "add_good")
+    marks = tmp_path / "pids"
+    marks.mkdir()
+    sim = tmp_path / "fake-sim"
+    sim.write_text("#!" + sys.executable + "\n"
+                   "import os, subprocess, sys, time\n"
+                   f"marks = {str(marks)!r}\n"
+                   "open(os.path.join(marks, 'sim'), 'w').write(str(os.getpid()))\n"
+                   "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                   "open(os.path.join(marks, 'grandchild'), 'w').write(str(g.pid))\n"
+                   "time.sleep(60)\n")
+    sim.chmod(0o755)
+    pids = []
+    try:
+        done = subprocess.run([sys.executable, str(tdir / "kernel_check.py"), "--attempt-dir", str(adir), "--sim",
+                               str(sim), "--timeout-s", "3"], capture_output=True, text=True, timeout=60)
+        pids = [int((marks / n).read_text()) for n in ("sim", "grandchild") if (marks / n).is_file()]
+        assert len(pids) == 2, done.stdout + done.stderr
+        assert done.stdout.startswith("FAIL: timeout"), done.stdout + done.stderr
+        end = time.monotonic() + 10
+        while time.monotonic() < end and not all(_dead_or_zombie(p) for p in pids):
+            time.sleep(0.05)
+        assert all(_dead_or_zombie(p) for p in pids), [p for p in pids if not _dead_or_zombie(p)]
+    finally:
+        for p in pids:
+            try:
+                os.kill(p, 9)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+
+@pytest.mark.parametrize("pid", ["own group", 1, 0, -3, None])
+def test_the_simulator_kill_never_signals_a_group_that_is_not_the_childs_own(monkeypatch, pid):
+    """os.killpg is replaced by a recorder, so no real signal can be sent whatever the guard decides."""
+    sent = []
+    monkeypatch.setattr(os, "killpg", lambda *a: sent.append(a))
+    killed = []
+    proc = type("P", (), {"pid": os.getpgrp() if pid == "own group" else pid, "kill": lambda self: killed.append(1)})()
+    CHECK._kill_own_group(proc)
+    assert sent == [] and killed == [1]
