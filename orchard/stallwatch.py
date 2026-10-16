@@ -94,6 +94,14 @@ class Watched:
     reason: str | None        # why it was killed, or None when it ended by itself
     killed: bool
     elapsed_s: float
+    max_pending_bytes: int = 0   # the most bytes of an unfinished line the watcher held at one time
+
+
+# The watcher keeps the bytes after the last newline until their line is complete. A child that prints without
+# newlines would make that buffer grow with its output, so a piece longer than this is cut off and fed to the repeat
+# detector as a line of its own (the detector needs one line at a time). Identical output with no newline then shows
+# up as a repeating line.
+PENDING_MAX_BYTES = 64 * 1024
 
 
 WAIT_AFTER_KILL_S = 10.0     # longest wait for the leader to be reaped after the kill
@@ -197,11 +205,12 @@ def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: 
         # Start reading where this child's output begins: an appended log may hold an earlier attempt's lines.
         read_pos = os.path.getsize(log_path)
         pending = b""                                  # bytes after the last newline, kept until the line is complete
+        max_pending = 0
         proc = popen(list(argv), cwd=cwd, env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
         try:
             while True:
                 try:
-                    return Watched(proc.wait(timeout=poll_s), None, False, clock() - start)
+                    return Watched(proc.wait(timeout=poll_s), None, False, clock() - start, max_pending)
                 except subprocess.TimeoutExpired:
                     pass
                 now = clock()
@@ -213,18 +222,22 @@ def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: 
                 cut = data.rfind(b"\n") + 1                # decode whole lines only, so no line or character is split
                 fresh = data[:cut].decode("utf-8", errors="replace").splitlines()
                 pending = data[cut:]
+                while len(pending) > PENDING_MAX_BYTES:   # a line this long is cut, and each piece is fed as a line
+                    fresh.append(pending[:PENDING_MAX_BYTES].decode("utf-8", errors="replace"))
+                    pending = pending[PENDING_MAX_BYTES:]
+                max_pending = max(max_pending, len(pending))
                 reason = watcher.feed_lines(fresh) or watcher.observe(now, size, tree_cpu_ticks(proc.pid, proc_root))
                 if reason is None and now - start >= backstop_s:
                     reason = f"backstop: still running after {backstop_s:.0f} s"
                 if reason is not None:
                     if proc.poll() is not None:        # it ended by itself between the wait and this decision
-                        return Watched(proc.returncode, None, False, clock() - start)
+                        return Watched(proc.returncode, None, False, clock() - start, max_pending)
                     _kill_group(proc, term_grace_s=term_grace_s)
                     try:
                         code = proc.wait(timeout=WAIT_AFTER_KILL_S)
                     except subprocess.TimeoutExpired:
                         code = None
-                    return Watched(code, reason, True, clock() - start)
+                    return Watched(code, reason, True, clock() - start, max_pending)
         except BaseException:
             # Any error or interrupt (including the supervisor's abort signals) must not leave the child running.
             _kill_group(proc, term_grace_s=term_grace_s)

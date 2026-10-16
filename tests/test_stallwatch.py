@@ -535,3 +535,38 @@ def test_an_interrupt_in_the_leader_check_during_the_grace_still_sigkills_once_a
     with pytest.raises(KeyboardInterrupt):
         stallwatch._kill_group(_Fake4242(poll=interrupted), term_grace_s=5.0)
     assert g.sent(_signal.SIGTERM) == 1 and g.sent(_signal.SIGKILL) == 1
+
+
+# I7: output with no newline must not grow the watcher's memory without bound.
+
+# Every child here writes a bounded amount and has a file-size limit of 16 MiB, so a regression cannot fill the disk.
+FSIZE_LIMIT = "import resource; resource.setrlimit(resource.RLIMIT_FSIZE, (16 << 20, 16 << 20))\n"
+NO_NEWLINE_5MIB = (FSIZE_LIMIT + "import sys, time\n"
+                   "chunk = 'x' * 65536\n"
+                   "for _ in range(80):\n"
+                   "    sys.stdout.write(chunk); sys.stdout.flush(); time.sleep(0.01)\n"
+                   "time.sleep(0.5)\n")
+
+
+def test_five_mib_without_a_newline_keeps_the_pending_buffer_bounded(tmp_path):
+    from orchard import stallwatch
+    got = run_watched([sys.executable, "-c", NO_NEWLINE_5MIB], cwd=tmp_path, env=dict(os.environ),
+                      log_path=tmp_path / "log", popen=_tracked_popen, poll_s=0.05, backstop_s=60,
+                      watcher=StallWatcher(quiet_s=1000, repeat_lines=10 ** 9))
+    assert got.returncode == 0 and not got.killed
+    assert (tmp_path / "log").stat().st_size == 80 * 65536
+    assert 0 < got.max_pending_bytes <= stallwatch.PENDING_MAX_BYTES == 64 * 1024
+
+
+def test_a_child_that_prints_4_mib_of_one_character_without_a_newline_is_stopped_as_repeating(tmp_path):
+    """The cut pieces of a long line are fed to the repeat detector as lines, so identical output with no newline is
+    caught by the repeat rule."""
+    code = (FSIZE_LIMIT + "import sys, time\n"
+            "for _ in range(1024):\n"                       # 4 MiB in all, then it waits
+            "    sys.stdout.write('x' * 4096); sys.stdout.flush()\n"
+            "time.sleep(30)\n")
+    got = run_watched([sys.executable, "-c", code], cwd=tmp_path, env=dict(os.environ), log_path=tmp_path / "log",
+                      popen=_tracked_popen, poll_s=0.05, backstop_s=10,
+                      watcher=StallWatcher(quiet_s=1000, repeat_lines=3), term_grace_s=1.0)
+    assert got.killed and got.reason.startswith("repeating:"), got.reason
+    assert (tmp_path / "log").stat().st_size <= 4 << 20
