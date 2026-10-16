@@ -2959,3 +2959,27 @@ def test_a_reference_under_a_linked_directory_of_the_checkout_is_refused(fake_ke
     real.symlink_to(moved, target_is_directory=True)
     _, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
     assert problems and all("link" in p and str(real) in p for p in problems)
+
+
+SPEC = SRC / "docs" / "sphinx" / "specs" / "TTLangSpecification.md"
+INSTALLED_SKILL = Path.home() / ".claude" / "skills" / "ttm-tt-lang"
+
+
+@pytest.mark.skipif(not SPEC.is_file(), reason="SKIPPED: no tt-lang checkout with docs/sphinx/specs")
+def test_the_skills_spec_version_matches_the_checkouts_specification():
+    """Review M7: the skill names the specification version of the checkout; when the pin moves, this fails until
+    the text is updated."""
+    from orchard import skillsfresh as sf
+    flat = " ".join(kp.SKILL.read_text().split())
+    (claimed,) = re.findall(r"`reference/TTLangSpecification\.md`: the specification of that tt-lang \(version "
+                            r"(\d+\.\d+)\)", flat)
+    assert claimed == sf.spec_version(SPEC.read_bytes())
+
+
+@pytest.mark.skipif(not (INSTALLED_SKILL / "TTLangSpecification.md").is_file(),
+                    reason="SKIPPED: the tt-lang skill is not installed here")
+def test_the_skills_guide_version_matches_the_installed_skill():
+    from orchard import skillsfresh as sf
+    flat = " ".join(kp.SKILL.read_text().split())
+    (claimed,) = re.findall(r"They were written for specification (\d+\.\d+)", flat)
+    assert claimed == sf.spec_version((INSTALLED_SKILL / "TTLangSpecification.md").read_bytes())
