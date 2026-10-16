@@ -235,6 +235,14 @@ class Freshness:
         out["stale"] = self.stale
         return out
 
+    def update_text(self) -> str:
+        """What to do about a stale result: the update command for BEHIND or DIFFERS, and for any other state (an
+        UNKNOWN comparison) the advice to compare again. An UNKNOWN result never states an update, whatever is
+        attached to it, because no comparison found anything to update."""
+        if self.state in (BEHIND, DIFFERS) and self.update:
+            return f"To update: {self.update}."
+        return "Compare again when GitHub answers."
+
     def line(self) -> str:
         """One line for a terminal or a report."""
         text = f"{self.source} ({self.path}): {self.state}. {self.detail}"
@@ -259,6 +267,7 @@ def _unknown(result: Freshness, why: str, cache: Cache, key: str) -> Freshness:
     """Mark `result` UNKNOWN. A cached CURRENT result for the same local state, younger than CACHE_MAX_AGE_S, is
     attached (and then the result is not stale); the detail always says the comparison was not made."""
     result.state = UNKNOWN
+    result.update = None                    # nothing was found that an update would fix
     result.detail = f"It could not be compared with upstream ({why})."
     entry = cache.get(key)
     age = cache.age_s(entry) if entry else None

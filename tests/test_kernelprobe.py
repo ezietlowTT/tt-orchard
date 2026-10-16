@@ -2779,10 +2779,14 @@ def test_an_unknown_comparison_without_a_recent_current_check_refuses_the_probe(
                                                                                skills_current, capsys):
     from orchard import skillsfresh as sf
     skills_current["results"] = [_fresh(sf.SOURCE_TTLANG, sf.CURRENT),
-                                 _fresh(sf.SOURCE_TTLANG_SKILL, sf.UNKNOWN, detail="It could not be compared.")]
+                                 _fresh(sf.SOURCE_TTLANG_SKILL, sf.UNKNOWN, detail="It could not be compared.",
+                                        update="WRONG HINT: re-sync the skill")]
     code = kp.main(probe_args(tmp_path), env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True,
                    run_watched_fn=no_run)
-    assert code == 2 and "could not be compared" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert code == 2 and "could not be compared" in err
+    # An unknown result states no update, even if one is attached (review I3).
+    assert "WRONG HINT" not in err and "Compare again when GitHub answers" in err
 
 
 def test_an_unknown_comparison_covered_by_a_recent_current_check_runs(tmp_path, fake_kenv, env_ready, skills_current):

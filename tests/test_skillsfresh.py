@@ -550,3 +550,27 @@ def test_untracked_files_count_as_changes_in_the_skills_clone_and_not_in_the_tt_
     fake = FakeSys({src: {"head": MAIN, "origin": TTLANG_URL, "untracked": True}}, {TTLANG_URL: MAIN})
     got = sf.check_ttlang_source(src, run=fake, cache=sf.Cache(tmp_path / "c.json"))
     assert got.dirty is False and not got.warnings
+
+
+# ---- Task 14 fix wave -------------------------------------------------------------------------------------------
+
+def test_an_unknown_result_carries_no_update_hint(tmp_path):
+    """Review I3: the comparison was not made, so the check cannot say upstream moved. The hint set before the
+    network call must be gone."""
+    src = tmp_path / "tt-lang"
+    src.mkdir()
+    fake = FakeSys({src: {"head": HEAD, "origin": TTLANG_URL}}, {TTLANG_URL: OSError("down")})
+    got = sf.check_ttlang_source(src, run=fake, cache=sf.Cache(tmp_path / "c.json"))
+    assert got.state == sf.UNKNOWN and got.update is None
+    got, _ = check_skill(tmp_path, make_skill(tmp_path), OSError("down"))
+    assert got.state == sf.UNKNOWN and got.update is None
+
+
+def test_the_printed_line_of_a_real_unknown_says_compare_again_and_names_no_update(tmp_path):
+    from orchard import ttlang_env
+    src = tmp_path / "tt-lang"
+    src.mkdir()
+    fake = FakeSys({src: {"head": HEAD, "origin": TTLANG_URL}}, {TTLANG_URL: OSError("down")})
+    got = sf.check_ttlang_source(src, run=fake, cache=sf.Cache(tmp_path / "c.json"))
+    (line,) = ttlang_env.skills_lines([got])
+    assert "Compare again when GitHub answers" in line and "TTLANG_PIN" not in line

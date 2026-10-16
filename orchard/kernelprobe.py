@@ -1505,8 +1505,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     allow_stale = bool(getattr(args, "allow_stale_skills", False))
     if stale and not allow_stale:
         return refuse("these sources are not the latest upstream has: " + " ".join(
-            f"{f.source} ({f.path}): {f.detail}" + (f" To update: {f.update}." if f.update else
-                                                     " Compare again when GitHub answers.")
+            f"{f.source} ({f.path}): {f.detail} {f.update_text()}"
             for f in stale) + " Pass --allow-stale-skills to run anyway; the report then records it")
     if stale:
         say("stale skills allowed (--allow-stale-skills): " + ", ".join(f.source for f in stale))

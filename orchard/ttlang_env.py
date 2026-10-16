@@ -341,7 +341,7 @@ def skills_lines(results) -> list[str]:
         status = FAIL if r.stale else OK
         text = f"{status:5s} skills: {r.line()}"
         if r.stale:
-            text += f" To update: {r.update}." if r.update else " Compare again when GitHub answers."
+            text += " " + r.update_text()
         lines.append(text)
     return lines
 

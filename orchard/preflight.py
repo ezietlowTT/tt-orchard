@@ -197,8 +197,7 @@ def check_skills(results: list) -> Check:
         text = f"{r.path}: {r.state}. {r.detail}"
         if r.state != "current":
             worst = WARN
-            if r.update:
-                text += f" To update: {r.update}."
+            text += " " + r.update_text()
         if r.warnings:
             worst = WARN
             text += " " + " ".join(r.warnings)
