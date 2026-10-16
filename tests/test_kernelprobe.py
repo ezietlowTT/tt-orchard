@@ -2409,3 +2409,16 @@ def test_ten_temperatures_and_200_attempts_are_accepted(tmp_path, fake_kenv, env
     code = kp.main(probe_args(tmp_path, attempts=20, temperatures=",".join(str(i / 10) for i in range(10))),
                    env=fake_kenv, out=io.StringIO(), probe=lambda e, m: True, run_watched_fn=no_run)
     assert code == kp.EXIT_OK and len(seen) == 200
+
+
+def test_a_groups_sampling_lists_every_seed_and_the_base(tmp_path):
+    """W4. The group's sampling is the group's, with each attempt's seed; it is not the first attempt's sampling."""
+    attempts = [_sampled(1, 0.0, "a" * 64), _sampled(2, 0.0, "b" * 64), _sampled(3, 0.7, "c" * 64),
+                _sampled(4, 0.7, "d" * 64)]
+    data = kp.write_report(tmp_path, attempts, {"probe_id": "t", "bars": {}, "hw": None, "ops": ["silu_mul"],
+                                                "sampling": {"temperatures": [0.0, 0.7], "top_p": None, "seed_base": 100,
+                                                             "seed_base_from": "--seed",
+                                                             "attempts_per_temperature": 2}})
+    groups = {g["temperature"]: g for g in data["groups"]}
+    assert groups[0.0]["sampling"] == {"temperature": 0.0, "top_p": None, "seed_base": 100, "seeds": [None, None]}
+    assert groups[0.7]["sampling"] == {"temperature": 0.7, "top_p": None, "seed_base": 100, "seeds": [103, 104]}

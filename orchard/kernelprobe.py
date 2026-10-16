@@ -997,17 +997,20 @@ def _temperature_of(a: dict) -> float:
     return float(t) if isinstance(t, (int, float)) and not isinstance(t, bool) else 0.0
 
 
-def kernel_groups(attempts: list[dict], ops: list[str]) -> list[dict]:
-    """One group per op and temperature, in the order they appear: the attempt numbers, the sampling, and how many
+def kernel_groups(attempts: list[dict], ops: list[str], seed_base: int | None = None) -> list[dict]:
+    """One group per op and temperature, in the order they appear: the attempt numbers, the group's sampling
+    ({"temperature", "top_p", "seed_base", "seeds"}: the seed each attempt sent, null at temperature 0), and how many
     distinct kernels the attempts wrote (by provenance.kernel_sha256). Attempts with no kernel copied count apart."""
     groups: dict[tuple, dict] = {}
     for op in ops:
         for a in sorted((a for a in attempts if a["op"] == op), key=lambda a: a["attempt"]):
             key = (op, _temperature_of(a))
+            sp = a.get("sampling") if isinstance(a.get("sampling"), dict) else {}
             g = groups.setdefault(key, {"op": op, "temperature": key[1], "attempts": [], "shas": [],
-                                        "sampling": a.get("sampling") if isinstance(a.get("sampling"), dict)
-                                        else {"temperature": 0.0, "top_p": None, "seed": None}})
+                                        "sampling": {"temperature": key[1], "top_p": sp.get("top_p"),
+                                                     "seed_base": seed_base, "seeds": []}})
             g["attempts"].append(a["attempt"])
+            g["sampling"]["seeds"].append(sp.get("seed"))
             g["shas"].append((a.get("provenance") or {}).get("kernel_sha256"))
     out = []
     for g in groups.values():
@@ -1047,7 +1050,8 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
     by_op = {op: [a for a in attempts if a["op"] == op] for op in ops}
     first = {op: {"sim": _first_pass(rows, lambda a: a.get("passed_sim") is True), "hw": _first_pass(rows, _hw_passed)}
              for op, rows in by_op.items()}
-    groups = kernel_groups(attempts, ops)
+    groups = kernel_groups(attempts, ops, (header.get("sampling") or {}).get("seed_base")
+                           if isinstance(header.get("sampling"), dict) else None)
     data = {"header": header, "attempts": attempts, "first_pass": first, "groups": groups}
     _write_json(probe_dir / "kernel-probe-report.json", data)
 
