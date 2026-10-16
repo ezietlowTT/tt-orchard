@@ -89,10 +89,12 @@ You do not write a comparison script.
    and reply with a short summary and no tool call. Run it with that interpreter and the new model's snapshot
    directory:
 
-       PYTHONPATH={{ORCHARD_DIR}} python3 -m orchard.opinventory --model-dir <new model snapshot> --out stages/0 --python <reference_python>
+       PYTHONPATH={{ORCHARD_DIR}} python3 -m orchard.opinventory --model-dir <new model snapshot> --out stages/0 --python <reference_python> --ttnn-python {{OPERATOR_HOME}}/.tenstorrent-venv/bin/python
 
-   It runs the template `{{ORCHARD_DIR}}/orchard/skills/ops-inventory-templates/ops_inventory.py` on the meta
-   device, writes `ops-inventory.json` and `ops-inventory.md` in your stage directory, and adds an `inventory`
+   Type the command on one line. The `--ttnn-python` interpreter is asked only for the installed ttnn's version;
+   ttnn is not imported. The command runs the template
+   `{{ORCHARD_DIR}}/orchard/skills/ops-inventory-templates/ops_inventory.py` on the meta device, writes
+   `ops-inventory.json` and `ops-inventory.md` in your stage directory, and adds an `inventory`
    summary to the `delta.json` you just wrote. Read `ops-inventory.md` once. Add ONE difference with area `other`
    to `delta.json` only when the inventory lists `unmapped` ops and the class is `weights-only`; cite
    `stages/0/ops-inventory.json` and name the ops. Keep the `inventory` key when you rewrite the file. The

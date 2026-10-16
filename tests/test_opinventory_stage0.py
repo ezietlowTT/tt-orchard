@@ -136,12 +136,18 @@ def test_the_entry_point_returns_the_inventory_exit_code_and_records_nothing_on_
     assert "inventory" not in delta_of(sd)
 
 
-def test_the_entry_point_defaults_ttnn_python_to_none(tmp_path, monkeypatch):
+def test_the_entry_point_defaults_ttnn_python_to_the_shared_venv_under_the_real_home(tmp_path, monkeypatch):
+    """I2. With no --ttnn-python every op was `unchecked`. The default is the shared venv, as `tt-orchard inventory`
+    uses. It is under the home from the passwd entry: in an agent shell HOME points inside the run directory."""
+    import pwd
     sd = stage_dir(tmp_path)
     seen = {}
     monkeypatch.setattr(oi, "run_inventory", lambda m, **k: seen.update(k) or 2)
+    monkeypatch.setenv("HOME", str(tmp_path / "agent-home"))
     oi.main(["--model-dir", "/m", "--out", str(sd), "--python", "py"])
-    assert seen["ttnn_python"] is None and seen["layers"] == 2 and seen["seq"] == 8 and seen["cls"] is None
+    real = Path(pwd.getpwuid(os.getuid()).pw_dir)
+    assert seen["ttnn_python"] == str(real / ".tenstorrent-venv" / "bin" / "python")
+    assert seen["layers"] == 2 and seen["seq"] == 8 and seen["cls"] is None
 
 
 def test_the_skill_runs_the_inventory_when_reference_python_is_an_input():
@@ -150,6 +156,8 @@ def test_the_skill_runs_the_inventory_when_reference_python_is_an_input():
     assert "ops_inventory.py" in flat and "reference_python" in flat
     assert "{{ORCHARD_DIR}}" in flat
     assert "/home/" not in flat and "/mnt/" not in flat
+    # I2: without the shared venv's interpreter the inventory cannot read the installed ttnn's version
+    assert "--ttnn-python {{OPERATOR_HOME}}/.tenstorrent-venv/bin/python" in flat
     assert "ops-inventory.md" in flat
     assert "skip this step" in flat and "Keep the `inventory` key" in flat
     assert "measured class still decides" in flat
