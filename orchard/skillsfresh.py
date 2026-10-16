@@ -546,16 +546,18 @@ def _read_regular(path: Path) -> bytes | None:
     return data if len(data) <= FILE_MAX_BYTES else None
 
 
-def local_skill_shas(skill_dir: Path) -> dict[str, str | None]:
+def local_skill_shas(skill_dir: Path, preread: dict[str, bytes] | None = None) -> dict[str, str | None]:
     """{relative path: git blob sha} of every file under the skill directory, SKILL.md after upstream_skill_md. A
     file that is not a regular file (a link, a FIFO) or is too large maps to None. Directories that are links are
-    not entered."""
+    not entered. `preread` maps relative paths to bytes already read (the probe's reference copies); those bytes are
+    hashed and the files are not read again, so the check and the copy cannot see different contents."""
+    preread = preread or {}
     out: dict[str, str | None] = {}
     for dirpath, dirnames, filenames in os.walk(skill_dir, followlinks=False):
         for name in filenames + [d for d in dirnames if os.path.islink(os.path.join(dirpath, d))]:
             p = Path(dirpath) / name
             rel = p.relative_to(skill_dir).as_posix()
-            data = _read_regular(p)
+            data = preread[rel] if rel in preread else _read_regular(p)
             if data is not None and rel == "SKILL.md":
                 data = upstream_skill_md(data)
             out[rel] = git_blob_sha(data) if data is not None else None
@@ -591,7 +593,7 @@ def spec_versions(skill_dir: Path, src_dir: Path | None) -> tuple[str | None, st
 
 
 def check_ttlang_skill(skill_dir, *, run=None, cache: Cache | None = None, src_dir=None, reuse_s: float = 0.0,
-                       offline: bool = False) -> Freshness:
+                       offline: bool = False, preread: dict[str, bytes] | None = None) -> Freshness:
     """Compare every file of the installed tt-lang skill with the upstream branch's tree (one `gh api` call).
 
     CURRENT when every upstream file is here with the same blob sha (SKILL.md after the installer's edits are undone);
@@ -607,7 +609,7 @@ def check_ttlang_skill(skill_dir, *, run=None, cache: Cache | None = None, src_d
         result.detail = (f"{skill_dir} does not exist. Install the tt-lang skill (`tt-warp fastmodels sync`) or name "
                          "another directory with --tt-lang-skill-dir or ORCHARD_TTLANG_SKILL.")
         return result
-    local = local_skill_shas(skill_dir)
+    local = local_skill_shas(skill_dir, preread)
     result.local = hashlib.sha256(json.dumps(local, sort_keys=True).encode()).hexdigest()
     if src_dir is not None:
         mine, theirs = spec_versions(skill_dir, Path(src_dir))
@@ -647,11 +649,11 @@ def check_ttlang_skill(skill_dir, *, run=None, cache: Cache | None = None, src_d
     return result
 
 
-def check_kernel_sources(src_dir, skill_dir, *, run=None, cache: Cache | None = None,
-                         offline: bool = False) -> list[Freshness]:
+def check_kernel_sources(src_dir, skill_dir, *, run=None, cache: Cache | None = None, offline: bool = False,
+                         preread: dict[str, bytes] | None = None) -> list[Freshness]:
     """The two sources the kernel probe gives the coder: the tt-lang checkout and the installed tt-lang skill. One
     runner (and so one network budget) and one cache serve both."""
     runner = run if isinstance(run, ReadOnlyRunner) else ReadOnlyRunner(run or _raw_run, offline=offline)
     cache = cache if cache is not None else Cache()
     return [check_ttlang_source(src_dir, run=runner, cache=cache),
-            check_ttlang_skill(skill_dir, run=runner, cache=cache, src_dir=src_dir)]
+            check_ttlang_skill(skill_dir, run=runner, cache=cache, src_dir=src_dir, preread=preread)]

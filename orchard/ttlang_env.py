@@ -338,11 +338,19 @@ def read_references(env: KEnv, skill_dir: Path) -> tuple[list[dict], list[str]]:
     return files, problems
 
 
-def skills_status(env: KEnv, skill_dir: Path, *, write_cache: bool = True) -> list:
+def skills_status(env: KEnv, skill_dir: Path, *, write_cache: bool = True, preread: dict | None = None) -> list:
     """The tt-lang checkout and the installed tt-lang skill compared with upstream (orchard/skillsfresh.py): a list of
-    Freshness results. Read only; `write_cache` False keeps the result cache in memory."""
+    Freshness results. Read only; `write_cache` False keeps the result cache in memory. `preread` maps skill files
+    (relative paths) to the bytes read_references already read, so those are hashed and not read again."""
     from orchard import skillsfresh
-    return skillsfresh.check_kernel_sources(env.src_dir, skill_dir, cache=skillsfresh.Cache(write=write_cache))
+    return skillsfresh.check_kernel_sources(env.src_dir, skill_dir, cache=skillsfresh.Cache(write=write_cache),
+                                            preread=preread)
+
+
+def skill_bytes(references: list[dict]) -> dict[str, bytes]:
+    """{path under the skill directory: bytes} of the reference files that came from the tt-lang skill."""
+    roots = {name: rel for name, source, rel in REFERENCES if source == SKILL_SOURCE}
+    return {roots[r["name"]]: r["data"] for r in references if r["source"] == SKILL_SOURCE and r["name"] in roots}
 
 
 def skills_lines(results) -> list[str]:
@@ -377,10 +385,10 @@ def main(args, *, env: KEnv | None = None, out=None, run=None) -> int:
     ok = all(r.status == OK for r in results)
     if args.check:
         skill_dir = skill_dir_from(args)
-        _, problems = read_references(env, skill_dir)
+        refs, problems = read_references(env, skill_dir)
         for p in problems:
             say(f"{FAIL:5s} references: {p}")
-        fresh = skills_status(env, skill_dir, write_cache=False)
+        fresh = skills_status(env, skill_dir, write_cache=False, preread=skill_bytes(refs))
         for line in skills_lines(fresh):
             say(line)
         stale = [r for r in fresh if r.stale]

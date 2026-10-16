@@ -644,3 +644,25 @@ def test_a_skill_file_that_is_not_a_regular_file_is_never_opened(tmp_path, monke
         except OSError:
             pass
     assert shas["guide.md"] is None and str(d / "guide.md") not in seen
+
+
+
+def test_preread_bytes_are_hashed_and_those_files_are_not_opened_again(tmp_path, monkeypatch):
+    """Review M8: the probe hands the bytes it copied to the coder; the check hashes those and reads only the rest."""
+    d = make_skill(tmp_path)
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(sf.os, "open", lambda p, *a, **kw: opened.append(Path(p).name) or real_open(p, *a, **kw))
+    shas = sf.local_skill_shas(d, preread={"guide.md": b"what the coder got\n"})
+    assert shas["guide.md"] == blob_sha(b"what the coder got\n")
+    assert "guide.md" not in opened and "examples.md" in opened
+
+
+def test_check_kernel_sources_passes_preread_to_the_skill_check(tmp_path):
+    src = tmp_path / "tt-lang"
+    src.mkdir()
+    d = make_skill(tmp_path)
+    answer = tree_answer(dict(FILES, **{"guide.md": b"copied\n"}))
+    fake = FakeSys({src: {"head": MAIN, "origin": TTLANG_URL}}, {TTLANG_URL: MAIN}, {sf.ttlang_skill_tree_path(): answer})
+    got = sf.check_kernel_sources(src, d, run=fake, cache=sf.Cache(tmp_path / "c.json"), preread={"guide.md": b"copied\n"})
+    assert got[1].state == sf.CURRENT, got[1].detail

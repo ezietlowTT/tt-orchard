@@ -73,8 +73,9 @@ def skills_current(monkeypatch):
     state = {"results": [_fresh(sf.SOURCE_TTLANG, sf.CURRENT), _fresh(sf.SOURCE_TTLANG_SKILL, sf.CURRENT)],
              "calls": [], "real": ttlang_env.skills_status}
 
-    def fake(env, skill_dir, *, write_cache=True):
+    def fake(env, skill_dir, *, write_cache=True, preread=None):
         state["calls"].append({"skill_dir": Path(skill_dir), "write_cache": write_cache})
+        state["preread"] = preread
         return list(state["results"])
     monkeypatch.setattr(ttlang_env, "skills_status", fake)
     return state
@@ -2983,3 +2984,31 @@ def test_the_skills_guide_version_matches_the_installed_skill():
     flat = " ".join(kp.SKILL.read_text().split())
     (claimed,) = re.findall(r"They were written for specification (\d+\.\d+)", flat)
     assert claimed == sf.spec_version((INSTALLED_SKILL / "TTLangSpecification.md").read_bytes())
+
+
+
+def test_the_freshness_check_uses_the_same_bytes_the_coder_gets(tmp_path, fake_kenv, env_ready, skills_current,
+                                                                ttlang_skill):
+    """Review M8: the skill files are read once. The freshness check hashes the bytes that went into reference/, so a
+    change between two reads cannot make the record disagree with the copy."""
+    with FakeModel(lambda r: final("nothing")) as server:
+        assert kp.main(probe_args(tmp_path, endpoint=server.endpoint), env=fake_kenv, out=io.StringIO(),
+                       probe=lambda e, m: True, run_watched_fn=no_run) == 0
+    adir = tmp_path / "out" / "add" / "attempt-1"
+    assert skills_current["preread"] == {"guide.md": (adir / "reference" / "guide.md").read_bytes(),
+                                         "examples.md": (adir / "reference" / "examples.md").read_bytes()}
+
+
+def test_kernel_env_check_hands_its_reference_bytes_to_the_freshness_check(fake_kenv, env_ready, skills_current,
+                                                                          ttlang_skill):
+    ttlang_env.main(env_check_args(), env=fake_kenv, out=io.StringIO())
+    assert skills_current["preread"] == {"guide.md": (ttlang_skill / "guide.md").read_bytes(),
+                                         "examples.md": (ttlang_skill / "examples.md").read_bytes()}
+
+
+def test_the_real_skills_status_passes_the_bytes_on(fake_kenv, ttlang_skill, monkeypatch, skills_current):
+    from orchard import skillsfresh as sf
+    seen = {}
+    monkeypatch.setattr(sf, "check_kernel_sources", lambda src, skill, **kw: seen.update(kw) or [])
+    skills_current["real"](fake_kenv, ttlang_skill, write_cache=False, preread={"guide.md": b"g"})
+    assert seen["preread"] == {"guide.md": b"g"}

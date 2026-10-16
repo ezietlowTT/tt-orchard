@@ -1498,7 +1498,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
                          "sha256": r["sha256"]} for r in references]
     # The operator's rule: the probe uses the latest tt-lang checkout and tt-lang skill upstream has. A stale source
     # (or one that could not be compared and has no recent current check) refuses the probe unless overridden.
-    fresh = ttlang_env.skills_status(env, skill_dir)
+    fresh = ttlang_env.skills_status(env, skill_dir, preread=ttlang_env.skill_bytes(references))
     for line in ttlang_env.skills_lines(fresh):
         say(line)
     stale = [f for f in fresh if f.stale]
