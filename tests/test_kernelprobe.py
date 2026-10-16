@@ -2326,7 +2326,8 @@ def test_the_report_groups_attempts_by_temperature_and_counts_distinct_kernels(t
     assert "### temperature 0\n" in zero
     assert "| 1 |" in zero and "| 3 |" in zero and "| 4 |" not in zero and "| 4 |" in warm and "| 1 |" not in warm
     assert "distinct kernels: 1 of 2 attempts; 1 wrote no kernel" in zero
-    assert "All 2 attempts produced the same kernel: at temperature 0 the server decodes greedily" in zero
+    assert ("All 2 attempts that wrote a kernel produced the same kernel (1 wrote none): temperature 0 asks the "
+            "server for greedy decoding, so attempts at one prompt often give one sample.") in " ".join(zero.split())
     assert "Raise --temperature to explore." in zero
     assert "distinct kernels: 2 of 3 attempts" in warm and "produced the same kernel" not in warm
     groups = {g["temperature"]: g for g in data["groups"]}
@@ -2442,3 +2443,9 @@ def test_a_greedy_only_run_gives_no_seed_formula_or_seed_advice(tmp_path):
     flat = " ".join((tmp_path / "kernel-probe-report.md").read_text().split())
     assert "No seed is sent at temperature 0." in flat
     assert "--seed" not in flat and "1234" not in flat and "+ k" not in flat
+
+
+def test_the_same_kernel_warning_names_no_missing_kernels_when_every_attempt_wrote_one(tmp_path):
+    """W7."""
+    flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.0, "a" * 64), _sampled(2, 0.0, "a" * 64)]).split())
+    assert "All 2 attempts that wrote a kernel produced the same kernel: temperature 0" in flat and "wrote none" not in flat

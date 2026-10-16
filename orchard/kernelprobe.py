@@ -1030,14 +1030,15 @@ def _distinct_lines(g: dict) -> list[str]:
         line += f"; {g['no_kernel']} wrote no kernel"
     lines = [line]
     if g["with_kernel"] > 1 and g["distinct_kernels"] == 1:
+        none = f" ({g['no_kernel']} wrote none)" if g["no_kernel"] else ""
         if g["temperature"] == 0:
-            lines.append(f"All {g['with_kernel']} attempts produced the same kernel: at temperature 0 the server decodes "
-                         "greedily, so repeated attempts at one prompt can be one sample. Raise --temperature to "
-                         "explore.")
+            lines.append(f"All {g['with_kernel']} attempts that wrote a kernel produced the same kernel{none}: "
+                         "temperature 0 asks the server for greedy decoding, so attempts at one prompt often give one "
+                         "sample. Raise --temperature to explore.")
         else:
             lines.append(f"All {g['with_kernel']} attempts that wrote a kernel produced the same kernel at temperature "
-                         f"{g['temperature']:g}: the temperature may be too low for this prompt, or the server may be "
-                         "ignoring it.")
+                         f"{g['temperature']:g}{none}: the temperature may be too low for this prompt, or the server "
+                         "may be ignoring it.")
     return lines
 
 
