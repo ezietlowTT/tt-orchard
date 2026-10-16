@@ -99,17 +99,82 @@ class Watched:
 WAIT_AFTER_KILL_S = 10.0     # longest wait for the leader to be reaped after the kill
 
 
-def _kill_group(proc) -> None:
+TERM_POLL_S = 0.05           # how often the group is checked during the SIGTERM grace
+
+
+def _signalable(pgid) -> bool:
+    """The cheap part of the guard: an id that is a real pid and not the caller's own group."""
+    return isinstance(pgid, int) and pgid > 1 and pgid != os.getpgrp()
+
+
+def _own_group(pgid) -> bool:
+    """True only when `pgid` is a process group the child leads itself (run_watched starts it with
+    start_new_session=True, so the group id equals the child's pid).
+
+    os.killpg(0, sig) signals the caller's own group, and ids 1 and below or the caller's group would hit the test
+    runner, the shell or init. A pid that does not lead a group of its own (a reused pid, a fake) would hit
+    someone else's processes. None of these may be signalled, so every killpg call checks here first.
+    """
+    if not _signalable(pgid):
+        return False
     try:
-        os.killpg(proc.pid, signal.SIGKILL)       # the child leads its own session, so this reaches grandchildren
+        return os.getpgid(pgid) == pgid
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _group_gone(pgid: int) -> bool:
+    """True when no process is left in the group. A group owned by someone else (a reused id) counts as gone."""
+    if not _signalable(pgid):
+        return True
+    try:
+        os.killpg(pgid, 0)
+    except (ProcessLookupError, PermissionError):
+        return True
+    return False
+
+
+def _kill_group(proc, term_grace_s: float = 5.0) -> None:
+    """Stop the child's whole process group: SIGTERM first, then SIGKILL for whatever is left after the grace.
+
+    A wrapper such as `gozer run` releases its chip lease when it gets SIGTERM; SIGKILL would leave the lease held by
+    a dead process. The group is judged gone by the group itself, so a leader that exits on SIGTERM while a
+    grandchild keeps running still gets the SIGKILL for the grandchild. The leader is reaped on each check, because
+    a zombie leader keeps its group alive.
+    """
+    if not _own_group(proc.pid):
+        return                                    # never signal a group that is not the child's own
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)       # the child leads its own session, so this reaches grandchildren
+    except (ProcessLookupError, PermissionError):
+        return                                    # no such group (already gone, or the pid belongs to someone else)
+    deadline = time.monotonic() + term_grace_s
+    while True:
+        try:
+            proc.poll()                           # reaps the leader once it has exited
+        except Exception:
+            pass
+        if _group_gone(proc.pid):
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(min(TERM_POLL_S, max(0.0, deadline - time.monotonic())))
+    # No getpgid check here: the reaped leader no longer answers it, and the kernel keeps the group id reserved
+    # while any member lives, so the id still names our group. The first check at the top has already passed.
+    if not _signalable(proc.pid):
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
         pass
 
 
 def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: float, poll_s: float = 1.0,
-                proc_root: str = "/proc", popen=subprocess.Popen, clock=time.monotonic) -> Watched:
+                proc_root: str = "/proc", popen=subprocess.Popen, clock=time.monotonic,
+                term_grace_s: float = 5.0) -> Watched:
     """Run `argv` with stdout and stderr appended to `log_path`, and stop it when the watcher says it is stuck or
-    when `backstop_s` has passed. The child gets its own session so the whole group can be killed."""
+    when `backstop_s` has passed. The child gets its own session so the whole group can be stopped: SIGTERM first,
+    SIGKILL after `term_grace_s` for anything still running."""
     start = clock()
     with open(log_path, "ab") as log:
         # Start reading where this child's output begins: an appended log may hold an earlier attempt's lines.
@@ -137,7 +202,7 @@ def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: 
                 if reason is not None:
                     if proc.poll() is not None:        # it ended by itself between the wait and this decision
                         return Watched(proc.returncode, None, False, clock() - start)
-                    _kill_group(proc)
+                    _kill_group(proc, term_grace_s=term_grace_s)
                     try:
                         code = proc.wait(timeout=WAIT_AFTER_KILL_S)
                     except subprocess.TimeoutExpired:
@@ -145,7 +210,7 @@ def run_watched(argv, *, cwd, env, log_path, watcher: StallWatcher, backstop_s: 
                     return Watched(code, reason, True, clock() - start)
         except BaseException:
             # Any error or interrupt (including the supervisor's abort signals) must not leave the child running.
-            _kill_group(proc)
+            _kill_group(proc, term_grace_s=term_grace_s)
             try:
                 proc.wait(timeout=WAIT_AFTER_KILL_S)
             except subprocess.TimeoutExpired:
