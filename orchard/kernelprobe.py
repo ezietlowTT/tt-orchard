@@ -29,9 +29,12 @@ convenience copy of attempt.json is written into the attempt directory after wha
 so the probe never writes through a link the agent left.
 
 These measures stop shortcuts and accidents: a model that edits its check, plants a link, or leaves a file in the
-way. They do not stop an agent determined to attack the operator's account. Agent shells run as the operator, so a
-background process the agent started can outlive its step and write anywhere the operator can, including the
-`.verdict` directory. The static gate and this boundary are best effort.
+way. They do not stop an agent determined to attack the operator's account. Agent shells run as the operator. A
+process the agent starts in the background carries ORCHARD_RUN_DIR=<attempt directory>; when the agent step ends
+(also after a crash or an interrupt) and before any verdict, `sweep_strays` stops every process of the operator's
+that carries that exact value, and the attempt record lists them under `swept`. A process that clears its
+environment escapes the sweep and can write anywhere the operator can, including the `.verdict` directory. The
+static gate and this boundary are best effort.
 
 The budget (BUDGET) and the watchdog's detectors bound each attempt. Attempts are independent draws, and the report
 gives counts with no rates.
@@ -480,6 +483,121 @@ def load_attempts(probe_dir, *, ops, probe_id) -> tuple[list[dict], int]:
     return sorted(out, key=lambda a: (order[a["op"]], a["attempt"])), ignored
 
 
+# ---- stray agent processes --------------------------------------------------------------------------------------
+#
+# An agent's shell command can start a process in the background and exit. spawn_checked stops a shell's session only
+# on a timeout, so such a process would keep running as the operator through the verdict and the hardware phase. Every
+# agent process carries ORCHARD_RUN_DIR=<attempt directory> (agent_env), so the probe finds them by that value and stops
+# them right after the agent step ends, before any verdict.
+
+SWEEP_GRACE_S = 2.0          # how long the strays get after SIGTERM before the SIGKILL
+SWEEP_POLL_S = 0.05
+
+
+def _run_dir_entry(run_dir) -> bytes:
+    return b"ORCHARD_RUN_DIR=" + os.fsencode(str(Path(run_dir).resolve()))
+
+
+def _environ_has(proc_root: str, pid: int, entry: bytes) -> bool:
+    """Whether /proc/<pid>/environ holds exactly `entry` as one of its variables. False for a process that has ended,
+    a zombie (its environ reads empty) or one whose environ cannot be read."""
+    try:
+        with open(os.path.join(proc_root, str(pid), "environ"), "rb") as f:
+            return entry in f.read().split(b"\0")
+    except OSError:
+        return False
+
+
+def scan_strays(run_dir, *, proc_root: str = "/proc", uid: int | None = None) -> list[int]:
+    """The pids of the processes owned by `uid` (default: ours) whose environment has ORCHARD_RUN_DIR equal to the
+    resolved `run_dir`. The comparison is exact, so attempt-1 does not match attempt-10. An entry that cannot be read
+    (the process ended during the scan, or it belongs to someone else) is skipped."""
+    uid = os.getuid() if uid is None else uid
+    entry = _run_dir_entry(run_dir)
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return []
+    found = []
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            if os.stat(os.path.join(proc_root, name)).st_uid != uid:
+                continue
+        except OSError:
+            continue
+        if _environ_has(proc_root, int(name), entry):
+            found.append(int(name))
+    return sorted(found)
+
+
+def _protected_pids(proc_root: str = "/proc") -> set[int]:
+    """Our own pid, our parent's, every further ancestor that /proc shows, and 0 and 1. None of them is signalled."""
+    out = {0, 1, os.getpid(), os.getppid()}
+    pid = os.getppid()
+    for _ in range(4096):                                # a bound in case /proc shows a loop
+        try:
+            with open(os.path.join(proc_root, str(pid), "stat"), encoding="utf-8", errors="replace") as f:
+                text = f.read()
+            pid = int(text[text.rfind(")") + 2:].split()[1])
+        except (OSError, ValueError, IndexError):
+            break
+        if pid in out:
+            break
+        out.add(pid)
+    return out
+
+
+def _cmdline(proc_root: str, pid: int) -> str:
+    try:
+        with open(os.path.join(proc_root, str(pid), "cmdline"), "rb") as f:
+            return f.read(4096).replace(b"\0", b" ").decode("utf-8", errors="replace").strip()[:120]
+    except OSError:
+        return ""
+
+
+def sweep_strays(run_dir, *, proc_root: str = "/proc", kill=os.kill, killpg=os.killpg, grace_s: float = SWEEP_GRACE_S,
+                 clock=time.monotonic, sleep=time.sleep) -> list[dict]:
+    """Stop every process that carries this attempt's ORCHARD_RUN_DIR: SIGTERM, up to `grace_s` for them to go, then
+    SIGKILL for any that are left. Returns [{"pid", "cmdline"}] for the processes it found. Never raises.
+
+    Our own pid and our ancestors are never signalled. Each signal goes to the pid itself (os.kill), except for a
+    process that leads its own group, whose group is signalled so its children go too; a group is never signalled when
+    its id is 1 or less or is our own group (the stallwatch guards). Before each signal the process's environment is
+    read again, so a pid that ended and was reused by another process in between is not signalled."""
+    records: list[dict] = []
+    try:
+        protected = _protected_pids(proc_root)
+        entry = _run_dir_entry(run_dir)
+        targets = [pid for pid in scan_strays(run_dir, proc_root=proc_root)
+                   if isinstance(pid, int) and pid > 1 and pid not in protected]
+        records = [{"pid": pid, "cmdline": _cmdline(proc_root, pid)} for pid in targets]
+
+        def send(pid: int, sig) -> None:
+            if not _environ_has(proc_root, pid, entry):
+                return                                   # gone, a zombie, or no longer one of ours
+            try:
+                pgid = os.getpgid(pid)
+                if pgid == pid and pgid > 1 and pgid != os.getpgrp() and pgid not in protected:
+                    killpg(pgid, sig)
+                else:
+                    kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+        for pid in targets:
+            send(pid, signal.SIGTERM)
+        deadline = clock() + grace_s
+        while clock() < deadline and any(_environ_has(proc_root, pid, entry) for pid in targets):
+            sleep(SWEEP_POLL_S)
+        for pid in targets:
+            send(pid, signal.SIGKILL)
+    except Exception:
+        pass
+    return records
+
+
 def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
     """The supervisor's loop detectors with their default thresholds, answering through the probe's control object.
     NoNewEvidence is left out: an attempt has no evidence directory the agent is asked to fill, and the wall-clock
@@ -509,6 +627,8 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         outcome = step.run(SKILL.read_text(encoding="utf-8"), user)
     finally:
         ledger.close()
+        # Before any verdict, and on a crash or an interrupt too: no process the agent started may keep running.
+        swept = sweep_strays(adir)
     agent_wall_s = round(time.monotonic() - started, 2)
     check = authoritative_check(adir, op=op, env=env, run_watched=run_watched, tt_lang=facts)
     sets = check.get("sets") if isinstance(check.get("sets"), list) else []
@@ -520,6 +640,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
+        "swept": swept,
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"]),
     }
@@ -703,6 +824,15 @@ def _cell(value) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")[:160]
 
 
+def _agent_cell(a: dict) -> str:
+    """The agent column: whether its own check.json was untrusted, and how many of its processes the sweep stopped."""
+    parts = ["untrusted"] if a.get("agent_check_untrusted") else []
+    n = len(a.get("swept") or [])
+    if n:
+        parts.append(f"{n} stray agent process{'es' if n != 1 else ''} stopped")
+    return _cell("; ".join(parts))
+
+
 def _bars_text(b: dict) -> str:
     lo, hi = b["slope"]
     return (f"pcc >= {b['pcc']}, rel_l2 <= {b['rel_l2']}, slope in [{lo}, {hi}], "
@@ -768,8 +898,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
                 _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
                 "-" if h is None else ("yes" if h.get("passed") else "no"),
                 _cell(a.get("pcc_min")), _cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
-                _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line),
-                "untrusted" if a.get("agent_check_untrusted") else "-"]) + " |")
+                _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
         f = first[op]
         lines.append("")
         lines.append(f"attempts to first pass in the simulator: {f['sim']}" if f["sim"] is not None

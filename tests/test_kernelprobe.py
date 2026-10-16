@@ -1393,3 +1393,215 @@ def test_credentials_in_the_endpoint_are_never_printed(tmp_path, fake_kenv, env_
     text += (tmp_path / "out" / "kernel-probe-report.md").read_text()
     text += (tmp_path / "out" / "kernel-probe-report.json").read_text()
     assert "127.0.0.1:1" in out.getvalue() and "secret" not in text
+
+
+# ---- stray agent processes (I5) -----------------------------------------------------------------------------------
+#
+# Every process these tests signal is a child the test started itself, with start_new_session=True and an
+# ORCHARD_RUN_DIR under the test's own tmp directory. The sweep's kill functions are wrapped so that a signal to any
+# other pid fails the test before it is sent, and every child is killed by pid in a finally.
+
+import signal as _signal
+import subprocess as _subprocess
+import sys as _sys
+import time as _time
+
+from orchard.agent import Outcome, agent_env
+
+
+def _child(run_dir, *, extra_env=None):
+    env = dict(os.environ)
+    env["ORCHARD_RUN_DIR"] = str(Path(run_dir).resolve())
+    env.update(extra_env or {})
+    return _subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], env=env, start_new_session=True,
+                             stdin=_subprocess.DEVNULL, stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL)
+
+
+def _wait_for_env(pid, value, timeout=10.0):
+    """Wait until the child's /proc environ is readable (an exec has happened)."""
+    want = ("ORCHARD_RUN_DIR=" + value).encode()
+    end = _time.monotonic() + timeout
+    while _time.monotonic() < end:
+        try:
+            if want in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0"):
+                return
+        except OSError:
+            pass
+        _time.sleep(0.02)
+    raise AssertionError(f"child {pid} never showed ORCHARD_RUN_DIR={value}")
+
+
+def _guarded_kills(allowed: set, sent: list):
+    """kill and killpg stand-ins that pass a signal on only to a pid (or a group led by a pid) in `allowed`."""
+    def kill(pid, sig):
+        sent.append(("kill", pid, sig))
+        assert pid in allowed, f"the sweep tried to signal pid {pid}, which this test did not start"
+        os.kill(pid, sig)
+
+    def killpg(pgid, sig):
+        sent.append(("killpg", pgid, sig))
+        assert pgid in allowed, f"the sweep tried to signal group {pgid}, which this test did not start"
+        os.killpg(pgid, sig)
+    return kill, killpg
+
+
+def _stop(*procs):
+    for p in procs:
+        try:
+            os.kill(p.pid, 9)
+        except (ProcessLookupError, PermissionError):
+            pass
+        try:
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def test_the_sweep_stops_a_process_with_this_attempt_directory_and_leaves_a_neighbour_alone(tmp_path):
+    """The neighbour's directory starts with the attempt's directory (attempt-1 and attempt-10), so a prefix match
+    would stop it too. Only the exact directory counts."""
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    other = tmp_path / "probe" / "add" / "attempt-10"
+    adir.mkdir(parents=True)
+    other.mkdir(parents=True)
+    stray, neighbour = _child(adir), _child(other)
+    sent = []
+    try:
+        _wait_for_env(stray.pid, str(adir.resolve()))
+        _wait_for_env(neighbour.pid, str(other.resolve()))
+        kill, killpg = _guarded_kills({stray.pid}, sent)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg)
+        assert [s["pid"] for s in swept] == [stray.pid] and "time.sleep" in swept[0]["cmdline"]
+        assert stray.wait(timeout=5) == -_signal.SIGTERM
+        assert neighbour.poll() is None
+        assert all(pid == stray.pid for _, pid, _ in sent)
+    finally:
+        _stop(stray, neighbour)
+
+
+def test_the_sweep_kills_a_process_that_ignores_sigterm(tmp_path):
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    env = dict(os.environ, ORCHARD_RUN_DIR=str(adir.resolve()))
+    stubborn = _subprocess.Popen(
+        [_sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                                "print('ready', flush=True); time.sleep(60)"],
+        env=env, start_new_session=True, stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    sent = []
+    try:
+        assert stubborn.stdout.readline().strip() == b"ready"
+        kill, killpg = _guarded_kills({stubborn.pid}, sent)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.5)
+        assert [s["pid"] for s in swept] == [stubborn.pid]
+        assert stubborn.wait(timeout=5) == -_signal.SIGKILL
+        assert [sig for _, _, sig in sent] == [_signal.SIGTERM, _signal.SIGKILL]
+    finally:
+        _stop(stubborn)
+
+
+def test_the_sweep_never_signals_this_process_or_its_parent(tmp_path, monkeypatch):
+    """The scan is patched to name our own pid and our parent's; a recorder stands in for every kill function, so no
+    real signal can be sent whatever the sweep decides."""
+    sent = []
+    monkeypatch.setattr(kp, "scan_strays", lambda run_dir, **kw: [os.getpid(), os.getppid(), 1, 0])
+    monkeypatch.setattr(kp, "_environ_has", lambda *a: True)      # as if each of them carried the attempt's value
+    record = lambda *a: sent.append(a)                           # noqa: E731
+    swept = kp.sweep_strays(tmp_path, kill=record, killpg=record, grace_s=0.1)
+    assert sent == [] and swept == []
+
+
+def test_a_proc_entry_that_vanishes_mid_scan_is_skipped(tmp_path):
+    """A fake /proc: one entry has no environ (the process ended between the listing and the read), one has an
+    unreadable environ, one cannot be stat'ed at all, one matches. Only the match is returned, and nothing raises."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    proc = tmp_path / "proc"
+    for pid in ("4001", "4002", "4003"):
+        (proc / pid).mkdir(parents=True)
+    (proc / "4002" / "environ").mkdir()                           # reading a directory raises
+    (proc / "4003" / "environ").write_bytes(b"A=1\0ORCHARD_RUN_DIR=" + str(adir.resolve()).encode() + b"\0")
+    (proc / "self").mkdir()
+    (proc / "4004").symlink_to(proc / "gone")                     # the whole entry vanished: stat fails
+    assert kp.scan_strays(adir, proc_root=str(proc)) == [4003]
+
+
+def test_the_sweep_never_raises(tmp_path, monkeypatch):
+    def broken(run_dir, **kw):
+        raise OSError("proc went away")
+    monkeypatch.setattr(kp, "scan_strays", broken)
+    assert kp.sweep_strays(tmp_path, kill=lambda *a: None, killpg=lambda *a: None) == []
+
+
+class _BackgroundingStep:
+    """Stands in for AgentStep: run() starts a process with the agent's environment that outlives the step, the way a
+    shell command that backgrounds a process and exits would, then returns or raises."""
+    started: list = []
+    raise_after = False
+
+    def __init__(self, **kw):
+        self.run_dir = kw["run_dir"]
+
+    def run(self, system, user):
+        env = agent_env(self.run_dir)
+        env["PATH"] = os.environ.get("PATH", "")
+        p = _subprocess.Popen([_sys.executable, "-c", "import time; time.sleep(60)"], env=env, start_new_session=True,
+                              stdin=_subprocess.DEVNULL, stdout=_subprocess.DEVNULL, stderr=_subprocess.DEVNULL)
+        type(self).started.append(p)
+        (Path(self.run_dir) / "kernel.py").write_text((KERNELS / "add_good.py").read_text())
+        _wait_for_env(p.pid, str(Path(self.run_dir).resolve()))
+        if type(self).raise_after:
+            raise RuntimeError("the agent step crashed")
+        return Outcome("done", 1, "done")
+
+
+def test_run_attempt_stops_agent_processes_that_outlive_the_step_before_the_verdict(tmp_path, fake_kenv, monkeypatch):
+    _BackgroundingStep.started, _BackgroundingStep.raise_after = [], False
+    monkeypatch.setattr(kp, "AgentStep", _BackgroundingStep)
+    order = []
+    real_sweep = kp.sweep_strays
+
+    def sweep(run_dir, **kw):
+        order.append("sweep")
+        allowed = {p.pid for p in _BackgroundingStep.started}
+        kill, killpg = _guarded_kills(allowed, [])
+        return real_sweep(run_dir, kill=kill, killpg=killpg)
+    monkeypatch.setattr(kp, "sweep_strays", sweep)
+    writer = check_writer(NO_KERNEL)
+
+    def check(argv, **kw):
+        order.append("check")
+        assert all(p.poll() is not None for p in _BackgroundingStep.started), "a stray ran during the verdict"
+        return writer(argv, **kw)
+    try:
+        attempt = kp.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1",
+                                 model="m", coder_model="m", probe_id="t", run_watched=check, tt_lang=FACTS)
+        (p,) = _BackgroundingStep.started
+        assert order == ["sweep", "check"]
+        assert [s["pid"] for s in attempt["swept"]] == [p.pid] and p.wait(timeout=5) is not None
+        on_disk = json.loads((kp.verdict_dir(tmp_path / "probe", "add", 1) / "attempt.json").read_text())
+        assert on_disk["swept"] == attempt["swept"]
+        kp.write_report(tmp_path, [attempt], {"probe_id": "t", "bars": {}, "hw": None, "ops": ["add"]})
+        assert "1 stray agent process stopped" in (tmp_path / "kernel-probe-report.md").read_text()
+    finally:
+        _stop(*_BackgroundingStep.started)
+
+
+def test_a_crashed_agent_step_still_has_its_strays_stopped(tmp_path, fake_kenv, monkeypatch):
+    _BackgroundingStep.started, _BackgroundingStep.raise_after = [], True
+    monkeypatch.setattr(kp, "AgentStep", _BackgroundingStep)
+    real_sweep = kp.sweep_strays
+
+    def sweep(run_dir, **kw):
+        kill, killpg = _guarded_kills({p.pid for p in _BackgroundingStep.started}, [])
+        return real_sweep(run_dir, kill=kill, killpg=killpg)
+    monkeypatch.setattr(kp, "sweep_strays", sweep)
+    try:
+        with pytest.raises(RuntimeError):
+            kp.run_attempt(op="add", n=1, probe_dir=tmp_path / "probe", env=fake_kenv, endpoint="http://x/v1",
+                           model="m", coder_model="m", probe_id="t", run_watched=check_writer(NO_KERNEL),
+                           tt_lang=FACTS)
+        (p,) = _BackgroundingStep.started
+        assert p.wait(timeout=5) == -_signal.SIGTERM
+    finally:
+        _stop(*_BackgroundingStep.started)
+        _BackgroundingStep.raise_after = False

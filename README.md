@@ -1102,8 +1102,9 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
 - It refuses (exit 2) when the simulator environment does not pass `tt-orchard kernel-env --check`.
 - The verdict is the probe's own re-check: after the agent ends, the probe runs the shipped check on a copy of
   `kernel.py` made as a regular file of at most 256 KiB, under `<out>/.verdict/<op>-<n>/`. The agent's own `check.json`
-  is never believed; when it disagrees, the report marks it `agent_check_untrusted`. This boundary is best effort
-  against shortcuts and accidents.
+  is never believed; when it disagrees, the report marks it `agent_check_untrusted`. Before that re-check, the probe
+  stops every process the agent left running (found by the `ORCHARD_RUN_DIR` value each agent process carries), and
+  the report counts them. This boundary is best effort against shortcuts and accidents.
 - The check needs more than PCC. A static gate on `kernel.py` runs first (imports limited to `ttl`, `ttnn` and `math`, with `__future__`, `typing` and aliases of the three
   accepted; no `import torch` or host code; `OPERATION` a top-level `def` decorated with `@ttl.operation`) and reports every violation
   with a remedy. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
