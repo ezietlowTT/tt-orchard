@@ -57,10 +57,10 @@ def test_without_the_diagnostics_file_the_check_reports_the_environment():
     text = ("Traceback (most recent call last):\n"
             "  File \"<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/greenlet_scheduler.py\", line 338, in run\n"
             "FileNotFoundError: [Errno 2] No such file or directory: "
-            "'<TTLANG_VENV>/lib/python3.12/site-packages/ttl/sim/diagnostics.py'\n")
+            "'<TTLANG_VENV>/lib/python3.12/site-packages/ttl/ttl/diagnostics.py'\n")
     result = {"phase": "sim", "sets": [],
               "error": {"phase": "run", "type": "FileNotFoundError",
-                        "text": "[Errno 2] No such file or directory: '.../ttl/sim/diagnostics.py'"}}
+                        "text": "[Errno 2] No such file or directory: '.../ttl/ttl/diagnostics.py'"}}
     got, line = CHECK.classify(kernel_present=True, timed_out=False, returncode=1, text=text, result=result, bar=0.999)
     assert got == "harness_error"
     assert "diagnostics.py" in line
@@ -398,16 +398,31 @@ def test_spoofed_diagnostics_text_is_the_kernel_when_the_file_is_present():
 
 
 def test_diagnostics_file_lookup(tmp_path):
+    """The file the wheel fails to ship is ttl/ttl/diagnostics.py. The wheel's loader, ttl/sim/diagnostics.py, is always
+    there and reads the other one (ttl/sim/diagnostics.py lines 35-36; ttlang_env.diagnostics_target)."""
     venv = tmp_path / "venv"
     (venv / "bin").mkdir(parents=True)
     sim = venv / "bin" / "tt-lang-sim"
     sim.write_text("")
     assert CHECK.diagnostics_present(sim) is None                 # no ttl package found: unknown
-    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "sim"
-    pkg.mkdir(parents=True)
+    ttl = venv / "lib" / "python3.12" / "site-packages" / "ttl"
+    (ttl / "ttl").mkdir(parents=True)
     assert CHECK.diagnostics_present(sim) is False
-    (pkg / "diagnostics.py").write_text("")
+    (ttl / "ttl" / "diagnostics.py").write_text("")
     assert CHECK.diagnostics_present(sim) is True
+
+
+def test_the_loader_alone_does_not_count_as_the_diagnostics_file(tmp_path):
+    """I1. The loader ttl/sim/diagnostics.py is present in every wheel; with the target ttl/ttl/diagnostics.py absent,
+    the file is missing."""
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    sim = venv / "bin" / "tt-lang-sim"
+    sim.write_text("")
+    ttl = venv / "lib" / "python3.12" / "site-packages" / "ttl"
+    (ttl / "sim").mkdir(parents=True)
+    (ttl / "sim" / "diagnostics.py").write_text("# the loader\n")
+    assert CHECK.diagnostics_present(sim) is False
 
 
 # the static gate
@@ -769,7 +784,7 @@ def _venv_with_diagnostics(tmp_path):
     sim = venv / "bin" / "tt-lang-sim"
     sim.write_text("#!/bin/sh\n")
     sim.chmod(0o755)
-    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "sim"
+    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "ttl"
     pkg.mkdir(parents=True)
     (pkg / "diagnostics.py").write_text("")
     return sim

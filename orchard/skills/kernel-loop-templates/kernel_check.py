@@ -86,6 +86,9 @@ def bars_from_spec(spec: dict, phase: str) -> dict:
 def diagnostics_present(sim) -> bool | None:
     """Whether tt-lang-sim's diagnostics.py exists in the venv the simulator lives in.
 
+    The file is site-packages/ttl/ttl/diagnostics.py, which the wheel does not ship. The wheel's loader,
+    ttl/sim/diagnostics.py, is always present and reads that file, so the loader says nothing about it.
+
     A bare command name is looked up on PATH, and the path is resolved, so a symlink to the simulator leads to its
     venv. None when the simulator cannot be found or no ttl package sits next to it (a layout this code does not
     know); classify then falls back to reading the text."""
@@ -99,7 +102,7 @@ def diagnostics_present(sim) -> bool | None:
     packages = list(venv.glob("lib/python*/site-packages/ttl"))
     if not packages:
         return None
-    return any((p / "sim" / "diagnostics.py").is_file() for p in packages)
+    return any((p / "ttl" / "diagnostics.py").is_file() for p in packages)
 
 
 def _is_dunder(name: str) -> bool:
