@@ -2926,3 +2926,36 @@ def test_the_skill_repeats_each_references_hardware_ci_tag(path):
     for tag in tags:
         assert " ".join(tag.split()) in flat, tag
     assert "`reference/eltwise_broadcast_reduce.py`: a working kernel" not in flat
+
+
+def test_a_reference_that_is_not_a_regular_file_is_never_opened(fake_kenv, ttlang_skill, monkeypatch):
+    """Review M3: the type is checked with lstat before the open, so a device node or a FIFO is never opened."""
+    (ttlang_skill / "examples.md").unlink()
+    os.mkfifo(ttlang_skill / "examples.md")
+    opened = []
+    real_open = os.open
+
+    def recording_open(path, *a, **kw):
+        opened.append(str(path))
+        return real_open(path, *a, **kw)
+    monkeypatch.setattr(ttlang_env.os, "open", recording_open)
+    try:
+        _, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+        seen = list(opened)                         # before the cleanup below opens the FIFO itself
+    finally:
+        _unblock(ttlang_skill / "examples.md")
+    assert str(ttlang_skill / "examples.md") not in seen
+    assert len(problems) == 1 and "not a regular file" in problems[0]
+
+
+@pytest.mark.parametrize("linked", ["examples", "docs/sphinx"])
+def test_a_reference_under_a_linked_directory_of_the_checkout_is_refused(fake_kenv, ttlang_skill, tmp_path, linked):
+    """Review M3: O_NOFOLLOW covers only the last component. A directory between the checkout and the file that is a
+    link is refused by name."""
+    real = fake_kenv.src_dir / linked
+    moved = tmp_path / "elsewhere" / linked.replace("/", "-")
+    moved.parent.mkdir(parents=True, exist_ok=True)
+    real.rename(moved)
+    real.symlink_to(moved, target_is_directory=True)
+    _, problems = ttlang_env.read_references(fake_kenv, ttlang_skill)
+    assert problems and all("link" in p and str(real) in p for p in problems)

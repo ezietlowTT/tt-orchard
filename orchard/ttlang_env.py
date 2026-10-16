@@ -285,10 +285,19 @@ def skill_dir_from(args, environ: dict | None = None, home: Path | None = None) 
     return Path(home or Path.home()) / ".claude" / "skills" / "ttm-tt-lang"
 
 
-def _read_reference(path: Path) -> tuple[bytes | None, str | None]:
-    """(bytes, None) for a regular file of at most REFERENCE_MAX_BYTES, else (None, why). The file is opened without
-    following a link and without blocking on a FIFO, and checked on the open file, so a link is never followed and a
-    device is never read."""
+def _read_reference(path: Path, root: Path | None = None) -> tuple[bytes | None, str | None]:
+    """(bytes, None) for a regular file of at most REFERENCE_MAX_BYTES, else (None, why).
+
+    Every directory between `root` and the file must be a real directory: O_NOFOLLOW covers only the last component,
+    so a linked `examples/` would otherwise be followed. (`root` itself may be a link.) The file's type is checked with
+    lstat before the open, so a device node or a FIFO is never opened; the open does not follow a link and does not
+    block, and the type is checked again on the open file."""
+    if root is not None:
+        cur = Path(root)
+        for part in Path(path).relative_to(root).parts[:-1]:
+            cur = cur / part
+            if os.path.islink(cur):
+                return None, f"{cur} is a link; the reference files must not be reached through a linked directory"
     try:
         st = os.lstat(path)
     except FileNotFoundError:
@@ -297,6 +306,8 @@ def _read_reference(path: Path) -> tuple[bytes | None, str | None]:
         return None, f"{path} cannot be read: {exc.strerror or exc}"
     if stat.S_ISLNK(st.st_mode):
         return None, f"{path} is a link; put the file itself there"
+    if not stat.S_ISREG(st.st_mode):
+        return None, f"{path} is not a regular file"
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError as exc:
@@ -318,7 +329,7 @@ def read_references(env: KEnv, skill_dir: Path) -> tuple[list[dict], list[str]]:
     files, problems = [], []
     for name, source, rel in REFERENCES:
         path = roots[source] / rel
-        data, why = _read_reference(path)
+        data, why = _read_reference(path, roots[source])
         if why:
             problems.append(why)
             continue

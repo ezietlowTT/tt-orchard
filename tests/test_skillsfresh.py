@@ -620,3 +620,22 @@ def test_an_ls_remote_answer_without_the_exact_ref_is_unknown(tmp_path):
     root, st = skills_repo(tmp_path, head=OLD)
     got = check_skills(tmp_path, FakeSys({root: st}, {SKILLS_URL: [(OLD, "refs/heads/x/refs/heads/main")]}), root)
     assert got.state == sf.UNKNOWN and got.remote is None
+
+
+def test_a_skill_file_that_is_not_a_regular_file_is_never_opened(tmp_path, monkeypatch):
+    """Review M3, for the freshness check's reader."""
+    d = make_skill(tmp_path)
+    (d / "guide.md").unlink()
+    os.mkfifo(d / "guide.md")
+    opened = []
+    real_open = os.open
+    monkeypatch.setattr(sf.os, "open", lambda p, *a, **kw: opened.append(str(p)) or real_open(p, *a, **kw))
+    try:
+        shas = sf.local_skill_shas(d)
+        seen = list(opened)                         # before the cleanup below opens the FIFO itself
+    finally:
+        try:
+            os.close(os.open(d / "guide.md", os.O_WRONLY | os.O_NONBLOCK))
+        except OSError:
+            pass
+    assert shas["guide.md"] is None and str(d / "guide.md") not in seen

@@ -528,7 +528,13 @@ def ttlang_skill_tree_path() -> str:
 
 def _read_regular(path: Path) -> bytes | None:
     """The bytes of a regular file of at most FILE_MAX_BYTES, opened without following a link or blocking on a FIFO;
-    None otherwise."""
+    None otherwise. The type is checked with lstat before the open, so a device node or a FIFO is never opened, and
+    again on the open file."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+    except OSError:
+        return None
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except OSError:
