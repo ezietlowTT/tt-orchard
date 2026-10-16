@@ -122,16 +122,30 @@ def step_clone(env: KEnv, check_only: bool) -> Result:
     if have is not None:
         return Result("clone", FAIL, f"{env.src_dir} is at {have[:9]} and the pin is {pin[:9]}; it is not reset. "
                                      "Move it aside or pass another --src-dir")
-    if env.src_dir.exists() and any(env.src_dir.iterdir()):
-        return Result("clone", FAIL, f"{env.src_dir} exists and is not a git checkout; it is left alone")
-    if check_only:
-        return Result("clone", TODO, f"would fetch tt-lang {pin[:9]} into {env.src_dir}")
-    env.src_dir.mkdir(parents=True, exist_ok=True)
     # A fetch of one commit, because main moves and the pin must not.
-    for argv in (["git", "-C", src, "init", "--quiet"],
-                 ["git", "-C", src, "remote", "add", "origin", defaults.TTLANG_URL],
-                 ["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", pin],
-                 ["git", "-C", src, "checkout", "--quiet", "FETCH_HEAD"]):
+    fetch = [["git", "-C", src, "fetch", "--quiet", "--depth", "1", "origin", pin],
+             ["git", "-C", src, "checkout", "--quiet", "FETCH_HEAD"]]
+    start = [["git", "-C", src, "init", "--quiet"],
+             ["git", "-C", src, "remote", "add", "origin", defaults.TTLANG_URL]]
+    if (env.src_dir / ".git").exists():
+        # HEAD could not be read. An earlier run of this command may have stopped after `git init` (for example
+        # with the network down). That case has our origin and no commit, and it is finished by fetching again.
+        # Anything else is left alone: nothing is deleted or reset.
+        rc, url, _ = env.run(["git", "-C", src, "remote", "get-url", "origin"], 30)
+        if rc != 0 or url.strip() != defaults.TTLANG_URL:
+            return Result("clone", FAIL, f"HEAD could not be read in {env.src_dir} (git is missing or the repository "
+                                         "is not one this command started); it is left alone")
+        if check_only:
+            return Result("clone", TODO, f"would finish the interrupted clone in {env.src_dir}")
+        steps = fetch
+    elif env.src_dir.exists() and any(env.src_dir.iterdir()):
+        return Result("clone", FAIL, f"{env.src_dir} exists and is not a git checkout; it is left alone")
+    elif check_only:
+        return Result("clone", TODO, f"would fetch tt-lang {pin[:9]} into {env.src_dir}")
+    else:
+        env.src_dir.mkdir(parents=True, exist_ok=True)
+        steps = start + fetch
+    for argv in steps:
         rc, _, err = env.run(argv, 900)
         if rc != 0:
             return _fail("clone", argv, err)
@@ -184,10 +198,13 @@ def step_wheel(env: KEnv, check_only: bool) -> Result:
 
 
 def step_diagnostics(env: KEnv, check_only: bool) -> Result:
+    source = env.src_dir / "python" / "ttl" / "diagnostics.py"
+    if check_only and not (env.py.exists() and source.is_file()):
+        # The venv and the checkout are made by earlier steps, which --check reports as to do.
+        return Result("diagnostics", TODO, "waits for the checkout and the venv")
     target = diagnostics_target(env)
     if target is None:
         return Result("diagnostics", FAIL, f"{env.py} did not say where its site-packages is")
-    source = env.src_dir / "python" / "ttl" / "diagnostics.py"
     if not source.is_file():
         return Result("diagnostics", FAIL, f"{source} does not exist")
     if sha256_file(source) != defaults.TTLANG_DIAGNOSTICS_SHA256:
