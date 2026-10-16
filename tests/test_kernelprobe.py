@@ -2449,3 +2449,17 @@ def test_the_same_kernel_warning_names_no_missing_kernels_when_every_attempt_wro
     """W7."""
     flat = " ".join(_report_md(tmp_path, [_sampled(1, 0.0, "a" * 64), _sampled(2, 0.0, "a" * 64)]).split())
     assert "All 2 attempts that wrote a kernel produced the same kernel: temperature 0" in flat and "wrote none" not in flat
+
+
+def test_minus_zero_is_temperature_0(tmp_path, fake_kenv, env_ready, monkeypatch, capsys):
+    """W8. -0 is read as 0: it prints as 0 and is a duplicate of 0."""
+    seen = _recording_attempts(monkeypatch)
+    out = io.StringIO()
+    code = kp.main(probe_args(tmp_path, attempts=1, temperature="-0"), env=fake_kenv, out=out,
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert code == kp.EXIT_OK and "temperature -0" not in out.getvalue() and "temperature -0" not in md
+    assert seen == [(1, 0.0, None, None)] and str(seen[0][1]) == "0.0"
+    code = kp.main(probe_args(tmp_path / "b", attempts=1, temperatures="-0,0"), env=fake_kenv, out=io.StringIO(),
+                   probe=lambda e, m: True, run_watched_fn=no_run)
+    assert code == kp.EXIT_REFUSED and "twice" in capsys.readouterr().err

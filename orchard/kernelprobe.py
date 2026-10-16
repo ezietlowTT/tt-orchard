@@ -1224,6 +1224,7 @@ def parse_sampling(args, attempts: int = 1) -> dict:
         t = _number(text, "--temperatures" if many is not None else "--temperature")
         if not (0.0 <= t <= MAX_TEMPERATURE):                 # NaN fails this too
             raise _Refused(f"temperature {text.strip()} is not between 0 and {MAX_TEMPERATURE:g}")
+        t = t + 0.0                                            # -0.0 becomes 0.0, so it prints as 0
         if t in temperatures:
             raise _Refused(f"temperature {t:g} is listed twice")
         temperatures.append(t)
