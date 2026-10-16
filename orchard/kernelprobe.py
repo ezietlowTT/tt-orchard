@@ -879,10 +879,11 @@ def _cell(value) -> str:
 
 
 def _pcc_cell(value) -> str:
-    """A PCC cell. When six significant digits would round a value short of 1 up to `1`, the distance from 1 is printed
-    (`1 - 6.0e-08`), so the table never shows a perfect PCC for an imperfect one."""
+    """A PCC cell. When six significant digits would round a value near 1 to `1`, the distance from 1 is printed with
+    its sign (`1 - 6.0e-08`, or `1 + 1.0e-07` for a value a little above 1 from floating-point error), so the table
+    never shows a perfect PCC for an imperfect one."""
     if isinstance(value, float) and value != 1.0 and f"{value:.6g}" == "1":
-        return f"1 - {1.0 - value:.1e}"
+        return f"1 - {1.0 - value:.1e}" if value < 1.0 else f"1 + {value - 1.0:.1e}"
     return _cell(value)
 
 
@@ -937,8 +938,8 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
              "and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
              "outliers. A kernel that passes them can still fail on real activations.", "",
              "The simulator promotes bf16 to f32 (tt-lang-sim's default) and the references compute in f32, so on a "
-             "simple op a correct kernel shows a max_abs_err of 0.0 and a PCC of 1.0. Rounding is seen only on "
-             "hardware.", "",
+             "simple op a correct kernel shows a max_abs_err of 0.0 and a PCC of 1.0. Rounding on hardware is "
+             "coarser (bf16) than the simulator's f32.", "",
              *(["`add` is a calibration op: its working kernel is upstream's eltwise_add.py, the reference example "
                 "the agent reads. A pass of `add` shows the loop works; it is not evidence that the coder can write a "
                 "kernel.", ""] if "add" in ops else []),

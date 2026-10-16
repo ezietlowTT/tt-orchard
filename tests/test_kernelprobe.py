@@ -1771,10 +1771,19 @@ def test_the_header_says_add_is_a_calibration_op(tmp_path):
 def test_the_header_says_the_simulator_computes_in_f32(tmp_path):
     flat = " ".join(_report_md(tmp_path, [_row_attempt()]).split())
     assert "promotes bf16 to f32" in flat and "max_abs_err" in flat and "PCC of 1.0" in flat
+    # S4: transcendental ops round in f32 too, so rounding is not a hardware-only effect
+    assert "Rounding on hardware is coarser (bf16) than the simulator's f32" in flat
+    assert "seen only on hardware" not in flat
+
+
+def test_an_agent_cell_with_nothing_to_say_is_a_dash(tmp_path):
+    md = _report_md(tmp_path, [_row_attempt()])
+    row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    assert row.rstrip().endswith("| - |"), row
 
 
 @pytest.mark.parametrize("pcc,shown", [(0.99999994, "1 - 6.0e-08"), (0.995, "0.995"), (1.0, "1"),
-                                       (0.9999996, "1 - 4.0e-07")])
+                                       (0.9999996, "1 - 4.0e-07"), (1.0000001, "1 + 1.0e-07")])
 def test_a_pcc_short_of_1_is_never_printed_as_1(tmp_path, pcc, shown):
     md = _report_md(tmp_path, [_row_attempt(pcc_min=pcc)])
     row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
