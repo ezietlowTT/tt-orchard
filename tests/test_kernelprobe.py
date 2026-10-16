@@ -1723,6 +1723,58 @@ def test_gone_means_no_entry_a_zombie_or_another_process_under_the_pid(tmp_path)
     assert kp._gone(str(proc), 502, 1234) is True
 
 
+def _helper_with_marked_grandchild(adir):
+    """A helper child (its own session, NO marker) that starts a grandchild carrying the attempt's ORCHARD_RUN_DIR in
+    the helper's group. The grandchild does not lead a group, so the sweep must reach it by pid."""
+    code = ("import os, subprocess, sys, time\n"
+            f"env = dict(os.environ, ORCHARD_RUN_DIR={str(adir.resolve())!r})\n"
+            "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], env=env)\n"
+            "print(g.pid, flush=True)\n"
+            "time.sleep(60)\n")
+    env = {k: v for k, v in os.environ.items() if k != "ORCHARD_RUN_DIR"}
+    helper = _subprocess.Popen([_sys.executable, "-c", code], env=env, start_new_session=True,
+                               stdout=_subprocess.PIPE, stderr=_subprocess.DEVNULL)
+    grandchild = int(helper.stdout.readline())
+    _wait_for_env(grandchild, str(adir.resolve()))
+    return helper, grandchild
+
+
+def test_a_stray_that_does_not_lead_its_group_is_stopped_by_pid(tmp_path):
+    """M4. The plain kill(pid) path, with real processes: the grandchild is stopped by kill, nothing is group-signalled,
+    and the helper (no marker) keeps running."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    helper, grandchild = _helper_with_marked_grandchild(adir)
+    sent, violations = [], []
+    try:
+        kill, killpg = _guarded_kills({grandchild}, sent, violations)
+        swept = kp.sweep_strays(adir, kill=kill, killpg=killpg)
+        assert sent and all(kind == "kill" and pid == grandchild for kind, pid, _ in sent), sent
+        assert [(r["pid"], r["stopped"]) for r in swept] == [(grandchild, True)]
+        assert helper.poll() is None and violations == []
+    finally:
+        _stop(helper)
+        if _carries(grandchild, adir):
+            os.kill(grandchild, 9)
+
+
+def test_the_guard_records_a_plain_kill_it_does_not_allow(tmp_path):
+    """M4. The guard's kill branch: a grandchild the test does not allow is recorded and never signalled."""
+    adir = tmp_path / "attempt-1"
+    adir.mkdir()
+    helper, grandchild = _helper_with_marked_grandchild(adir)
+    sent, violations = [], []
+    try:
+        kill, killpg = _guarded_kills(set(), sent, violations)
+        kp.sweep_strays(adir, kill=kill, killpg=killpg, grace_s=0.2)
+        assert violations and all(kind == "kill" and pid == grandchild for kind, pid, _ in violations)
+        assert _carries(grandchild, adir)                            # nothing was sent
+    finally:
+        _stop(helper)
+        if _carries(grandchild, adir):
+            os.kill(grandchild, 9)
+
+
 class _BackgroundingStep:
     """Stands in for AgentStep: run() starts a process with the agent's environment that outlives the step, the way a
     shell command that backgrounds a process and exits would, then returns or raises."""
