@@ -651,24 +651,32 @@ def inventory_section(run: Run, redact: Redactor) -> list[str]:
     if inv.get("skipped"):
         lines.append(f"The inventory was skipped: {end(redact(one_line(inv['skipped'])))}")
         return lines
-    lines.append(f"Traced class: {redact(one_line(inv.get('traced_class') or 'not recorded'))}.")
+    traced = inv.get("traced_class")
+    lines.append(f"Traced class: {redact(one_line(traced)) if isinstance(traced, str) and traced else 'not recorded'}.")
     summary = inv.get("summary") if isinstance(inv.get("summary"), dict) else {}
     distinct = summary.get("distinct") if isinstance(summary.get("distinct"), dict) else {}
     if distinct:
         lines.append("Distinct ops by status: "
-                     + ", ".join(f"{redact(k)} {redact(fmt(v))}" for k, v in distinct.items()) + ".")
+                     + ", ".join(f"{redact(str(k))} {redact(fmt(v))}" for k, v in distinct.items()) + ".")
     dump = inv.get("ttnn_dump")
-    if isinstance(dump, dict):
-        lines.append(f"ttnn dump: version {redact(one_line(dump.get('ttnn_version')))}.")
+    version = dump.get("ttnn_version") if isinstance(dump, dict) else None
+    if version:
+        lines.append(f"ttnn dump: version {redact(one_line(version))}.")
     else:
-        lines.append("ttnn dump: none. "
-                     + end(redact(one_line(inv.get("ttnn_dump_note") or "no reason recorded"))))
-    ops = [o for o in inv.get("ops") or [] if isinstance(o, dict) and o.get("status") == "unmapped"]
+        note = inv.get("ttnn_dump_note")
+        note = note if isinstance(note, str) and note else "no reason recorded"
+        lines.append("ttnn dump: none. " + end(redact(one_line(note))))
+    ops_in = inv.get("ops")
+    ops_in = ops_in if isinstance(ops_in, list) else []
+    ops = [o for o in ops_in
+           if isinstance(o, dict) and o.get("status") == "unmapped" and isinstance(o.get("op"), str)]
     ops.sort(key=lambda o: -(o["scaled_count"] if is_number(o.get("scaled_count")) else 0))
     if ops:
         lines += ["", "Unmapped ops, most frequent first (at most 10):", ""]
-        lines += [f"- `{redact(one_line(o.get('op')))}` ({redact(fmt(o.get('scaled_count')))})"
-                  for o in ops[:10]]
+        for o in ops[:10]:
+            count = o.get("scaled_count")
+            shown = redact(fmt(count)) if is_number(count) else "count not recorded"
+            lines.append(f"- `{redact(one_line(o['op']))}` ({shown})")
     lines += ["", "`mapped` is a name match against a recorded ttnn dump. It does not say the op supports "
                   "the shape, dtype or layout the model needs."]
     return lines
