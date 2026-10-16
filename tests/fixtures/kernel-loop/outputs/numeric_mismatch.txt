@@ -1,0 +1,8 @@
+PROGRESS open_device
+PROGRESS set seed0
+PROGRESS set seed0-tail
+PROGRESS set seed1
+PROGRESS set seed1-tail
+PROGRESS set seed2
+PROGRESS set seed2-tail
+

@@ -1,0 +1,54 @@
+{
+  "phase": "sim",
+  "sets": [
+    {
+      "name": "seed0",
+      "seed": 0,
+      "heavy_tail": false,
+      "pcc": 0.005957986693829298,
+      "max_abs_err": 7.759047508239746,
+      "finite": true
+    },
+    {
+      "name": "seed0-tail",
+      "seed": 0,
+      "heavy_tail": true,
+      "pcc": 0.04188667982816696,
+      "max_abs_err": 107.25204467773438,
+      "finite": true
+    },
+    {
+      "name": "seed1",
+      "seed": 1,
+      "heavy_tail": false,
+      "pcc": -0.002127606188878417,
+      "max_abs_err": 7.917789459228516,
+      "finite": true
+    },
+    {
+      "name": "seed1-tail",
+      "seed": 1,
+      "heavy_tail": true,
+      "pcc": 0.19056285917758942,
+      "max_abs_err": 86.25697326660156,
+      "finite": true
+    },
+    {
+      "name": "seed2",
+      "seed": 2,
+      "heavy_tail": false,
+      "pcc": -0.000577753409743309,
+      "max_abs_err": 8.869630813598633,
+      "finite": true
+    },
+    {
+      "name": "seed2-tail",
+      "seed": 2,
+      "heavy_tail": true,
+      "pcc": -0.14506188035011292,
+      "max_abs_err": 119.91730499267578,
+      "finite": true
+    }
+  ],
+  "error": null
+}

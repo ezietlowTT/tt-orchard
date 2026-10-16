@@ -1,0 +1,3 @@
+{"op": "add", "description": "out = a + b, elementwise", "inputs": {"a": [128, 128], "b": [128, 128]}, "output": [128, 128],
+ "dtype": "bfloat16", "reference": "add", "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99, "seeds": [0, 1, 2], "heavy_tail": true,
+ "provisional": true}

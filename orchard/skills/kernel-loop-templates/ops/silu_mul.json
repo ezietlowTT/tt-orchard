@@ -1,0 +1,3 @@
+{"op": "silu_mul", "description": "out = silu(gate) * up, elementwise", "inputs": {"gate": [64, 128], "up": [64, 128]},
+ "output": [64, 128], "dtype": "bfloat16", "reference": "silu_mul", "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99,
+ "seeds": [0, 1, 2], "heavy_tail": true, "provisional": true}

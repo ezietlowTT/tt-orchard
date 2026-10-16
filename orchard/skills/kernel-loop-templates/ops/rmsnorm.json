@@ -1,0 +1,3 @@
+{"op": "rmsnorm", "description": "out = x * rsqrt(mean(x^2, last axis) + 1e-6) * w, with w given at full size",
+ "inputs": {"x": [64, 256], "w": [64, 256]}, "output": [64, 256], "dtype": "bfloat16", "reference": "rmsnorm",
+ "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99, "seeds": [0, 1, 2], "heavy_tail": true, "provisional": true}

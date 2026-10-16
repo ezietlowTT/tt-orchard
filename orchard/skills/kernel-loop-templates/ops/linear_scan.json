@@ -1,0 +1,4 @@
+{"op": "linear_scan", "description": "out[t] = a[t] * out[t-1] + b[t] down axis 0, per column, out[-1] = 0",
+ "inputs": {"a": [64, 128], "b": [64, 128]}, "output": [64, 128], "gen": {"a": "sigmoid"}, "dtype": "bfloat16",
+ "reference": "linear_scan", "pcc_bar_sim": 0.999, "pcc_bar_hw": 0.99, "seeds": [0, 1, 2], "heavy_tail": true,
+ "provisional": true}
