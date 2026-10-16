@@ -1096,3 +1096,23 @@ def test_a_sighup_that_starts_ignored_stays_ignored(tmp_path):
 def test_the_check_docstring_says_what_an_interrupt_does():
     doc = " ".join(CHECK.__doc__.split())
     assert "interrupt" in doc and "no check.json" in doc
+
+
+@pytest.mark.parametrize("sig", [_signal_mod.SIGTERM, _signal_mod.SIGHUP], ids=["SIGTERM", "SIGHUP"])
+def test_an_interrupted_check_exits_with_the_signal_that_stopped_it(tmp_path, sig):
+    """A1. A watcher reading the exit status must see the signal that arrived (-15 for SIGTERM, -1 for SIGHUP), not
+    the SIGINT exit a bare KeyboardInterrupt gives; the simulator and its grandchild are gone, and no check.json."""
+    marker = f"orchard-a1-{os.getpid()}-{time.monotonic_ns()}"
+    proc, marks = None, None
+    try:
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker)
+        proc.send_signal(sig)
+        assert proc.wait(timeout=20) == -sig
+        assert _all_gone(_pids(marks), marker) == []
+        assert not (tmp_path / "attempt" / "check.json").exists()
+    finally:
+        if proc is not None:
+            proc.kill()
+            proc.wait(timeout=5)
+        for p in (_pids(marks) if marks else []):
+            _kill_if_ours(p, marker)

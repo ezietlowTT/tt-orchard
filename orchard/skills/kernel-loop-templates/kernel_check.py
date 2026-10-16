@@ -10,8 +10,9 @@ Defaults come from DIR/check_config.json: {"sim": "<tt-lang-sim>", "timeout_s": 
 kernel_harness.py from the directory THIS file is in, so the harness that judges a kernel is the copy next to the check
 that was run. Exit 0 and `PASS` when the kernel passed; exit 1 and `FAIL: <category>: <first line>` when it did not;
 exit 2 on a usage error. It writes check.json with sha256 values of the files that took part and the bars it applied.
-An interrupt (SIGTERM, or SIGINT or SIGHUP unless they started ignored) stops the simulator and everything it started,
-and ends the run with that signal's exit and no check.json.
+An interrupt (SIGTERM, or SIGINT or SIGHUP unless they started ignored) stops the simulator and everything it started
+and writes no check.json; the process then ends by that same signal, so its exit status names it (-15 for SIGTERM,
+-1 for SIGHUP).
 
 Before the simulator runs, a static gate (`check_kernel_source`) reads kernel.py with `ast` and refuses the shortcuts a
 model is likely to try: importing anything but ttl, ttnn and math (and a short list of names from typing and
@@ -444,8 +445,21 @@ def _die_with_parent_fn(parent: int | None = None):
     return child
 
 
+_ARRIVED: list = []                                   # the signal _raise_interrupt turned into KeyboardInterrupt
+
+
 def _raise_interrupt(signum, frame):
+    _ARRIVED.append(signum)
     raise KeyboardInterrupt(f"signal {signum}")
+
+
+def _exit_by_signal() -> None:
+    """After an interrupt: end this process by the signal that arrived (SIGINT when none was recorded, as for a plain
+    Ctrl-C), with its default action, so the exit status names that signal and not SIGINT."""
+    import signal
+    sig = _ARRIVED[-1] if _ARRIVED else signal.SIGINT
+    signal.signal(sig, signal.SIG_DFL)
+    os.kill(os.getpid(), sig)
 
 
 def run_sim(argv, *, timeout_s, cwd) -> tuple[bool, int | None, str]:
@@ -553,4 +567,8 @@ def _main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        _exit_by_signal()
+        raise
