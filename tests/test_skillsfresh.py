@@ -74,6 +74,8 @@ class FakeSys:
             got = self.remote.get(st["origin"])
             if got is None or isinstance(got, Exception):
                 return 128, "", "fatal: unable to access: Could not resolve host: github.com"
+            if isinstance(got, list):                   # [(sha, ref), ...]: several matching refs, as git prints them
+                return 0, "".join(f"{sha}\t{ref}\n" for sha, ref in got), ""
             return 0, f"{got}\trefs/heads/main\n", ""
         if rest[:2] == ["cat-file", "-e"]:
             return (0, "", "") if rest[2].split("^")[0] in st.get("objects", ()) else (1, "", "")
@@ -603,3 +605,18 @@ def test_a_cache_file_that_cannot_be_decoded_is_ignored(tmp_path, raw):
     path.write_bytes(raw)
     cache = sf.Cache(path)
     assert cache.get("k") is None and cache.data == {}
+
+
+def test_only_the_exact_ref_refs_heads_main_counts_in_the_ls_remote_answer(tmp_path):
+    """Review M2: `git ls-remote origin refs/heads/main` also lists refs that end in /refs/heads/main, sorted by name,
+    so a branch `a/refs/heads/main` comes first."""
+    root, st = skills_repo(tmp_path, head=MAIN)
+    answer = [(OLD, "refs/heads/a/refs/heads/main"), (MAIN, "refs/heads/main")]
+    got = check_skills(tmp_path, FakeSys({root: st}, {SKILLS_URL: answer}), root)
+    assert got.state == sf.CURRENT and got.remote == MAIN
+
+
+def test_an_ls_remote_answer_without_the_exact_ref_is_unknown(tmp_path):
+    root, st = skills_repo(tmp_path, head=OLD)
+    got = check_skills(tmp_path, FakeSys({root: st}, {SKILLS_URL: [(OLD, "refs/heads/x/refs/heads/main")]}), root)
+    assert got.state == sf.UNKNOWN and got.remote is None

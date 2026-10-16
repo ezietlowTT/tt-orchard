@@ -332,6 +332,16 @@ def github_repo(url: str) -> str | None:
     return "/".join(bits)
 
 
+def _ref_sha(ls_remote_output: str, ref: str) -> str | None:
+    """The sha on the line of `git ls-remote` output whose ref is exactly `ref`. The command also lists refs that only
+    end in the pattern (a branch `a/refs/heads/main`), so the first line is not enough."""
+    for line in ls_remote_output.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 2 and parts[1].strip() == ref:
+            return parts[0].strip()
+    return None
+
+
 def _commits(n: int) -> str:
     return f"{n} commit" if n == 1 else f"{n} commits"
 
@@ -396,7 +406,7 @@ def check_clone(path, *, source: str, runner: ReadOnlyRunner, cache: Cache, upda
     if _reused(result, cache, key, reuse_s):
         return result
     rc, out, err = runner(["git", "-C", root, "ls-remote", "origin", "refs/heads/main"], network=True)
-    remote = out.split()[0] if rc == 0 and out.split() else None
+    remote = _ref_sha(out, "refs/heads/main") if rc == 0 else None
     if not remote or not re.fullmatch(r"[0-9a-f]{40}", remote):
         why = (err.strip().splitlines() or ["no answer"])[-1][:200] if rc != 0 else "origin has no main branch"
         return _unknown(result, why, cache, key)
