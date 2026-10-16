@@ -3,14 +3,17 @@
     "MoshiForConditionalGeneration"
   ],
   "failures": [],
+  "higher_order_nodes": {
+    "wrap_with_set_grad_enabled": 2
+  },
   "layers_in_config": 32,
   "layers_traced": 2,
   "model_dir": "<fixture moshi-lm>",
-  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced",
+  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
   "ops": [
     {
-      "count": 20,
-      "count_in_layers": 18,
+      "count": 26,
+      "count_in_layers": 24,
       "modules": [
         "model.layers.0.input_layernorm",
         "model.layers.0.self_attn",
@@ -31,12 +34,27 @@
       }
     },
     {
-      "count": 17,
-      "count_in_layers": 4,
+      "count": 20,
+      "count_in_layers": 16,
+      "modules": [
+        "model",
+        "model.layers.0.input_layernorm",
+        "model.layers.0.post_attention_layernorm",
+        "model.layers.1.input_layernorm",
+        "model.layers.1.post_attention_layernorm"
+      ],
+      "op": "aten._assert_tensor_metadata.default",
+      "sample": null
+    },
+    {
+      "count": 19,
+      "count_in_layers": 6,
       "modules": [
         "model",
         "model.layers.0.self_attn",
-        "model.layers.1.self_attn"
+        "model.layers.1.self_attn",
+        "model.layers.0.self_attn.rotary_emb",
+        "model.layers.1.self_attn.rotary_emb"
       ],
       "op": "aten.unsqueeze.default",
       "sample": {
@@ -70,16 +88,16 @@
       }
     },
     {
-      "count": 13,
-      "count_in_layers": 12,
+      "count": 16,
+      "count_in_layers": 14,
       "modules": [
-        "model.layers.0.self_attn.q_proj.linear",
-        "model.layers.0.self_attn.k_proj.linear",
-        "model.layers.0.self_attn.v_proj.linear",
-        "model.layers.0.self_attn.o_proj.linear",
-        "model.layers.0.mlp.fc1"
+        "model.layers.0.input_layernorm",
+        "model.layers.0.post_attention_layernorm",
+        "model.layers.1.input_layernorm",
+        "model.layers.1.post_attention_layernorm",
+        "model.norm"
       ],
-      "op": "aten.linear.default",
+      "op": "aten.to.dtype",
       "sample": {
         "dtype": "torch.float32",
         "output_shapes": [
@@ -92,29 +110,16 @@
       }
     },
     {
-      "count": 12,
-      "count_in_layers": 8,
+      "count": 13,
+      "count_in_layers": 12,
       "modules": [
-        "model",
-        "model.layers.0.input_layernorm",
-        "model.layers.0.post_attention_layernorm",
-        "model.layers.1.input_layernorm",
-        "model.layers.1.post_attention_layernorm"
+        "model.layers.0.self_attn.q_proj.linear",
+        "model.layers.0.self_attn.k_proj.linear",
+        "model.layers.0.self_attn.v_proj.linear",
+        "model.layers.0.self_attn.o_proj.linear",
+        "model.layers.0.mlp.fc1"
       ],
-      "op": "aten._assert_tensor_metadata.default",
-      "sample": null
-    },
-    {
-      "count": 10,
-      "count_in_layers": 8,
-      "modules": [
-        "model.layers.0.input_layernorm",
-        "model.layers.0.post_attention_layernorm",
-        "model.layers.1.input_layernorm",
-        "model.layers.1.post_attention_layernorm",
-        "model.norm"
-      ],
-      "op": "aten.to.dtype",
+      "op": "aten.linear.default",
       "sample": {
         "dtype": "torch.float32",
         "output_shapes": [
@@ -182,6 +187,28 @@
             1,
             8,
             32,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 6,
+      "count_in_layers": 6,
+      "modules": [
+        "model.layers.0.self_attn",
+        "model.layers.1.self_attn",
+        "model.layers.0.self_attn.rotary_emb",
+        "model.layers.1.self_attn.rotary_emb"
+      ],
+      "op": "aten.cat.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            32,
+            8,
             128
           ]
         ]
@@ -295,45 +322,6 @@
       "count": 4,
       "count_in_layers": 4,
       "modules": [
-        "model.layers.0.self_attn.rotary_emb",
-        "model.layers.1.self_attn.rotary_emb"
-      ],
-      "op": "<built-in function getitem>",
-      "sample": {
-        "dtype": "torch.float32",
-        "output_shapes": [
-          [
-            1,
-            8,
-            128
-          ]
-        ]
-      }
-    },
-    {
-      "count": 4,
-      "count_in_layers": 4,
-      "modules": [
-        "model.layers.0.self_attn",
-        "model.layers.1.self_attn"
-      ],
-      "op": "aten.cat.default",
-      "sample": {
-        "dtype": "torch.float32",
-        "output_shapes": [
-          [
-            1,
-            32,
-            8,
-            128
-          ]
-        ]
-      }
-    },
-    {
-      "count": 4,
-      "count_in_layers": 4,
-      "modules": [
         "model.layers.0.self_attn",
         "model.layers.1.self_attn"
       ],
@@ -403,6 +391,25 @@
             1,
             8,
             32,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "model.layers.0.self_attn.rotary_emb",
+        "model.layers.1.self_attn.rotary_emb"
+      ],
+      "op": "aten.cos.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
             128
           ]
         ]
@@ -487,6 +494,42 @@
     },
     {
       "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "model.layers.0.self_attn.rotary_emb",
+        "model.layers.1.self_attn.rotary_emb"
+      ],
+      "op": "aten.sin.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            128
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
+      "count_in_layers": 2,
+      "modules": [
+        "model.layers.0.self_attn.rotary_emb",
+        "model.layers.1.self_attn.rotary_emb"
+      ],
+      "op": "aten.to.device",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            64
+          ]
+        ]
+      }
+    },
+    {
+      "count": 2,
       "count_in_layers": 0,
       "modules": [
         "model"
@@ -500,30 +543,6 @@
             1,
             8,
             8
-          ]
-        ]
-      }
-    },
-    {
-      "count": 2,
-      "count_in_layers": 2,
-      "modules": [
-        "model.layers.0.self_attn.rotary_emb",
-        "model.layers.1.self_attn.rotary_emb"
-      ],
-      "op": "wrap_with_set_grad_enabled",
-      "sample": {
-        "dtype": "torch.float32",
-        "output_shapes": [
-          [
-            1,
-            8,
-            128
-          ],
-          [
-            1,
-            8,
-            128
           ]
         ]
       }
@@ -702,6 +721,9 @@
       }
     }
   ],
+  "python_nodes": {
+    "<built-in function getitem>": 4
+  },
   "schema": 1,
   "seq_len": 8,
   "torch": "2.14.1+cpu",

@@ -348,3 +348,69 @@ def test_template_exit_3_still_builds_an_inventory_and_the_markdown_shows_the_fa
                           dump_dir=tmp_path / "dumps", say=lambda s: None)
     md = (tmp_path / "o" / "ops-inventory.md").read_text()
     assert rc == 0 and "Trace failures:" in md and "export: kaboom" in md
+
+
+# ---- Task 4b: python-level nodes and higher-order bodies are carried through ------------------------------------------
+
+def test_python_nodes_and_higher_order_nodes_are_carried_into_traced_and_the_markdown():
+    r = raw()
+    r["python_nodes"] = {"<built-in function getitem>": 7, "<built-in function add>": 1}
+    r["higher_order_nodes"] = {"wrap_with_set_grad_enabled": 2}
+    inv = oi.build(r, mapping=MAPPING, decomps=DECOMPS, dump=DUMP, installed_ttnn="0.65.1")
+    assert inv["traced"]["python_nodes"] == {"<built-in function getitem>": 7, "<built-in function add>": 1}
+    assert inv["traced"]["higher_order_nodes"] == {"wrap_with_set_grad_enabled": 2}
+    md = oi.render_md(inv)
+    assert "8 python-level nodes (getitem and similar) are not ops and are not counted" in md
+    assert "bodies of 2 higher-order operations were traversed" in md
+
+
+def test_an_older_raw_trace_without_the_new_keys_still_builds_and_prints_neither_line():
+    inv = oi.build(raw(), mapping=MAPPING, decomps=DECOMPS, dump=DUMP, installed_ttnn="0.65.1")
+    assert inv["traced"].get("python_nodes") in (None, {}) and inv["traced"].get("higher_order_nodes") in (None, {})
+    md = oi.render_md(inv)
+    assert "python-level nodes" not in md and "higher-order operations were traversed" not in md
+
+
+# ---- Task 4b: the committed dump of ttnn 0.65.1rc17.dev6200 ------------------------------------------------------------
+
+REAL_DUMP_VERSION = "0.65.1rc17.dev6200"
+REAL_DUMP = oi.load_dump(REAL_DUMP_VERSION)
+
+# Taken from the dump of ttnn 0.65.1rc17.dev6200 on 2026-10-16 with the fixtures regenerated the same day (bodies of
+# higher-order operations traversed, python-level nodes left out of `ops`, rsub, conv1d, cos and sin mapped). They must be
+# regenerated whenever the dump, a mapping table or a fixture changes.
+REAL_DUMP_COUNTS = {
+    "qwen3-tiny": {"mapped": 26, "composable": 0, "unmapped": 6, "ignored": 3},
+    "rwkv": {"mapped": 17, "composable": 1, "unmapped": 2, "ignored": 2},
+    "mamba2": {"mapped": 30, "composable": 1, "unmapped": 4, "ignored": 3},
+    "moshi-lm": {"mapped": 26, "composable": 1, "unmapped": 7, "ignored": 3},
+}
+
+
+@pytest.mark.skipif(REAL_DUMP is None, reason=(
+    f"SKIPPED: orchard/data/ttnn_ops-{REAL_DUMP_VERSION}.json is absent, so the fixtures were not checked against a "
+    "real ttnn dump"))
+@pytest.mark.parametrize("name", sorted(REAL_DUMP_COUNTS))
+def test_fixtures_against_the_real_dump_have_no_python_nodes_or_wrappers_and_pinned_counts(name):
+    inv = oi.build(json.loads((FIXTURES / f"raw-{name}.json").read_text()),
+                   mapping=oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json"),
+                   decomps=oi.load_table(oi.DATA_DIR / "decompositions.json"), dump=REAL_DUMP,
+                   installed_ttnn=REAL_DUMP_VERSION, ignored=oi.load_ignored(oi.DATA_DIR / "ignored_ops.json"))
+    ops = [r["op"] for r in inv["ops"]]
+    assert "<built-in function getitem>" not in ops
+    assert not any("wrap_with_set_grad_enabled" in o or o.startswith("<built-in") for o in ops), ops
+    assert not any(o.startswith("higher_order") for o in ops)
+    d = inv["summary"]["distinct"]
+    assert {k: d[k] for k in REAL_DUMP_COUNTS[name]} == REAL_DUMP_COUNTS[name]
+    assert d["unchecked"] == 0
+
+
+def test_rsub_scalar_and_conv1d_are_mapped_to_names_in_the_real_dump():
+    mapping = oi.load_table(oi.DATA_DIR / "aten_to_ttnn.json")
+    assert mapping["aten.rsub.Scalar"] == {"ttnn": "rsub"}
+    assert mapping["aten.conv1d.default"] == {"ttnn": "conv1d"}
+    # cos and sin appear in the rotary-embedding bodies once higher-order bodies are traversed; both are plain
+    # elementwise functions with the same meaning in ttnn.
+    assert mapping["aten.cos.default"] == {"ttnn": "cos"} and mapping["aten.sin.default"] == {"ttnn": "sin"}
+    if REAL_DUMP is not None:
+        assert {"rsub", "conv1d", "cos", "sin"} <= set(REAL_DUMP["names"])

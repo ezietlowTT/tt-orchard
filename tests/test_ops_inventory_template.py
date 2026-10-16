@@ -113,3 +113,58 @@ def test_each_recorded_fixture_has_the_schema_keys(name):
     assert raw["model_dir"] == f"<fixture {name}>"
     for op in raw.get("ops", []):
         assert {"op", "count", "count_in_layers", "sample", "modules"} <= set(op)
+
+
+# ---- Task 4b: higher-order bodies and python-level nodes -------------------------------------------------------------
+
+@needs_stack
+def test_ops_inside_a_higher_order_body_are_counted_and_the_wrapper_is_not_an_op(tmp_path):
+    """torch.export puts the ops under `wrap_with_set_grad_enabled` in a sub-GraphModule that `ep.graph.nodes` never
+    enters. The template must walk every GraphModule, count the body ops, and leave the wrapper out of `ops`."""
+    done, raw = run_template(tmp_path, QWEN3_TINY, "--layers", "2")
+    assert done.returncode == 0, done.stderr
+    names = {o["op"] for o in raw["ops"]}
+    assert not any("wrap_with_set_grad_enabled" in n for n in names), names
+    assert raw["higher_order_nodes"].get("wrap_with_set_grad_enabled", 0) >= 1
+    assert "bodies" in raw["note"].lower(), "the note must say that bodies were traversed"
+    # The body of the qwen3 wrapper holds the whole decoder stack: its matmul-family ops must now be counted.
+    # Before the change the top-level graph alone had a handful of ops; the layers live in the body.
+    # The rotary embedding (cos, sin) runs inside the wrapper's body in this transformers version, so these two ops
+    # exist in the trace only if the body was entered.
+    assert {"aten.cos.default", "aten.sin.default"} <= names, sorted(names)
+
+
+@needs_stack
+def test_python_level_nodes_are_not_ops_but_are_recorded(tmp_path):
+    """`operator.getitem` is tuple indexing in the exported graph. It is not an operation and must not be in `ops`,
+    and it must not vanish: it is counted under `python_nodes`."""
+    done, raw = run_template(tmp_path, QWEN3_TINY, "--layers", "2")
+    assert done.returncode == 0, done.stderr
+    assert not any(o["op"].startswith("<built-in") for o in raw["ops"])
+    assert raw["python_nodes"].get("<built-in function getitem>", 0) >= 1
+    assert all(o["op"].startswith("aten.") or "." in o["op"] for o in raw["ops"])
+
+
+def test_aggregate_keeps_hop_wrappers_and_python_nodes_out_of_ops():
+    """Unit test on `aggregate` with fake nodes and a real HigherOrderOperator. Needs torch, no export."""
+    import importlib.util
+    import types
+    if PY is None:
+        pytest.skip("SKIPPED: no torch in this interpreter")
+    code = r'''
+import importlib.util, json, operator, sys, types
+import torch
+spec = importlib.util.spec_from_file_location("t", sys.argv[1]); m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+def node(target, op="call_function"):
+    return types.SimpleNamespace(op=op, target=target, meta={})
+hop = torch.ops.higher_order.wrap_with_set_grad_enabled
+nodes = [node(torch.ops.aten.add.Tensor), node(operator.getitem), node(operator.getitem), node(hop), node(None, "placeholder")]
+ops, py, hops = m.aggregate(nodes)
+print(json.dumps({"ops": [o["op"] for o in ops], "py": py, "hops": hops}))
+'''
+    done = subprocess.run([PY, "-c", code, str(TEMPLATE)], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr
+    got = json.loads(done.stdout.strip().splitlines()[-1])
+    assert got["ops"] == ["aten.add.Tensor"]
+    assert got["py"] == {"<built-in function getitem>": 2}
+    assert got["hops"] == {"wrap_with_set_grad_enabled": 1}

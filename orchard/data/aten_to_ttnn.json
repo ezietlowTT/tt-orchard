@@ -38,5 +38,9 @@
   "aten.eq.Tensor": {"ttnn": "eq"},
   "aten.le.Tensor": {"ttnn": "le"},
   "aten.ne.Scalar": {"ttnn": "ne"},
+  "aten.rsub.Scalar": {"ttnn": "rsub"},
+  "aten.conv1d.default": {"ttnn": "conv1d"},
+  "aten.cos.default": {"ttnn": "cos"},
+  "aten.sin.default": {"ttnn": "sin"},
   "aten.scaled_dot_product_attention.default": {"ttnn": "transformer.scaled_dot_product_attention"}
 }

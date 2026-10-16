@@ -34,7 +34,8 @@ LAYER_KEYS = ("num_hidden_layers", "n_layer", "num_layers")
 LAYER_RE = re.compile(r"(?:^|\.)(?:layers|blocks|h)\.\d+(?:\.|$)")
 MAX_MODULES = 5
 NOTE = ("prefill graph from torch.export(strict=False, use_cache=False) on the meta device; "
-        "cache and state updates of decoding are not traced")
+        "cache and state updates of decoding are not traced. Bodies of higher-order operations (for example "
+        "wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op")
 
 
 def write(path, data) -> None:
@@ -75,10 +76,39 @@ def module_path(node) -> str:
     return last[0] if isinstance(last, (tuple, list)) and last else str(last)
 
 
-def aggregate(nodes) -> list[dict]:
+def graph_modules(ep):
+    """Every GraphModule reachable from the exported program's top graph, once each. torch.export puts the ops that run
+    inside a higher-order operation (wrap_with_set_grad_enabled and similar) in a sub-GraphModule that
+    `ep.graph.nodes` does not enter."""
+    import torch
+    seen, found = set(), []
+    for mod in ep.graph_module.modules():
+        if isinstance(mod, torch.fx.GraphModule) and id(mod) not in seen:
+            seen.add(id(mod))
+            found.append(mod)
+    return found
+
+
+def aggregate(nodes):
+    """(ops, python_nodes, higher_order_nodes) for call_function nodes.
+
+    ops: one record per ATen op overload. python_nodes: {str(target): count} for call_function nodes whose target is
+    not an OpOverload (operator.getitem is tuple indexing in the graph and is no operation). higher_order_nodes:
+    {name: count} for HigherOrderOperator wrappers; each owns one body, and the body's ops are counted by the caller
+    walking every GraphModule. Neither of the last two appears in `ops`."""
+    import torch
     ops: dict[str, dict] = {}
+    python_nodes: dict[str, int] = {}
+    hops: dict[str, int] = {}
     for node in nodes:
         if node.op != "call_function":
+            continue
+        if isinstance(node.target, torch._ops.HigherOrderOperator):
+            name = node.target.name()
+            hops[name] = hops.get(name, 0) + 1
+            continue
+        if not isinstance(node.target, torch._ops.OpOverload):
+            python_nodes[str(node.target)] = python_nodes.get(str(node.target), 0) + 1
             continue
         rec = ops.setdefault(str(node.target), {"op": str(node.target), "count": 0, "count_in_layers": 0,
                                                 "sample": None, "modules": []})
@@ -90,7 +120,7 @@ def aggregate(nodes) -> list[dict]:
             rec["sample"] = sample_of(node.meta.get("val"))
         if path and path not in rec["modules"] and len(rec["modules"]) < MAX_MODULES:
             rec["modules"].append(path)
-    return sorted(ops.values(), key=lambda r: (-r["count"], r["op"]))
+    return sorted(ops.values(), key=lambda r: (-r["count"], r["op"])), python_nodes, hops
 
 
 def main(argv=None) -> int:
@@ -139,7 +169,9 @@ def main(argv=None) -> int:
     except Exception as exc:
         write(a.out, {**base, "ops": [], "failures": [{"stage": "export", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}]})
         return 3
-    write(a.out, {**base, "ops": aggregate(ep.graph.nodes)})
+    nodes = [n for gm in graph_modules(ep) for n in gm.graph.nodes]
+    ops, python_nodes, hops = aggregate(nodes)
+    write(a.out, {**base, "ops": ops, "python_nodes": python_nodes, "higher_order_nodes": hops})
     return 0
 
 

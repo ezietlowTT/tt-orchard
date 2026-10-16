@@ -3,10 +3,11 @@
     "Mamba2ForCausalLM"
   ],
   "failures": [],
+  "higher_order_nodes": {},
   "layers_in_config": 64,
   "layers_traced": 2,
   "model_dir": "<fixture mamba2>",
-  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced",
+  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
   "ops": [
     {
       "count": 40,
@@ -102,25 +103,6 @@
             1,
             8,
             1
-          ]
-        ]
-      }
-    },
-    {
-      "count": 12,
-      "count_in_layers": 12,
-      "modules": [
-        "backbone.layers.0.mixer",
-        "backbone.layers.1.mixer"
-      ],
-      "op": "<built-in function getitem>",
-      "sample": {
-        "dtype": "torch.float32",
-        "output_shapes": [
-          [
-            1,
-            8,
-            8192
           ]
         ]
       }
@@ -790,6 +772,9 @@
       }
     }
   ],
+  "python_nodes": {
+    "<built-in function getitem>": 12
+  },
   "schema": 1,
   "seq_len": 8,
   "torch": "2.14.1+cpu",

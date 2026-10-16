@@ -112,7 +112,10 @@ def build(raw, *, mapping, decomps, dump, installed_ttnn=None, against=None, ign
     inv = {"schema": SCHEMA, "model_dir": raw.get("model_dir"), "architectures": raw.get("architectures", []),
            "traced_class": raw.get("traced_class"), "torch": raw.get("torch"), "transformers": raw.get("transformers"),
            "traced": {"graph": "prefill", "seq_len": raw.get("seq_len"), "layers_in_config": raw.get("layers_in_config"),
-                      "layers_traced": raw.get("layers_traced"), "note": raw.get("note")},
+                      "layers_traced": raw.get("layers_traced"), "note": raw.get("note"),
+                      # optional in a raw trace (older traces lack them); python-level graph nodes are not ops
+                      "python_nodes": raw.get("python_nodes") or {},
+                      "higher_order_nodes": raw.get("higher_order_nodes") or {}},
            "failures": raw.get("failures", []), "label": LABEL,
            "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
     if "skipped" in raw:
@@ -171,6 +174,12 @@ def render_md(inv) -> str:
     lines += ["", "Ignored ops are metadata only (views of a tensor that is already there) and need no ttnn op.",
               "", "| status | distinct ops |", "| --- | --- |"]
     lines += [f"| {s} | {n} |" for s, n in inv["summary"]["distinct"].items()]
+    py_nodes = sum((inv["traced"].get("python_nodes") or {}).values())
+    if py_nodes:
+        lines += ["", f"{py_nodes} python-level nodes (getitem and similar) are not ops and are not counted."]
+    hop_nodes = sum((inv["traced"].get("higher_order_nodes") or {}).values())
+    if hop_nodes:
+        lines += ["", f"The bodies of {hop_nodes} higher-order operations were traversed; their ops are counted."]
     if inv["failures"]:
         lines += ["", "Trace failures:"] + [f"- {f.get('stage')}: {f.get('error')}" for f in inv["failures"]]
     lines += ["", "| op | count | scaled | status | ttnn |", "| --- | --- | --- | --- | --- |"]

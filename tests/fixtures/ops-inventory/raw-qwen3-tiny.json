@@ -3,13 +3,16 @@
     "Qwen3ForCausalLM"
   ],
   "failures": [],
+  "higher_order_nodes": {
+    "wrap_with_set_grad_enabled": 1
+  },
   "layers_in_config": 4,
   "layers_traced": 2,
   "model_dir": "<fixture qwen3-tiny>",
-  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced",
+  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
   "ops": [
     {
-      "count": 28,
+      "count": 31,
       "count_in_layers": 26,
       "modules": [
         "model.layers.0.input_layernorm",
@@ -31,7 +34,7 @@
       }
     },
     {
-      "count": 20,
+      "count": 24,
       "count_in_layers": 16,
       "modules": [
         "model",
@@ -42,6 +45,28 @@
       ],
       "op": "aten._assert_tensor_metadata.default",
       "sample": null
+    },
+    {
+      "count": 21,
+      "count_in_layers": 16,
+      "modules": [
+        "model.layers.0.input_layernorm",
+        "model.layers.0.self_attn.q_norm",
+        "model.layers.0.self_attn.k_norm",
+        "model.layers.0.post_attention_layernorm",
+        "model.layers.1.input_layernorm"
+      ],
+      "op": "aten.to.dtype",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            32
+          ]
+        ]
+      }
     },
     {
       "count": 20,
@@ -65,33 +90,12 @@
     },
     {
       "count": 18,
-      "count_in_layers": 16,
-      "modules": [
-        "model.layers.0.input_layernorm",
-        "model.layers.0.self_attn.q_norm",
-        "model.layers.0.self_attn.k_norm",
-        "model.layers.0.post_attention_layernorm",
-        "model.layers.1.input_layernorm"
-      ],
-      "op": "aten.to.dtype",
-      "sample": {
-        "dtype": "torch.float32",
-        "output_shapes": [
-          [
-            1,
-            8,
-            32
-          ]
-        ]
-      }
-    },
-    {
-      "count": 17,
       "count_in_layers": 4,
       "modules": [
         "model",
         "model.layers.0.self_attn",
-        "model.layers.1.self_attn"
+        "model.layers.1.self_attn",
+        "model.rotary_emb"
       ],
       "op": "aten.unsqueeze.default",
       "sample": {
@@ -268,11 +272,12 @@
       }
     },
     {
-      "count": 4,
+      "count": 5,
       "count_in_layers": 4,
       "modules": [
         "model.layers.0.self_attn",
-        "model.layers.1.self_attn"
+        "model.layers.1.self_attn",
+        "model.rotary_emb"
       ],
       "op": "aten.cat.default",
       "sample": {
@@ -303,24 +308,6 @@
             2,
             8,
             8
-          ]
-        ]
-      }
-    },
-    {
-      "count": 2,
-      "count_in_layers": 0,
-      "modules": [
-        "model.rotary_emb"
-      ],
-      "op": "<built-in function getitem>",
-      "sample": {
-        "dtype": "torch.float32",
-        "output_shapes": [
-          [
-            1,
-            8,
-            16
           ]
         ]
       }
@@ -480,6 +467,24 @@
       "count": 1,
       "count_in_layers": 0,
       "modules": [
+        "model.rotary_emb"
+      ],
+      "op": "aten.cos.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
         "model"
       ],
       "op": "aten.cumsum.default",
@@ -620,6 +625,24 @@
       "count": 1,
       "count_in_layers": 0,
       "modules": [
+        "model.rotary_emb"
+      ],
+      "op": "aten.sin.default",
+      "sample": {
+        "dtype": "torch.float32",
+        "output_shapes": [
+          [
+            1,
+            8,
+            16
+          ]
+        ]
+      }
+    },
+    {
+      "count": 1,
+      "count_in_layers": 0,
+      "modules": [
         "model"
       ],
       "op": "aten.sub.Tensor",
@@ -639,24 +662,20 @@
       "modules": [
         "model.rotary_emb"
       ],
-      "op": "wrap_with_set_grad_enabled",
+      "op": "aten.to.device",
       "sample": {
         "dtype": "torch.float32",
         "output_shapes": [
           [
-            1,
-            8,
-            16
-          ],
-          [
-            1,
-            8,
-            16
+            8
           ]
         ]
       }
     }
   ],
+  "python_nodes": {
+    "<built-in function getitem>": 2
+  },
   "schema": 1,
   "seq_len": 8,
   "torch": "2.14.1+cpu",

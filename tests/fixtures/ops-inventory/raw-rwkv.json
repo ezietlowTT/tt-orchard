@@ -3,10 +3,13 @@
     "RwkvForCausalLM"
   ],
   "failures": [],
+  "higher_order_nodes": {
+    "wrap_with_set_grad_enabled": 1
+  },
   "layers_in_config": 32,
   "layers_traced": 2,
   "model_dir": "<fixture rwkv>",
-  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced",
+  "note": "prefill graph from torch.export(strict=False, use_cache=False) on the meta device; cache and state updates of decoding are not traced. Bodies of higher-order operations (for example wrap_with_set_grad_enabled) were traversed, so the ops inside them are counted; the wrapper itself is not an op",
   "ops": [
     {
       "count": 142,
@@ -276,7 +279,7 @@
       "modules": [
         "rwkv"
       ],
-      "op": "<built-in function getitem>",
+      "op": "aten.div_.Tensor",
       "sample": {
         "dtype": "torch.float32",
         "output_shapes": [
@@ -417,37 +420,11 @@
           ]
         ]
       }
-    },
-    {
-      "count": 1,
-      "count_in_layers": 0,
-      "modules": [
-        "rwkv"
-      ],
-      "op": "wrap_with_set_grad_enabled",
-      "sample": {
-        "dtype": "torch.float32",
-        "output_shapes": [
-          [
-            4096,
-            4096
-          ],
-          [
-            4096,
-            16384
-          ],
-          [
-            4096,
-            4096
-          ],
-          [
-            4096,
-            16384
-          ]
-        ]
-      }
     }
   ],
+  "python_nodes": {
+    "<built-in function getitem>": 4
+  },
   "schema": 1,
   "seq_len": 8,
   "torch": "2.14.1+cpu",
