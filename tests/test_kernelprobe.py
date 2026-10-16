@@ -2022,10 +2022,12 @@ def test_a_lock_left_by_a_sigkilled_probe_is_taken_over_at_once(tmp_path, fake_k
 
 
 def test_two_probes_racing_for_one_directory_never_both_get_it(tmp_path):
-    """Twenty rounds. Each round starts with a lock file a dead probe left, and two children (this test's own) wait
-    on a barrier file and then take the lock at the same moment. Exactly one may get it."""
+    """Twenty rounds. Each round starts with a lock file a dead probe left, and two children (this test's own) each
+    write a ready file once imported, then wait on a barrier file that the parent writes only when both are ready, and
+    take the lock at the same moment. Exactly one may get it."""
     code = ("import os, sys, time\nfrom pathlib import Path\nfrom orchard import kernelprobe as kp\n"
-            "out, barrier = Path(sys.argv[1]), Path(sys.argv[2])\n"
+            "out, barrier, ready = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])\n"
+            "ready.write_text('ready')\n"
             "while not barrier.exists():\n    time.sleep(0.0005)\n"
             "try:\n    lock = kp.acquire_lock(out)\n    print('got', flush=True)\n    time.sleep(0.3)\n"
             "    kp.release_lock(lock)\nexcept kp._Refused:\n    print('refused', flush=True)\n")
@@ -2036,14 +2038,19 @@ def test_two_probes_racing_for_one_directory_never_both_get_it(tmp_path):
         out_dir.mkdir()
         (out_dir / kp.LOCK_NAME).write_text(json.dumps({"pid": dead.pid, "boot_id": "old", "start_time": 1}))
         barrier = tmp_path / f"go{rnd}"
-        kids = [_subprocess.Popen([_sys.executable, "-c", code, str(out_dir), str(barrier)], cwd=REPO_ROOT,
-                                  stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
-                                  env=dict(os.environ, PYTHONPATH=REPO_ROOT)) for _ in range(2)]
+        ready = [tmp_path / f"ready{rnd}-{i}" for i in range(2)]
+        kids = [_subprocess.Popen([_sys.executable, "-c", code, str(out_dir), str(barrier), str(ready[i])],
+                                  cwd=REPO_ROOT, stdout=_subprocess.PIPE, stderr=_subprocess.PIPE,
+                                  env=dict(os.environ, PYTHONPATH=REPO_ROOT)) for i in range(2)]
         try:
-            _time.sleep(0.3)
+            end = _time.monotonic() + 60                            # a bounded wait for both children to be ready
+            while _time.monotonic() < end and not all(r.exists() for r in ready):
+                _time.sleep(0.005)
+            assert all(r.exists() for r in ready), f"round {rnd}: a child never became ready"
             barrier.write_text("go")
-            results = sorted(k.communicate(timeout=30)[0].decode().strip() for k in kids)
-            assert results == ["got", "refused"], (rnd, results, [k.stderr for k in kids])
+            outs = [k.communicate(timeout=30) for k in kids]
+            results = sorted(o.decode().strip() for o, _ in outs)
+            assert results == ["got", "refused"], (rnd, results, [e.decode(errors="replace") for _, e in outs])
         finally:
             for k in kids:
                 _end(k)
