@@ -143,6 +143,9 @@ def main(argv=None) -> int:
     if "auto_map" in raw_cfg:                                   # remote code: never imported
         write(a.out, {**base, "skipped": "needs remote code: config.json has auto_map"})
         return 0
+    if not isinstance(base["architectures"], list):
+        write(a.out, {**base, "skipped": f"architectures in config.json is not a list: {base['architectures']!r:.200}"})
+        return 0
     try:
         import torch
         import transformers
@@ -166,7 +169,13 @@ def main(argv=None) -> int:
         return 0
     # config.json comes from the Hub, so the name it gives must not choose which public callable of transformers
     # runs (a function such as `pipeline`, or a class such as AutoTokenizer). Only a model class is built.
-    if not (isinstance(cls, type) and issubclass(cls, transformers.PreTrainedModel)):
+    try:
+        model_base = transformers.PreTrainedModel
+    except Exception as exc:
+        write(a.out, {**base, "skipped": f"reading transformers.PreTrainedModel failed: "
+                                         f"{type(exc).__name__}: {str(exc)[:300]}"})
+        return 0
+    if not (isinstance(cls, type) and isinstance(model_base, type) and issubclass(cls, model_base)):
         write(a.out, {**base, "skipped": f"{name!r} is not a transformers model class (a subclass of PreTrainedModel); "
                                          "nothing was built"})
         return 0

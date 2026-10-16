@@ -238,3 +238,35 @@ def test_a_class_lookup_that_raises_or_a_name_that_is_not_a_string_is_skipped(tm
     assert done.returncode == 0, done.stderr
     raw = json.loads(out.read_text())
     assert words in raw["skipped"] and "ops" not in raw, raw["skipped"]
+
+
+def _run_with_fake_stack(tmp_path, config, init=None):
+    d = tmp_path / "model"
+    d.mkdir(exist_ok=True)
+    (d / "config.json").write_text(json.dumps(config))
+    root = _fake_stack(tmp_path)
+    if init is not None:
+        (root / "transformers" / "__init__.py").write_text(init)
+    out = tmp_path / "raw.json"
+    done = subprocess.run([sys.executable, str(TEMPLATE), "--model-dir", str(d), "--out", str(out)],
+                          capture_output=True, text=True, timeout=60, env=dict(os.environ, PYTHONPATH=str(root)))
+    return done, (json.loads(out.read_text()) if out.exists() else None)
+
+
+@pytest.mark.parametrize("archs", [5, {"a": 1}, "Qwen3ForCausalLM"], ids=["int", "dict", "string"])
+def test_architectures_that_is_not_a_list_is_skipped(tmp_path, archs):
+    """M5. `architectures` must be a list; anything else ends in the skipped form, exit 0, with no traceback."""
+    done, raw = _run_with_fake_stack(tmp_path, {**QWEN3_TINY, "architectures": archs})
+    assert done.returncode == 0 and "Traceback" not in done.stderr, done.stderr
+    assert "architectures" in raw["skipped"] and "not a list" in raw["skipped"]
+
+
+def test_a_failure_to_read_pretrainedmodel_is_skipped(tmp_path):
+    """M5. The class lookup succeeds but reading transformers.PreTrainedModel raises (the lazy module again)."""
+    init = ("__version__ = '0.0-fake'\n"
+            "class GoodForCausalLM:\n    pass\n"
+            "def __getattr__(name):\n"
+            "    raise RuntimeError(f'Failed to import {name}')\n")
+    done, raw = _run_with_fake_stack(tmp_path, {**QWEN3_TINY, "architectures": ["GoodForCausalLM"]}, init=init)
+    assert done.returncode == 0 and "Traceback" not in done.stderr, done.stderr
+    assert "RuntimeError" in raw["skipped"] and "PreTrainedModel" in raw["skipped"]
