@@ -1266,9 +1266,11 @@ output now run the child under `RLIMIT_FSIZE` (16 MiB) and write a bounded amoun
 ## 2026-10-16: kernel probe sampling (branch `ka-final-fixes`, round 3 of the fix wave)
 Prompt (operator, through the controller): "as much as we can make determinism happen when it is useful, we should do it. but we
 should also make it easy to adjust temperature so wild, zany or ingenious results can be found too".
-- Live finding at the code before this change: every request sent `temperature: 0`, so the server decoded greedily and attempts
-  at one prompt could be the same sample. `add` gave 1 distinct kernel in 3 attempts, `linear_scan` 1 in 5 (identical: 9 turns
-  and 198 s each), `silu_mul` 5 in 5 (the server's numerics diverged). The report's "independent draws" sentence was wrong.
+- Live finding at the code before this change: every request sent `temperature: 0` (greedy decoding asked for), and attempts
+  at one prompt were often the same sample. `add` gave 1 distinct kernel in 3 attempts, `linear_scan` 1 in 5 (identical: 9 turns
+  and 198 s each), `rmsnorm` 3 in 5, and `silu_mul` 5 different kernels in 5 attempts, 26 to 37 turns each; why `silu_mul`
+  diverged was not measured. The report's "independent draws" sentence was wrong, and so was calling greedy attempts
+  repeatable: repeats are common at temperature 0 and not guaranteed.
 - `AgentStep` takes temperature, top_p and seed; its default request is byte for byte the old one. `kernel-probe` takes
   `--temperature`, `--temperatures`, `--top-p` and `--seed`; greedy stays the default. No seed at temperature 0; above it,
   attempt k sends base + k, and a base derived from the probe id is recorded so a run can be repeated with `--seed` (if the
