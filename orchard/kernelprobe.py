@@ -824,6 +824,23 @@ def _cell(value) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")[:160]
 
 
+def _pcc_cell(value) -> str:
+    """A PCC cell. When six significant digits would round a value short of 1 up to `1`, the distance from 1 is printed
+    (`1 - 6.0e-08`), so the table never shows a perfect PCC for an imperfect one."""
+    if isinstance(value, float) and value != 1.0 and f"{value:.6g}" == "1":
+        return f"1 - {1.0 - value:.1e}"
+    return _cell(value)
+
+
+def _status_cell(a: dict) -> str:
+    """How the agent step ended. A step that did not end `done` also gets the first line of the reason."""
+    status = a.get("status")
+    detail = str(a.get("status_detail") or "").strip().splitlines()
+    if status and status != "done" and detail:
+        return _cell(f"{status}: {detail[0]}")
+    return _cell(status)
+
+
 def _agent_cell(a: dict) -> str:
     """The agent column: whether its own check.json was untrusted, and how many of its processes the sweep stopped."""
     parts = ["untrusted"] if a.get("agent_check_untrusted") else []
@@ -859,6 +876,12 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
              "Attempts are independent draws from a model server that may not accept a seed. The report gives counts "
              "and no rates. The inputs are synthetic: seeded random values plus a heavy-tailed set with a few scaled "
              "outliers. A kernel that passes them can still fail on real activations.", "",
+             "The simulator promotes bf16 to f32 (tt-lang-sim's default) and the references compute in f32, so on a "
+             "simple op a correct kernel shows a max_abs_err of 0.0 and a PCC of 1.0. Rounding is seen only on "
+             "hardware.", "",
+             *(["`add` is a calibration op: its working kernel is upstream's eltwise_add.py, the reference example "
+                "the agent reads. A pass of `add` shows the loop works; it is not evidence that the coder can write a "
+                "kernel.", ""] if "add" in ops else []),
              *([header["budget_note"], ""] if header.get("budget_note") else []),
              *([f"{header['ignored_records']} unrelated or unreadable records ignored under {VERDICT_DIR}.", ""]
                if header.get("ignored_records") else []),
@@ -887,17 +910,17 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
                   "```", *[str(x) for x in hw.get("smoke_tail") or []], "```"]
     for op, rows in by_op.items():
         lines += ["", f"## {op}", "",
-                  "| attempt | simulator | hardware | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
+                  "| attempt | simulator | hardware | status | PCC min (sim) | PCC min (hw) | turns | wall s | category | "
                   "first line | agent check |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |"]
         for a in sorted(rows, key=lambda a: a["attempt"]):
             h = a.get("hw") if isinstance(a.get("hw"), dict) else None
             category = a.get("category") or (h or {}).get("category")
             first_line = a.get("first_line") if a.get("category") else (h or {}).get("first_line")
             lines.append("| " + " | ".join([
                 _cell(a["attempt"]), "yes" if a.get("passed_sim") else "no",
-                "-" if h is None else ("yes" if h.get("passed") else "no"),
-                _cell(a.get("pcc_min")), _cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
+                "-" if h is None else ("yes" if h.get("passed") else "no"), _status_cell(a),
+                _pcc_cell(a.get("pcc_min")), _pcc_cell((h or {}).get("pcc_min")), _cell(a.get("turns")),
                 _cell(a.get("agent_wall_s")), _cell(category), _cell(first_line), _agent_cell(a)]) + " |")
         f = first[op]
         lines.append("")

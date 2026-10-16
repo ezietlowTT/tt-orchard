@@ -1605,3 +1605,56 @@ def test_a_crashed_agent_step_still_has_its_strays_stopped(tmp_path, fake_kenv, 
     finally:
         _stop(*_BackgroundingStep.started)
         _BackgroundingStep.raise_after = False
+
+
+# ---- the report says what a row means (I6) ------------------------------------------------------------------------
+
+
+def _row_attempt(**kw):
+    a = {"op": "silu_mul", "attempt": 1, "status": "done", "status_detail": "", "turns": 12, "agent_wall_s": 300.0,
+         "passed_sim": True, "category": None, "first_line": "", "pcc_min": 0.9999, "hw": None,
+         "agent_check_untrusted": False, "swept": []}
+    a.update(kw)
+    return a
+
+
+def _report_md(tmp_path, attempts, ops=("silu_mul",)):
+    kp.write_report(tmp_path, attempts, {"probe_id": "t", "bars": {}, "hw": None, "ops": list(ops)})
+    return (tmp_path / "kernel-probe-report.md").read_text()
+
+
+def test_the_table_has_a_status_column_with_the_reason_for_a_step_that_did_not_end_done(tmp_path):
+    md = _report_md(tmp_path, [
+        _row_attempt(status="escalate", status_detail="the watchdog saw the agent loop again after a nudge\nmore"),
+        _row_attempt(attempt=2)])
+    header = next(l for l in md.splitlines() if l.startswith("| attempt"))
+    assert "| status |" in header
+    row1 = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    row2 = next(l for l in md.splitlines() if l.startswith("| 2 |"))
+    assert "escalate: the watchdog saw the agent loop again after a nudge |" in row1 and "more" not in row1
+    assert "| done |" in row2
+    # every row has as many cells as the header
+    assert row1.count(" | ") == header.count(" | ") == row2.count(" | ")
+
+
+def test_the_header_says_add_is_a_calibration_op(tmp_path):
+    md = _report_md(tmp_path, [_row_attempt(op="add")], ops=("add",))
+    flat = " ".join(md.split())
+    assert "`add` is a calibration op" in flat and "reference example the agent reads" in flat
+    assert "not evidence" in flat
+    assert "calibration op" not in " ".join(_report_md(tmp_path / "other", [_row_attempt()]).split())
+
+
+def test_the_header_says_the_simulator_computes_in_f32(tmp_path):
+    flat = " ".join(_report_md(tmp_path, [_row_attempt()]).split())
+    assert "promotes bf16 to f32" in flat and "max_abs_err" in flat and "PCC of 1.0" in flat
+
+
+@pytest.mark.parametrize("pcc,shown", [(0.99999994, "1 - 6.0e-08"), (0.995, "0.995"), (1.0, "1"),
+                                       (0.9999996, "1 - 4.0e-07")])
+def test_a_pcc_short_of_1_is_never_printed_as_1(tmp_path, pcc, shown):
+    md = _report_md(tmp_path, [_row_attempt(pcc_min=pcc)])
+    row = next(l for l in md.splitlines() if l.startswith("| 1 |"))
+    cells = [c.strip() for c in row.strip("|").split("|")]
+    header = [c.strip() for c in next(l for l in md.splitlines() if l.startswith("| attempt")).strip("|").split("|")]
+    assert cells[header.index("PCC min (sim)")] == shown
