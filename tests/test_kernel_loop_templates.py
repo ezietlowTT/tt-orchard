@@ -133,6 +133,11 @@ def test_add_good_passes(tmp_path):
     ("forbidden_undecorated", "forbidden_code", (), "add"),
     # prints the missing-diagnostics text itself; diagnostics.py is present, so the kernel is blamed
     ("add_spoof_diagnostics", "tt_lang_error", (), "add"),
+    ("forbidden_in_main", "forbidden_code", (), "add"),
+    ("forbidden_readback_import", "forbidden_code", (), "add"),
+    ("forbidden_stacked_decorator", "forbidden_code", (), "add"),
+    ("forbidden_for_binding", "forbidden_code", (), "add"),
+    ("forbidden_walrus", "forbidden_code", (), "add"),
 ])
 @needs_sim
 def test_each_broken_kernel_gets_its_category(tmp_path, kernel, category, extra, op):
@@ -362,7 +367,7 @@ def test_a_nan_set_fails_offline():
 
 
 def test_a_missing_result_after_the_kernel_started_is_the_kernel():
-    text = "PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\n"
+    text = "PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\nPROGRESS run seed0\n"
     category, line = CHECK.classify(kernel_present=True, timed_out=False, returncode=0, text=text, result=None,
                                     bar=0.999)
     assert category == "tt_lang_error"
@@ -407,23 +412,33 @@ def test_diagnostics_file_lookup(tmp_path):
 
 # the static gate
 
-@pytest.mark.parametrize("kernel,rule", [
-    ("forbidden_import", "import"),
-    ("forbidden_name", "name"),
-    ("forbidden_dunder", "dunder"),
-    ("forbidden_readback", "readback"),
-    ("forbidden_undecorated", "operation"),
-    ("kernel_exit", "import"),
+@pytest.mark.parametrize("kernel,rules", [
+    ("forbidden_import", ["import"]),
+    ("forbidden_name", ["name"]),
+    ("forbidden_dunder", ["dunder"]),
+    ("forbidden_readback", ["readback"]),
+    ("forbidden_undecorated", ["operation"]),
+    ("kernel_exit", ["import", "name"]),                   # `import os`, then `os._exit(0)`
+    ("forbidden_in_main", ["name"]),
+    ("forbidden_readback_import", ["readback", "readback"]),  # the import, then the bare use
+    ("forbidden_stacked_decorator", ["operation"]),
+    ("forbidden_for_binding", ["operation"]),
+    ("forbidden_walrus", ["operation"]),
 ])
-def test_the_gate_refuses_each_rule(kernel, rule):
+def test_the_gate_refuses_each_rule(kernel, rules):
     ok, reason = CHECK.check_kernel_source(KERNELS / f"{kernel}.py")
     assert ok is False
-    assert reason.startswith(f"{rule} at line ") and reason.split(" at line ")[1].split(":")[0].isdigit(), reason
+    n = len(rules)
+    assert reason.startswith(f"{n} violation{'s' if n > 1 else ''}: {rules[0]} at line "), reason
+    found = CHECK.kernel_source_violations(KERNELS / f"{kernel}.py")
+    assert [v["rule"] for v in found] == rules
+    assert all(isinstance(v["line"], int) and v["line"] > 0 and v["remedy"] for v in found)
 
 
 @pytest.mark.parametrize("kernel", ["add_good", "silu_mul_good", "rmsnorm_good", "add_wrong_op", "add_nan", "add_scaled",
                                     "add_shape_error", "add_deadlock", "add_spin", "rmsnorm_no_norm", "rmsnorm_wrong_n",
-                                    "add_spoof_diagnostics", "add_syntax_error"])
+                                    "add_spoof_diagnostics", "add_syntax_error", "add_alias_module", "add_alias_ttnn",
+                                    "add_alias_function", "add_alias_function_as", "add_boilerplate"])
 def test_the_gate_lets_plain_kernels_through(kernel):
     """add_syntax_error does not parse; the gate leaves it to the harness, which reports import_error."""
     assert CHECK.check_kernel_source(KERNELS / f"{kernel}.py") == (True, "")
@@ -453,7 +468,7 @@ def test_the_gate_rules_in_detail(tmp_path, line, rule):
     p = tmp_path / "kernel.py"
     p.write_text(GATE_HEADER + line + "\n")
     ok, reason = CHECK.check_kernel_source(p)
-    assert ok is False and reason.startswith(f"{rule} at line 7"), reason
+    assert ok is False and reason.startswith(f"1 violation: {rule} at line 7: "), reason
 
 
 def test_the_gate_allows_math(tmp_path):
@@ -472,7 +487,8 @@ def test_operation_must_be_a_decorated_top_level_def(tmp_path, src):
     p = tmp_path / "kernel.py"
     p.write_text(src)
     ok, reason = CHECK.check_kernel_source(p)
-    assert ok is False and reason.startswith("operation at line "), reason
+    assert ok is False and "operation at line " in reason, reason
+    assert {v["rule"] for v in CHECK.kernel_source_violations(p)} == {"operation"}
 
 
 def test_a_bare_operation_decorator_is_allowed(tmp_path):
@@ -485,7 +501,8 @@ def test_a_bare_operation_decorator_is_allowed(tmp_path):
 def test_a_forbidden_kernel_never_reaches_the_simulator(tmp_path):
     tdir, adir = _attempt(tmp_path, "forbidden_import")
     done, check = _run_check(tdir, adir)
-    assert done.stdout.startswith("FAIL: forbidden_code: import at line ")
+    assert done.stdout.startswith("FAIL: forbidden_code: 1 violation: import at line ")
+    assert [(v["rule"], v["line"]) for v in check["violations"]] == [("import", 7)]
     assert check["sets"] == [] and "PROGRESS" not in (adir / "harness-output.txt").read_text()
     assert not (adir / "harness-result.json").exists()
 
@@ -562,6 +579,8 @@ def test_a_kernel_that_ends_the_process_is_blamed(tmp_path):
     assert not out.exists()
     text = done.stdout + done.stderr
     assert "PROGRESS import" in text
+    markers = [l for l in text.splitlines() if l.startswith("PROGRESS ")]
+    assert markers[-1] == "PROGRESS run seed0", markers
     category, line = CHECK.classify(kernel_present=True, timed_out=False, returncode=done.returncode, text=text,
                                     result=None, bar=0.999)
     assert (category, line) == ("tt_lang_error", "the kernel ended the process without a result")
@@ -576,3 +595,218 @@ def test_an_input_error_after_a_kernel_ran_is_still_the_harness(tmp_path):
     _, check = _run_check(tdir, adir)
     assert check["category"] == "harness_error", check
     assert [s["name"] for s in check["sets"]] == ["seed0", "seed0-tail"]
+
+
+
+# --- fix round 2: every violation at once, harmless boilerplate, aliases, markers ------------------------------------
+
+UPSTREAM = KERNELS / "upstream_eltwise_add.py"     # tt-lang examples/eltwise_add.py, copied byte for byte
+
+
+def test_the_upstream_example_is_flagged_only_for_torch_and_readback():
+    """The example the agent is told to read: its kernel is fine, so only `import torch` and the host code's
+    from_torch/to_torch calls may be flagged, each with a remedy. `__name__` and the main block are not flagged."""
+    found = CHECK.kernel_source_violations(UPSTREAM)
+    assert [v["rule"] for v in found] == ["import", "readback", "readback", "readback", "readback"], found
+    assert found[0]["line"] == 4 and "torch" in found[0]["detail"]
+    assert all(v["remedy"] for v in found)
+    assert all(v["remedy"] == "the harness reads the result back; remove the host code and keep only OPERATION"
+               for v in found if v["rule"] == "readback")
+    ok, reason = CHECK.check_kernel_source(UPSTREAM)
+    assert ok is False and reason.startswith("5 violations: import at line 4: ")
+
+
+def _src(tmp_path, text):
+    p = tmp_path / "kernel.py"
+    p.write_text(text)
+    return p
+
+
+def test_the_gate_reports_every_violation(tmp_path):
+    p = _src(tmp_path, "import os\nimport sys\n" + GATE_HEADER + "    open('f')\n    x = a.__dict__\n")
+    found = CHECK.kernel_source_violations(p)
+    assert [(v["rule"], v["line"]) for v in found] == [("import", 1), ("import", 2), ("name", 9), ("dunder", 10)]
+    assert all(set(v) >= {"rule", "line", "remedy"} for v in found)
+    ok, reason = CHECK.check_kernel_source(p)
+    assert reason.startswith("4 violations: import at line 1: ")
+    assert reason.count(" at line ") == 4
+
+
+def test_a_long_list_is_capped_at_eight(tmp_path):
+    body = "".join(f"    open('f{i}')\n" for i in range(11))
+    ok, reason = CHECK.check_kernel_source(_src(tmp_path, GATE_HEADER + body))
+    assert reason.startswith("11 violations: ")
+    assert reason.count(" at line ") == 8 and reason.endswith("and 3 more")
+
+
+def test_every_rule_has_a_remedy():
+    assert set(CHECK.REMEDIES) == {"import", "name", "dunder", "readback", "operation"}
+    assert all(isinstance(r, str) and r for r in CHECK.REMEDIES.values())
+
+
+@pytest.mark.parametrize("src", [
+    "from __future__ import annotations\n" + GATE_HEADER + "    pass\n",
+    "from typing import Any\n" + GATE_HEADER + "    pass\n",
+    GATE_HEADER + "    pass\n\n\n__all__ = ['OPERATION']\n",
+    GATE_HEADER + "    pass\n\n\nif __name__ == '__main__':\n    print('host code')\n",
+])
+def test_harmless_boilerplate_passes_the_gate(tmp_path, src):
+    assert CHECK.check_kernel_source(_src(tmp_path, src)) == (True, "")
+
+
+@pytest.mark.parametrize("line", ["    input = a", "    y = a\n    input_blk = y", "    x = input if False else a"])
+def test_input_is_a_legal_variable_name(tmp_path, line):
+    assert CHECK.check_kernel_source(_src(tmp_path, GATE_HEADER + line + "\n")) == (True, "")
+
+
+def test_input_as_a_parameter_name_is_legal(tmp_path):
+    src = 'import ttl\n\n\n@ttl.operation(grid="full")\ndef OPERATION(input, b, out):\n    x = input\n'
+    assert CHECK.check_kernel_source(_src(tmp_path, src)) == (True, "")
+
+
+@pytest.mark.parametrize("src", [
+    "import ttl as tl\n\n\n@tl.operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttl as tl\n\n\n@tl.operation\ndef OPERATION(a, b, out):\n    pass\n",
+    "from ttl import operation\n\n\n@operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "from ttl import operation as op\n\n\n@op(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "from ttl import operation as op\n\n\n@op\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttnn as tn\nimport ttl\n\n\n@ttl.operation(grid='full')\ndef OPERATION(a: tn.Tensor, b, out):\n    pass\n",
+])
+def test_the_legal_aliases_pass_the_gate(tmp_path, src):
+    assert CHECK.check_kernel_source(_src(tmp_path, src)) == (True, "")
+
+
+@pytest.mark.parametrize("src", [
+    "import ttnn\n\n\n@ttnn.operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttnn as tl\n\n\n@tl.operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttl\n\n\n@ttl.operation_like(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttl\n\n\n@ttl.operations\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttl\n\n\n@my_operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "from ttnn import operation\n\n\n@operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "from ttl import operation\n\n\ndef operation(**k):\n    return lambda f: f\n\n\n@operation(grid='full')\n"
+    "def OPERATION(a, b, out):\n    pass\n",
+    "import ttl as tl\n\ntl = None\n\n\n@tl.operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "from ttl import operation as op\nop = 1\n\n\n@op(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+    "import ttl\n\n\n@ttl.compute.operation(grid='full')\ndef OPERATION(a, b, out):\n    pass\n",
+])
+def test_a_decorator_that_is_not_ttl_operation_is_refused(tmp_path, src):
+    found = CHECK.kernel_source_violations(_src(tmp_path, src))
+    assert "operation" in {v["rule"] for v in found}, found
+
+
+@pytest.mark.parametrize("src", [
+    "from ttnn import to_torch\n" + GATE_HEADER + "    pass\n",
+    "from ttnn import from_torch as ft\n" + GATE_HEADER + "    pass\n",
+    "from ttl import from_torch\n" + GATE_HEADER + "    pass\n",
+    GATE_HEADER + "    to_torch(a)\n",
+])
+def test_readback_names_are_refused_however_they_arrive(tmp_path, src):
+    assert {v["rule"] for v in CHECK.kernel_source_violations(_src(tmp_path, src))} == {"readback"}
+
+
+@pytest.mark.parametrize("src", ["from ttnn import *\n" + GATE_HEADER + "    pass\n",
+                                 "from ttl import *\n" + GATE_HEADER + "    pass\n"])
+def test_star_imports_are_refused(tmp_path, src):
+    assert {v["rule"] for v in CHECK.kernel_source_violations(_src(tmp_path, src))} == {"import"}
+
+
+@pytest.mark.parametrize("tail", [
+    "for OPERATION in [OPERATION]:\n    pass\n",
+    "with open_ctx() as OPERATION:\n    pass\n",
+    "if (OPERATION := OPERATION):\n    pass\n",
+    "x = [(OPERATION := y) for y in [1]]\n",
+    "if True:\n    OPERATION = 1\n",
+    "del OPERATION\n",
+    "try:\n    pass\nexcept Exception as OPERATION:\n    pass\n",
+    "if True:\n    @ttl.operation(grid='full')\n    def OPERATION(a, b, out):\n        pass\n",
+    "import ttl as OPERATION\n",
+    "class OPERATION:\n    pass\n",
+    "def f():\n    global OPERATION\n    OPERATION = 1\n",
+])
+def test_operation_bound_any_other_way_is_refused(tmp_path, tail):
+    found = CHECK.kernel_source_violations(_src(tmp_path, GATE_HEADER + "    pass\n\n\n" + tail))
+    assert [v["rule"] for v in found] == ["operation"], found
+
+
+@pytest.mark.parametrize("decorators", ["@staticmethod\n@ttl.operation(grid='full')\n",
+                                        "@ttl.operation(grid='full')\n@staticmethod\n",
+                                        "@ttl.operation(grid='full')\n@ttl.operation(grid='full')\n"])
+def test_a_stacked_decorator_is_refused(tmp_path, decorators):
+    """Another decorator above or below ttl.operation, or ttl.operation twice: OPERATION would not be the
+    operation ttl built."""
+    src = "import ttl\n\n\n" + decorators + "def OPERATION(a, b, out):\n    pass\n"
+    found = CHECK.kernel_source_violations(_src(tmp_path, src))
+    assert [v["rule"] for v in found] == ["operation"]
+
+
+def test_a_local_name_operation_inside_a_function_is_fine(tmp_path):
+    src = GATE_HEADER + "    OPERATION = 1\n"          # a local inside OPERATION's body binds nothing at module scope
+    assert CHECK.check_kernel_source(_src(tmp_path, src)) == (True, "")
+
+
+@pytest.mark.parametrize("text,blamed", [
+    ("PROGRESS import\n", True),
+    ("PROGRESS import\nPROGRESS open_device\n", False),
+    ("PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\n", False),
+    ("PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\nPROGRESS run seed0\n", True),
+    ("PROGRESS import\nPROGRESS open_device\nPROGRESS set seed0\nPROGRESS run seed0\nsome kernel print\n", True),
+    ("PROGRESS import\nPROGRESS run seed0\nPROGRESS set seed0-tail\n", False),
+    ("", False),
+])
+def test_the_last_marker_decides_who_ended_the_process(text, blamed):
+    category, _ = CHECK.classify(kernel_present=True, timed_out=False, returncode=0, text=text, result=None, bar=0.999)
+    assert category == ("tt_lang_error" if blamed else "harness_error")
+
+
+def test_a_nan_pcc_fails():
+    category, line = _classify_sets([_good_set(pcc=float("nan"))], bars=SIM_BARS)
+    assert category == "numeric_mismatch" and "pcc nan" in line
+
+
+def _venv_with_diagnostics(tmp_path):
+    venv = tmp_path / "venv"
+    (venv / "bin").mkdir(parents=True)
+    sim = venv / "bin" / "tt-lang-sim"
+    sim.write_text("#!/bin/sh\n")
+    sim.chmod(0o755)
+    pkg = venv / "lib" / "python3.12" / "site-packages" / "ttl" / "sim"
+    pkg.mkdir(parents=True)
+    (pkg / "diagnostics.py").write_text("")
+    return sim
+
+
+def test_diagnostics_lookup_follows_a_symlink(tmp_path):
+    sim = _venv_with_diagnostics(tmp_path)
+    links = tmp_path / "links"
+    links.mkdir()
+    (links / "tt-lang-sim").symlink_to(sim)
+    assert CHECK.diagnostics_present(links / "tt-lang-sim") is True
+
+
+def test_diagnostics_lookup_finds_a_bare_command_on_path(tmp_path, monkeypatch):
+    sim = _venv_with_diagnostics(tmp_path)
+    monkeypatch.setenv("PATH", str(sim.parent))
+    assert CHECK.diagnostics_present("tt-lang-sim") is True
+    monkeypatch.setenv("PATH", str(tmp_path / "nowhere"))
+    assert CHECK.diagnostics_present("tt-lang-sim") is None
+
+
+@pytest.mark.parametrize("kernel", ["add_alias_module", "add_alias_ttnn", "add_alias_function", "add_alias_function_as",
+                                    "add_boilerplate"])
+@needs_sim
+def test_the_alias_and_boilerplate_kernels_pass_on_the_simulator(tmp_path, kernel):
+    """add_boilerplate's main block raises SystemExit; it passes only because the harness never runs that block."""
+    tdir, adir = _attempt(tmp_path, kernel)
+    done, check = _run_check(tdir, adir)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert check["passed"] is True and check["violations"] == []
+
+
+@needs_sim
+def test_check_json_lists_every_violation(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_good")
+    shutil.copy(UPSTREAM, adir / "kernel.py")
+    done, check = _run_check(tdir, adir)
+    assert check["category"] == "forbidden_code"
+    assert check["first_line"].startswith("5 violations: ")
+    assert [v["rule"] for v in check["violations"]] == ["import"] + ["readback"] * 4

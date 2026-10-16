@@ -33,7 +33,9 @@ import ast
 import hashlib
 import json
 import math
+import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -41,7 +43,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 SHAPE_RE = re.compile(r"Tensor shape .*does not match Block shape")
-STARTED_MARK = "PROGRESS import"      # the harness prints this just before it loads kernel.py
+# The harness prints `PROGRESS import` just before it loads kernel.py and `PROGRESS run <set>` just before it calls
+# OPERATION. When one of these is the last marker, the kernel had control when the process ended.
+KERNEL_MARKS = ("PROGRESS import", "PROGRESS run ")
 
 # The provisional bars the op specs ship with. classify falls back to these when its caller passes no `bars`.
 DEFAULT_BARS = {
@@ -51,10 +55,21 @@ DEFAULT_BARS = {
 
 # The static gate's tables.
 ALLOWED_IMPORTS = {"ttl", "ttnn", "math"}
+HARMLESS_FROM_MODULES = {"__future__", "typing"}       # `from __future__ import ...` and `from typing import ...`
 FORBIDDEN_NAMES = {"open", "exec", "eval", "compile", "__import__", "globals", "locals", "setattr", "getattr",
-                   "delattr", "vars", "breakpoint", "input", "sys", "os", "atexit", "builtins", "subprocess",
-                   "importlib", "references"}
-READBACK_ATTRS = {"to_torch", "from_torch"}
+                   "delattr", "vars", "breakpoint", "sys", "os", "atexit", "builtins", "subprocess", "importlib",
+                   "references"}
+CALL_ONLY_NAMES = {"input"}                             # forbidden as a call; a variable or argument may be named input
+HARMLESS_DUNDER_NAMES = {"__name__", "__all__"}         # `if __name__ == "__main__":` and `__all__ = [...]`
+READBACK_NAMES = {"to_torch", "from_torch"}
+REMEDIES = {
+    "import": "import only ttl, ttnn and math, and compute with ttl.math and block operators",
+    "name": "remove it, a kernel does not need it",
+    "dunder": "remove it, a kernel does not need dunder attributes",
+    "readback": "the harness reads the result back; remove the host code and keep only OPERATION",
+    "operation": "define OPERATION once, as a top-level def decorated only with @ttl.operation(...)",
+}
+MAX_LISTED = 8                                          # violations printed in the FAIL line; check.json keeps all
 
 
 def sha256_file(p: Path) -> str | None:
@@ -71,9 +86,16 @@ def bars_from_spec(spec: dict, phase: str) -> dict:
 def diagnostics_present(sim) -> bool | None:
     """Whether tt-lang-sim's diagnostics.py exists in the venv the simulator lives in.
 
-    None when no ttl package is found next to the simulator (the layout is not a venv this code knows); classify then
-    falls back to reading the text."""
-    venv = Path(sim).parent.parent
+    A bare command name is looked up on PATH, and the path is resolved, so a symlink to the simulator leads to its
+    venv. None when the simulator cannot be found or no ttl package sits next to it (a layout this code does not
+    know); classify then falls back to reading the text."""
+    text = str(sim)
+    if os.sep not in text:
+        found = shutil.which(text)
+        if not found:
+            return None
+        text = found
+    venv = Path(text).resolve().parent.parent
     packages = list(venv.glob("lib/python*/site-packages/ttl"))
     if not packages:
         return None
@@ -84,72 +106,171 @@ def _is_dunder(name: str) -> bool:
     return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
-def _is_ttl_operation(dec: ast.expr) -> bool:
-    """`@ttl.operation` or `@ttl.operation(...)`."""
+def _module_scope(tree: ast.Module):
+    """Every node evaluated in module scope. Function and class bodies, lambdas and comprehensions are not entered;
+    a def's decorators and defaults and a class's bases are, because they run in module scope."""
+    stack = list(tree.body)
+    while stack:
+        node = stack.pop()
+        yield node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            stack.extend(node.decorator_list)
+            stack.extend(node.args.defaults)
+            stack.extend(d for d in node.args.kw_defaults if d is not None)
+        elif isinstance(node, ast.ClassDef):
+            stack.extend(node.decorator_list)
+            stack.extend(node.bases)
+        elif not isinstance(node, (ast.Lambda, ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            stack.extend(ast.iter_child_nodes(node))
+
+
+def _module_bindings(tree: ast.Module) -> dict:
+    """name -> set of (line, kind) for every binding of a module-level name.
+
+    kind is "import ttl" (`import ttl`, `import ttl as x`, `import ttl.sub`), "ttl operation" (`from ttl import
+    operation [as x]`), "def" (a def directly in the module body) or "other" (anything else: assignment, for, with,
+    walrus, del, except-as, class, other imports, a def nested in an if, a name declared global in a function)."""
+    found: dict = {}
+
+    def add(name, line, kind):
+        found.setdefault(name, set()).add((line, kind))
+
+    top = {id(n) for n in tree.body}
+    for node in _module_scope(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            add(node.id, node.lineno, "other")
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            add(node.name, node.lineno, "def" if id(node) in top else "other")
+        elif isinstance(node, ast.ClassDef):
+            add(node.name, node.lineno, "other")
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            add(node.name, node.lineno, "other")
+        elif isinstance(node, ast.Import):
+            for a in node.names:
+                is_ttl = (a.asname is None and a.name.split(".")[0] == "ttl") or (a.asname is not None and a.name == "ttl")
+                add(a.asname or a.name.split(".")[0], node.lineno, "import ttl" if is_ttl else "other")
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                is_op = node.level == 0 and node.module == "ttl" and a.name == "operation"
+                add(a.asname or a.name, node.lineno, "ttl operation" if is_op else "other")
+    for node in ast.walk(tree):                           # these bind module names from any depth
+        if isinstance(node, ast.NamedExpr) and isinstance(node.target, ast.Name):
+            add(node.target.id, node.lineno, "other")
+        elif isinstance(node, ast.Global):
+            for name in node.names:
+                add(name, node.lineno, "other")
+    return found
+
+
+def _resolves_to_ttl_operation(dec: ast.expr, ttl_names: set, op_names: set) -> bool:
+    """`@<ttl>.operation`, `@<ttl>.operation(...)`, `@<op>` or `@<op>(...)`, where <ttl> was bound only by
+    `import ttl [as x]` and <op> only by `from ttl import operation [as x]`."""
     target = dec.func if isinstance(dec, ast.Call) else dec
-    return (isinstance(target, ast.Attribute) and target.attr == "operation" and isinstance(target.value, ast.Name)
-            and target.value.id == "ttl")
+    if isinstance(target, ast.Attribute):
+        return target.attr == "operation" and isinstance(target.value, ast.Name) and target.value.id in ttl_names
+    return isinstance(target, ast.Name) and target.id in op_names
 
 
-def _binds_operation(node: ast.stmt) -> bool:
-    """A top-level statement other than a def that binds the name OPERATION."""
-    if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        return any(isinstance(n, ast.Name) and n.id == "OPERATION" for t in targets for n in ast.walk(t))
-    if isinstance(node, ast.ClassDef):
-        return node.name == "OPERATION"
-    if isinstance(node, (ast.Import, ast.ImportFrom)):
-        return any((a.asname or a.name) == "OPERATION" for a in node.names)
-    return False
+def _violation(line: int, rule: str, detail: str, remedy: str | None = None) -> dict:
+    return {"rule": rule, "line": line, "detail": detail, "remedy": remedy or REMEDIES[rule]}
 
 
-def check_kernel_source(path) -> tuple[bool, str]:
-    """The static gate. (True, "") when kernel.py breaks no rule; otherwise (False, "<rule> at line N: <detail>").
-
-    Rules: `import` (only ttl, ttnn and math), `name` (FORBIDDEN_NAMES and any dunder name), `dunder` (an attribute
-    whose name starts and ends with two underscores), `readback` (the attributes to_torch and from_torch), `operation`
-    (OPERATION must be a top-level def decorated with ttl.operation, and nothing else may bind that name). A file with
-    no OPERATION at all gives (False, "no-operation: ..."), which the check reports as no_kernel.
-
-    A file that does not parse passes the gate, so the harness reports its SyntaxError as import_error. Best effort:
-    this reads the source, so it cannot see what code builds at run time."""
+def _analyse(path) -> tuple[list, bool]:
+    """(violations sorted by line, whether a top-level def OPERATION exists). A file that does not parse gives
+    ([], True), so the harness reports its SyntaxError."""
     source = Path(path).read_text(encoding="utf-8")
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return True, ""
-    found = []                                            # (line, rule, detail)
+        return [], True
+    found = []
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
         if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.split(".")[0] not in ALLOWED_IMPORTS:
-                    found.append((line, "import", f"import of {alias.name} (allowed: ttl, ttnn, math)"))
+            for a in node.names:
+                if a.name.split(".")[0] not in ALLOWED_IMPORTS:
+                    found.append(_violation(line, "import", f"import {a.name}"))
         elif isinstance(node, ast.ImportFrom):
             module = node.module or ""
-            if node.level or module.split(".")[0] not in ALLOWED_IMPORTS:
-                found.append((line, "import", f"import from {'.' * node.level}{module} (allowed: ttl, ttnn, math)"))
+            if node.level:
+                found.append(_violation(line, "import", f"relative import from {'.' * node.level}{module}"))
+            elif module not in HARMLESS_FROM_MODULES and module.split(".")[0] not in ALLOWED_IMPORTS:
+                found.append(_violation(line, "import", f"import from {module}"))
+            for a in node.names:
+                if a.name == "*":
+                    found.append(_violation(line, "import", f"from {module} import *",
+                                            "import the names you need one by one"))
+                elif a.name in READBACK_NAMES:
+                    found.append(_violation(line, "readback", f"import of {a.name}"))
         elif isinstance(node, ast.Name):
-            if node.id in FORBIDDEN_NAMES or _is_dunder(node.id):
-                found.append((line, "name", f"use of {node.id}"))
-        elif isinstance(node, ast.Global) and "OPERATION" in node.names:
-            found.append((line, "operation", "OPERATION is rebound through a global statement"))
+            if node.id in FORBIDDEN_NAMES or (_is_dunder(node.id) and node.id not in HARMLESS_DUNDER_NAMES):
+                found.append(_violation(line, "name", f"use of {node.id}"))
+            elif node.id in READBACK_NAMES:
+                found.append(_violation(line, "readback", f"use of {node.id}"))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in CALL_ONLY_NAMES:
+            found.append(_violation(line, "name", f"call of {node.func.id}()"))
         elif isinstance(node, ast.Attribute):
             if _is_dunder(node.attr):
-                found.append((line, "dunder", f"attribute {node.attr}"))
-            elif node.attr in READBACK_ATTRS:
-                found.append((line, "readback", f"attribute {node.attr}; the harness reads the output back"))
+                found.append(_violation(line, "dunder", f"attribute {node.attr}"))
+            elif node.attr in READBACK_NAMES:
+                found.append(_violation(line, "readback", f"attribute {node.attr}"))
+
+    bindings = _module_bindings(tree)
+    alias_kinds = {"import ttl", "ttl operation"}
+    ttl_names, op_names = set(), set()
+    for name, entries in bindings.items():
+        kinds = {k for _, k in entries}
+        if name == "OPERATION" or not kinds & alias_kinds:
+            continue
+        if len(kinds) > 1:                                # bound to ttl (or its operation) and also to something else
+            for line, kind in sorted(entries):
+                if kind not in alias_kinds or len(kinds & alias_kinds) > 1:
+                    found.append(_violation(line, "operation", f"{name} is rebound, so @{name} may not be ttl's operation",
+                                            "keep the names ttl and operation for the imports and use another name"))
+            continue
+        (ttl_names if "import ttl" in kinds else op_names).add(name)
     defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "OPERATION"]
-    others = [n for n in tree.body if _binds_operation(n)]
-    for n in others:
-        found.append((n.lineno, "operation", "OPERATION is bound by something other than a decorated def"))
+    for line, kind in sorted(bindings.get("OPERATION", ())):
+        if kind != "def":
+            found.append(_violation(line, "operation", "OPERATION is bound by something other than its decorated def"))
     for n in defs:
-        if not any(_is_ttl_operation(d) for d in n.decorator_list):
-            found.append((n.lineno, "operation", "OPERATION is not decorated with ttl.operation"))
+        if len(n.decorator_list) != 1 or not _resolves_to_ttl_operation(n.decorator_list[0], ttl_names, op_names):
+            found.append(_violation(n.lineno, "operation", "OPERATION must be decorated with ttl.operation and nothing else"))
+    unique = {(v["line"], v["rule"], v["detail"]): v for v in found}
+    return [unique[k] for k in sorted(unique)], bool(defs)
+
+
+def kernel_source_violations(path) -> list[dict]:
+    """Every rule kernel.py breaks, as dicts {rule, line, detail, remedy}, sorted by line. Empty when it breaks none.
+
+    Rules: `import` (only ttl, ttnn and math, plus `from __future__` and `from typing`; no star imports),
+    `name` (FORBIDDEN_NAMES, a call of input(), any dunder name but __name__ and __all__), `dunder` (an attribute
+    whose name starts and ends with two underscores), `readback` (to_torch and from_torch, as an attribute, a name
+    or an imported name), `operation` (OPERATION must be bound only by one top-level def whose only decorator is ttl's
+    operation, reached through `import ttl [as x]` or `from ttl import operation [as x]`, names nothing rebinds).
+
+    The whole file is checked, including an `if __name__ == "__main__":` block. The harness loads kernel.py under
+    another module name, so that block never runs, but the gate does not rely on that. Best effort: this reads the
+    source, so it cannot see what code builds at run time."""
+    return _analyse(path)[0]
+
+
+def violations_summary(found: list[dict]) -> str:
+    """`N violations: <rule> at line N: <detail> (<remedy>); ...`, at most MAX_LISTED listed."""
+    items = [f"{v['rule']} at line {v['line']}: {v['detail']} ({v['remedy']})" for v in found[:MAX_LISTED]]
+    if len(found) > MAX_LISTED:
+        items.append(f"and {len(found) - MAX_LISTED} more")
+    return f"{len(found)} violation{'s' if len(found) != 1 else ''}: " + "; ".join(items)
+
+
+def check_kernel_source(path) -> tuple[bool, str]:
+    """The static gate. (True, "") when kernel.py breaks no rule; (False, violations_summary(...)) when it does;
+    (False, "no-operation: ...") when it breaks none and defines no OPERATION, which the check reports as no_kernel.
+    A file that does not parse passes, so the harness reports its SyntaxError as import_error."""
+    found, has_operation = _analyse(path)
     if found:
-        line, rule, detail = min(found)
-        return False, f"{rule} at line {line}: {detail}"
-    if not defs:
+        return False, violations_summary(found)
+    if not has_operation:
         return False, "no-operation: kernel.py defines no OPERATION"
     return True, ""
 
@@ -178,7 +299,7 @@ def _fmt(v: float) -> float:
 def _set_problem(s: dict, bar: float, bars: dict) -> str | None:
     """Why one input set fails, or None when it is inside every bar."""
     pcc, finite = s.get("pcc"), s.get("finite")
-    if pcc is None or finite is not True or pcc < bar:
+    if not _number(pcc) or finite is not True or pcc < bar:
         return f"pcc {pcc}, finite {finite}, bar {bar}"
     for field in ("rel_l2", "slope", "max_abs_err", "exp_abs_max"):
         if not _number(s.get(field)):
@@ -228,9 +349,12 @@ def classify(*, kernel_present, timed_out, returncode, text, result, bar, phase=
     if err or "Deadlock detected" in blob:
         return runtime, first_line(blob) or ((err or {}).get("text") or "")[:200]
     if result is None:
-        # After the harness started loading the kernel, only the kernel can end the process without a result.
-        # (A crash of the harness itself after that point would also land here.)
-        if STARTED_MARK in text:
+        # The last marker says who had control. After `PROGRESS import` or `PROGRESS run <set>` it was the kernel.
+        # After `open_device` or `set <name>` it was the harness, building inputs. (A kernel that prints a marker
+        # itself can move this line; with the gate it has no way to end the process.)
+        markers = [l.strip() for l in text.splitlines() if l.strip().startswith("PROGRESS ")]
+        last = markers[-1] if markers else ""
+        if last == KERNEL_MARKS[0] or last.startswith(KERNEL_MARKS[1]):
             return runtime, "the kernel ended the process without a result"
         return "harness_error", f"the harness ended with exit {returncode} and wrote no result"
     sets = result.get("sets", [])
@@ -275,7 +399,9 @@ def main(argv=None) -> int:
         bars = bars_from_spec(spec, "sim")
     except KeyError as exc:
         category, line = "harness_error", f"the spec has no {exc.args[0]}"
+    violations = []
     if category is None and kernel.is_file():
+        violations = kernel_source_violations(kernel)
         ok, reason = check_kernel_source(kernel)
         if not ok:
             category, line = ("no_kernel", "kernel.py defines no OPERATION") if reason.startswith("no-operation") \
@@ -296,7 +422,7 @@ def main(argv=None) -> int:
                                   result=result, bar=spec["pcc_bar_sim"], phase="sim", bars=bars,
                                   diagnostics_present=diagnostics_present(sim))
     check = {"schema": 1, "op": spec["op"], "phase": "sim", "passed": category is None, "category": category,
-             "first_line": line, "sets": (result or {}).get("sets", []), "pcc_bar": spec["pcc_bar_sim"], "bars": bars,
+             "first_line": line, "sets": (result or {}).get("sets", []), "pcc_bar": spec["pcc_bar_sim"], "bars": bars, "violations": violations,
              "provisional": True, "elapsed_s": round(time.monotonic() - start, 2), "tt_lang": tt_lang,
              "sha256": {"kernel.py": sha256_file(kernel), "kernel_harness.py": sha256_file(HERE / "kernel_harness.py"),
                         "references.py": sha256_file(HERE / "references.py"), "kernel_check.py": sha256_file(Path(__file__)),

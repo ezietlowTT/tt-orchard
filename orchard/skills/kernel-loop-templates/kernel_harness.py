@@ -117,6 +117,7 @@ def main(argv=None) -> int:
                         out = ttnn.from_torch(torch.zeros(spec["output"], dtype=torch.bfloat16), dtype=ttnn.bfloat16,
                                               layout=ttnn.TILE_LAYOUT, device=device)
                         stage = "run"
+                        progress(f"run {name}")         # from here the kernel has control (see the check's markers)
                         operation(*tt_ins, out)
                         got = ttnn.to_torch(out).float()
                         err = (got - expected).abs().max()
