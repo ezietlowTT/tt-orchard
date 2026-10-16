@@ -1104,8 +1104,14 @@ def test_an_interrupted_check_exits_with_the_signal_that_stopped_it(tmp_path, si
     the SIGINT exit a bare KeyboardInterrupt gives; the simulator and its grandchild are gone, and no check.json."""
     marker = f"orchard-a1-{os.getpid()}-{time.monotonic_ns()}"
     proc, marks = None, None
+
+    def default_dispositions():
+        # W9: the child starts with SIGHUP and SIGINT at their defaults even when pytest itself runs under nohup;
+        # test_a_sighup_that_starts_ignored_stays_ignored covers an inherited SIG_IGN.
+        for s in (_signal_mod.SIGHUP, _signal_mod.SIGINT):
+            _signal_mod.signal(s, _signal_mod.SIG_DFL)
     try:
-        proc, marks = _start_check_with_fake_sim(tmp_path, marker)
+        proc, marks = _start_check_with_fake_sim(tmp_path, marker, preexec_fn=default_dispositions)
         proc.send_signal(sig)
         assert proc.wait(timeout=20) == -sig
         assert _all_gone(_pids(marks), marker) == []
