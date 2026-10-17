@@ -1309,3 +1309,7 @@ preflight whether we have the latest even." The live probe had given the coder o
   alternated two identical `sed` commands for 9 turns, which TurnRepeat did not report. The skill now states units,
   dtype and the output as general facts, each checked against the harness, the specification or a simulator run.
   TurnRepeat gained a cycle track (period 2 or 3, three full periods), which applies to every agent step.
+- Task 14d (2026-10-16): the coder ignored the literal-name rule a third time (`def rmsnorm` six times with the rule and
+  a `def OPERATION` skeleton in its prompt, no check run between writes). The harness stopped requiring the name: the
+  one `@ttl.operation` function is the operation, and the harness calls the function the gate names. Step 4 now says
+  to run the check after each write. The 14b rename message is gone.

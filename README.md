@@ -1120,7 +1120,7 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   Imports are limited to `ttl`, `ttnn` and `math` (aliases of the three accepted), plus a listed set of names from
   `typing` (such as `Any` and `Optional`) and from `__future__` (such as `annotations`). Forbidden names such as
   `open`, `os` and `sys` are refused as a name, an attribute or an import, also under an alias. There is no
-  `import torch` or host code, and `OPERATION` is a top-level `def` decorated with `@ttl.operation`. The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
+  `import torch` or host code, and the operation is the one top-level `def` decorated with `@ttl.operation`, under any name the gate does not refuse (two such functions are refused). The numeric check then needs PCC, a relative L2 error, a least-squares slope and a max-abs-error bar on
   every input set. A failure is sorted into a category such as `forbidden_code` (the gate refused the file) or
   `harness_error` (a fault in the templates or the environment, including the setup phase).
 - The bars and the budget are provisional, and the inputs are synthetic (seeded random values plus a heavy-tailed
