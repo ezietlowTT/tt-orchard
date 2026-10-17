@@ -1301,3 +1301,7 @@ preflight whether we have the latest even." The live probe had given the coder o
   kill on a timeout), one commit each, test first. Notable: the conftest guard now fails a test that reaches the real
   git or gh runner; a process test first passed under its mutation because the call still waited the full 60 s for the
   grandchild to close the pipes, so it now bounds the call's duration.
+- Task 14b (2026-10-16): the live rmsnorm probe (L4c) wrote a real kernel by turn 9 and then spent 22 turns on
+  `no_kernel: kernel.py defines no OPERATION`, because it named the function `rmsnorm`. The check now names a single
+  misnamed `@ttl.operation` function and says to rename it (still `no_kernel`); the skill says the name is literally
+  `OPERATION`, gives a skeleton, and says inputs come in the order of the spec's `inputs` keys.

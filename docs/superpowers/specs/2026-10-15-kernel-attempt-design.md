@@ -416,3 +416,7 @@ Each item changes or adds to the approved design above. Reasons come from the im
       timed-out call is killed with its process group. The block on a tt-lang checkout behind upstream main stays; its
       message says the fix is to move the pin and names `TTLANG_PIN`, `TTLANG_DIAGNOSTICS_SHA256` and
       `tt-orchard kernel-env`.
+    - Task 14b, from the live rmsnorm probe: when kernel.py has exactly one top-level `@ttl.operation` function under
+      another name, the `no_kernel` line names it and says to rename it to `OPERATION` (the category stays
+      `no_kernel`, and the probe's re-check and the hardware gate give the same line). The skill's step 3 says the
+      name is literally `OPERATION`, with a skeleton, and that inputs come in the order of `inputs` in the spec.
