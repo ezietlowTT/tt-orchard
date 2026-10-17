@@ -3082,3 +3082,18 @@ def test_the_skill_says_the_examples_functions_must_be_renamed():
     for name in ("eltwise_add", "eltwise_broadcast_reduce"):
         assert f"`{name}`" in flat, name
     assert "rename it to `OPERATION`" in flat
+
+
+def test_an_agent_alternating_two_commands_is_reported_by_the_watchdog(tmp_path, fake_kenv):
+    """Task 14c, the wiring: through AgentStep and the probe's watchdog, two shell commands alternating (the recorded
+    L4c pattern) give a turn_repeat finding with match "cycle" in the attempt's ledger."""
+    a = call("shell", command="sed -n '1,70p' reference/eltwise_add.py")
+    b = call("shell", command="sed -n '1,70p' kernel_spec.json")
+
+    def script(request):
+        k = turn(request)
+        return (a if k % 2 == 0 else b) if k < 12 else final("done")
+    with FakeModel(script) as server:
+        run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL), max_turns=20)
+    ledger = (tmp_path / "probe" / "add" / "attempt-1" / "ledger.jsonl").read_text()
+    assert '"detector":"turn_repeat"' in ledger.replace(" ", "") and '"match":"cycle"' in ledger.replace(" ", "")

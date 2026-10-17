@@ -74,6 +74,11 @@ TURN_SHAPE_N = 4                # choice: model turns in a row whose calls have 
                                 # match is looser than an identical one. The second-model run (2026-10-04)
                                 # repeated near-identical greps that differed in a trailing argument
                                 # for 8 turns (53 to 60) of stage 0; this fires on the 4th.
+TURN_CYCLE_MAX_PERIOD = 3       # choice: TurnRepeat also reports turns that repeat with a period of 2 or 3 (A,B,A,B,...).
+TURN_CYCLE_REPEATS = 3          # choice: after three full periods (6 turns for period 2, 9 for period 3), the same
+                                # count as TURN_REPEAT_N. The live kernel probe (2026-10-16, rmsnorm L4c) alternated
+                                # two identical sed commands from turn 22 to 30; this fires after turn 27. Longer
+                                # periods are not reported, to stay conservative.
 WRITELESS_TURNS = 20            # choice: model turns in a row in which no file was written (no
                                 # successful write_file, no new evidence file) before the step is
                                 # nudged. A third of AGENT_MAX_TURNS. In the committed qwen transcript
