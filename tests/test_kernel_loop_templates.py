@@ -472,6 +472,53 @@ def test_the_gate_reports_no_operation():
     assert ok is False and reason.startswith("no-operation")
 
 
+PLAIN_NO_OPERATION = "no-operation: kernel.py defines no OPERATION"
+
+
+def test_a_misnamed_operation_function_is_named_in_the_message_and_still_refused():
+    """Task 14b: the live rmsnorm coder wrote `@ttl.operation(...) def rmsnorm(...)` and spent 22 turns on
+    "defines no OPERATION". With exactly one @ttl.operation def under another name, the message names it. The kernel
+    is still refused (no_kernel)."""
+    ok, reason = CHECK.check_kernel_source(KERNELS / "add_no_operation.py")
+    assert ok is False
+    assert reason == ("no-operation: kernel.py defines no OPERATION; your @ttl.operation function is named "
+                      "'eltwise_add': rename it to OPERATION")
+
+
+@pytest.mark.parametrize("kernel", ["add_no_def", "add_two_misnamed"])
+def test_without_exactly_one_misnamed_operation_function_the_message_is_the_plain_one(kernel):
+    ok, reason = CHECK.check_kernel_source(KERNELS / f"{kernel}.py")
+    assert ok is False and reason == PLAIN_NO_OPERATION
+
+
+def test_the_misnamed_function_is_found_through_each_accepted_spelling_of_the_decorator(tmp_path):
+    for header, deco in (("import ttl as tl", "@tl.operation(grid='full')"),
+                         ("from ttl import operation", "@operation(grid='full')"),
+                         ("from ttl import operation as op", "@op(grid='full')")):
+        k = tmp_path / "kernel.py"
+        k.write_text(f"{header}\nimport ttnn\n\n\n{deco}\ndef rmsnorm(x_in, w_in, out):\n    pass\n")
+        ok, reason = CHECK.check_kernel_source(k)
+        assert ok is False and "named 'rmsnorm': rename it to OPERATION" in reason, (header, reason)
+
+
+def test_a_function_with_another_decorator_is_not_named_as_the_operation(tmp_path):
+    k = tmp_path / "kernel.py"
+    k.write_text("import ttl\nimport ttnn\n\n\n@ttl.compute()\ndef rmsnorm(x_in, w_in, out):\n    pass\n")
+    ok, reason = CHECK.check_kernel_source(k)
+    assert ok is False and reason == PLAIN_NO_OPERATION
+
+
+@needs_sim
+def test_the_check_prints_the_rename_hint_for_a_misnamed_operation(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_no_operation")
+    done, check = _run_check(tdir, adir)
+    assert done.returncode == 1
+    assert check["category"] == "no_kernel" and check["passed"] is False
+    assert done.stdout.strip() == ("FAIL: no_kernel: kernel.py defines no OPERATION; your @ttl.operation function is "
+                                   "named 'eltwise_add': rename it to OPERATION")
+    assert check["first_line"] == done.stdout.strip().removeprefix("FAIL: no_kernel: ")
+
+
 GATE_HEADER = 'import ttl\nimport ttnn\n\n\n@ttl.operation(grid="full")\ndef OPERATION(a, b, out):\n'
 
 

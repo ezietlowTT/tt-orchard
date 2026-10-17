@@ -3012,3 +3012,28 @@ def test_the_real_skills_status_passes_the_bytes_on(fake_kenv, ttlang_skill, mon
     monkeypatch.setattr(sf, "check_kernel_sources", lambda src, skill, **kw: seen.update(kw) or [])
     skills_current["real"](fake_kenv, ttlang_skill, write_cache=False, preread={"guide.md": b"g"})
     assert seen["preread"] == {"guide.md": b"g"}
+
+
+# ---- Task 14b: a misnamed @ttl.operation function -----------------------------------------------------------------
+
+RENAME_LINE = ("kernel.py defines no OPERATION; your @ttl.operation function is named 'eltwise_add': rename it to "
+               "OPERATION")
+
+
+def test_the_authoritative_recheck_gives_the_rename_hint(tmp_path, fake_kenv):
+    """The probe's own re-check runs the shipped kernel_check.py (for real here; the gate stops it before the
+    simulator), so the attempt record carries the same line the agent saw."""
+    from orchard.stallwatch import run_watched as real_run_watched
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    kp.prepare_attempt(adir, op="add", env=fake_kenv, tt_lang=FACTS)
+    (adir / "kernel.py").write_text((KERNELS / "add_no_operation.py").read_text())
+    got = kp.authoritative_check(adir, op="add", env=fake_kenv, run_watched=real_run_watched, tt_lang=FACTS)
+    assert got["passed"] is False and got["category"] == "no_kernel" and got["first_line"] == RENAME_LINE
+
+
+def test_the_hardware_gate_gives_the_same_rename_line(tmp_path, fake_kenv):
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv, kernel="add_no_operation.py")
+    calls = []
+    hw = kp.hardware_phase(adir, attempt, env=fake_kenv, shared_python="/p", run_watched=hw_writer([GOOD_HW_SET], calls))
+    assert calls == [] and hw["passed"] is False and hw["category"] == "no_kernel"
+    assert hw["first_line"] == RENAME_LINE

@@ -846,8 +846,9 @@ def hardware_phase(adir: Path, attempt: dict, *, env, shared_python, run_watched
     ok, reason = check.check_kernel_source(kernel)
     if violations or not ok:
         category = "no_kernel" if reason.startswith("no-operation") else "forbidden_code"
+        # The same first line the simulator check gives (kernel_check.py strips the gate's "no-operation: " tag).
         return _record_hw(adir, attempt, {"passed": False, "category": category, "pcc_min": None, "sets": [],
-                                          "violations": violations, "first_line": reason})
+                                          "violations": violations, "first_line": reason.removeprefix("no-operation: ")})
     recorded = (attempt.get("provenance") or {}).get("kernel_sha256")
     data = _read_regular(kernel, MAX_KERNEL_BYTES)
     if data is None or recorded is None or hashlib.sha256(data).hexdigest() != recorded:

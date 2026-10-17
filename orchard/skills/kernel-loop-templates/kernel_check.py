@@ -192,14 +192,15 @@ def _violation(line: int, rule: str, detail: str, remedy: str | None = None) -> 
     return {"rule": rule, "line": line, "detail": detail, "remedy": remedy or REMEDIES[rule]}
 
 
-def _analyse(path) -> tuple[list, bool]:
-    """(violations sorted by line, whether a top-level def OPERATION exists). A file that does not parse gives
-    ([], True), so the harness reports its SyntaxError."""
+def _analyse(path) -> tuple[list, bool, list]:
+    """(violations sorted by line, whether a top-level def OPERATION exists, the names of top-level defs under
+    another name that are decorated with ttl's operation). A file that does not parse gives ([], True, []), so the
+    harness reports its SyntaxError."""
     source = Path(path).read_text(encoding="utf-8")
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return [], True
+        return [], True, []
     found = []
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
@@ -268,7 +269,11 @@ def _analyse(path) -> tuple[list, bool]:
         if len(n.decorator_list) != 1 or not _resolves_to_ttl_operation(n.decorator_list[0], ttl_names, op_names):
             found.append(_violation(n.lineno, "operation", "OPERATION must be decorated with ttl.operation and nothing else"))
     unique = {(v["line"], v["rule"], v["detail"]): v for v in found}
-    return [unique[k] for k in sorted(unique)], bool(defs)
+    # Top-level defs under another name whose decorators include ttl's operation: the coder's operation, misnamed.
+    misnamed = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name != "OPERATION"
+                and any(_resolves_to_ttl_operation(d, ttl_names, op_names) for d in n.decorator_list)]
+    return [unique[k] for k in sorted(unique)], bool(defs), misnamed
 
 
 def kernel_source_violations(path) -> list[dict]:
@@ -287,6 +292,17 @@ def kernel_source_violations(path) -> list[dict]:
     return _analyse(path)[0]
 
 
+NO_OPERATION = "kernel.py defines no OPERATION"
+
+
+def no_operation_text(misnamed: list[str]) -> str:
+    """The no_kernel line. With exactly one @ttl.operation function under another name it names that function, because
+    a coder reads "Define OPERATION" as a placeholder for the op's name; with none or several it is the plain line."""
+    if len(misnamed) == 1:
+        return f"{NO_OPERATION}; your @ttl.operation function is named {misnamed[0]!r}: rename it to OPERATION"
+    return NO_OPERATION
+
+
 def violations_summary(found: list[dict]) -> str:
     """`N violations: <rule> at line N: <detail> (<remedy>); ...`, at most MAX_LISTED listed."""
     items = [f"{v['rule']} at line {v['line']}: {v['detail']} ({v['remedy']})" for v in found[:MAX_LISTED]]
@@ -299,11 +315,11 @@ def check_kernel_source(path) -> tuple[bool, str]:
     """The static gate. (True, "") when kernel.py breaks no rule; (False, violations_summary(...)) when it does;
     (False, "no-operation: ...") when it breaks none and defines no OPERATION, which the check reports as no_kernel.
     A file that does not parse passes, so the harness reports its SyntaxError as import_error."""
-    found, has_operation = _analyse(path)
+    found, has_operation, misnamed = _analyse(path)
     if found:
         return False, violations_summary(found)
     if not has_operation:
-        return False, "no-operation: kernel.py defines no OPERATION"
+        return False, "no-operation: " + no_operation_text(misnamed)
     return True, ""
 
 
@@ -543,7 +559,7 @@ def _main(argv=None) -> int:
         violations = kernel_source_violations(kernel)
         ok, reason = check_kernel_source(kernel)
         if not ok:
-            category, line = ("no_kernel", "kernel.py defines no OPERATION") if reason.startswith("no-operation") \
+            category, line = ("no_kernel", reason.removeprefix("no-operation: ")) if reason.startswith("no-operation") \
                 else ("forbidden_code", reason)
     if category is None and kernel.is_file():
         timed_out, rc, text = run_sim([sim, str(HERE / "kernel_harness.py"), "--", "--spec", str(spec_path),
