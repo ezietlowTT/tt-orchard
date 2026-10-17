@@ -151,7 +151,7 @@ class ReadOnlyRunner:
 
     def __init__(self, run: Callable | None = None, *, budget_s: float = BUDGET_S, offline: bool = False,
                  clock: Callable = time.monotonic, environ: dict | None = None):
-        # _raw_run is looked up here, not bound as a default, so the test suite's tripwire (conftest.py) replaces it.
+        # _raw_run is looked up at each construction, so the test suite's guard (conftest.py) can replace it.
         self.run, self.budget_s, self.offline, self.clock = run or _raw_run, budget_s, offline, clock
         self.started: float | None = None
         base = dict(os.environ if environ is None else environ)
@@ -192,8 +192,8 @@ class ReadOnlyRunner:
 class Cache:
     """The last result of each source: {key: {"checked_at", "local", "remote", "state", ...}}.
 
-    A broken or unreadable file reads as empty. A write replaces the file whole (a temporary file and a rename), so
-    a link at the path is replaced, not followed. `write=False` keeps everything in memory (kernel-env --check
+    A broken or unreadable file gives an empty cache. A write replaces the file whole (a temporary file and a
+    rename), so a link at the path is itself replaced and its target is never written. `write=False` keeps everything in memory (kernel-env --check
     changes nothing on the machine)."""
 
     def __init__(self, path: Path | None = None, *, clock: Callable = time.time, write: bool = True):
