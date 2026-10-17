@@ -67,6 +67,7 @@ OVERRIDE = "--allow-stale-skills"
 # git subcommands that only read. `remote` is allowed only as `remote get-url`.
 READ_ONLY_GIT = frozenset({"rev-parse", "symbolic-ref", "status", "remote", "ls-remote", "cat-file", "rev-list"})
 GH_WRITE_OPTIONS = frozenset({"-X", "--method", "-f", "-F", "--field", "--raw-field", "--input"})
+GIT_SAFE_CONFIG = (("http.followRedirects", "false"), ("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null"))
 # Options that take a value and come before a git subcommand.
 _GIT_GLOBAL_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree"})
 
@@ -144,6 +145,17 @@ class ReadOnlyRunner:
         base.update({"GIT_TERMINAL_PROMPT": "0", "GIT_OPTIONAL_LOCKS": "0", "GH_HOST": "github.com",
                      "GH_PROMPT_DISABLED": "1", "GH_NO_UPDATE_NOTIFIER": "1", "LC_ALL": "C"})
         base.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes -o ConnectTimeout=10")
+        # Configuration for every git call, added after any GIT_CONFIG_* entries the operator has: follow no HTTP
+        # redirect away from github.com, and run no fsmonitor command or hook (a clone's own configuration could name
+        # one, and `git status` would run it).
+        try:
+            n = max(0, int(base.get("GIT_CONFIG_COUNT", "0")))
+        except ValueError:
+            n = 0
+        for key, value in GIT_SAFE_CONFIG:
+            base[f"GIT_CONFIG_KEY_{n}"], base[f"GIT_CONFIG_VALUE_{n}"] = key, value
+            n += 1
+        base["GIT_CONFIG_COUNT"] = str(n)
         self.env = base
 
     def __call__(self, argv, *, network: bool) -> tuple[int, str, str]:

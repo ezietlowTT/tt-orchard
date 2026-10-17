@@ -16,6 +16,9 @@ import pytest
 
 from orchard import skillsfresh as sf
 
+# Taken at import, before the suite's guard (conftest.py) replaces it for each test: the process tests below run it.
+REAL_RAW_RUN = sf._raw_run
+
 HEAD = "1" * 40
 MAIN = "2" * 40
 OLD = "3" * 40
@@ -666,3 +669,45 @@ def test_check_kernel_sources_passes_preread_to_the_skill_check(tmp_path):
     fake = FakeSys({src: {"head": MAIN, "origin": TTLANG_URL}}, {TTLANG_URL: MAIN}, {sf.ttlang_skill_tree_path(): answer})
     got = sf.check_kernel_sources(src, d, run=fake, cache=sf.Cache(tmp_path / "c.json"), preread={"guide.md": b"copied\n"})
     assert got[1].state == sf.CURRENT, got[1].detail
+
+
+
+# ---- git configuration and process cleanup (the review's missing list) -------------------------------------------
+
+def _git_config(env: dict) -> dict:
+    n = int(env.get("GIT_CONFIG_COUNT", "0"))
+    return {env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"] for i in range(n)}
+
+
+def test_the_runner_turns_off_redirects_fsmonitor_and_hooks_for_git():
+    seen = []
+    runner = sf.ReadOnlyRunner(lambda a, t, env=None: seen.append(env) or (0, "", ""),
+                               environ={"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "user.name",
+                                        "GIT_CONFIG_VALUE_0": "kept"})
+    runner(["git", "-C", "/x", "status", "--porcelain"], network=False)
+    cfg = _git_config(seen[0])
+    assert cfg["http.followRedirects"] == "false"
+    assert cfg["core.fsmonitor"] == "false" and cfg["core.hooksPath"] == "/dev/null"
+    assert cfg["user.name"] == "kept"                         # the operator's own GIT_CONFIG_* entries stay
+
+
+def test_a_configured_fsmonitor_does_not_run_during_the_status_check(tmp_path):
+    """Real git in a scratch repository whose core.fsmonitor is a script that leaves a mark. `git status` with the
+    runner's environment must not run it."""
+    import subprocess
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mark = tmp_path / "fsmonitor-ran"
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {mark}\nexit 1\n")
+    hook.chmod(0o755)
+    plain = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    for argv in (["git", "init", "-q", str(repo)], ["git", "-C", str(repo), "config", "core.fsmonitor", str(hook)]):
+        subprocess.run(argv, check=True, env=plain, capture_output=True, timeout=30)
+    subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], env=plain, capture_output=True, timeout=30)
+    assert mark.exists(), "the scratch hook should run under plain git; otherwise this test proves nothing"
+    mark.unlink()
+    runner = sf.ReadOnlyRunner(REAL_RAW_RUN, environ=plain)
+    rc, _, err = runner(["git", "-C", str(repo), "status", "--porcelain"], network=False)
+    assert rc == 0, err
+    assert not mark.exists()
