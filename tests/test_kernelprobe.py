@@ -3149,3 +3149,9 @@ def test_the_hardware_phase_runs_the_shipped_harness_which_asks_the_gate_for_the
     assert str(kp.TEMPLATES / "kernel_harness.py") in argv
     harness = (kp.TEMPLATES / "kernel_harness.py").read_text()
     assert "operation = operation_of(module, a.kernel)" in harness
+
+
+def test_the_skill_says_to_run_the_check_after_every_write():
+    """Task 14d: the live coder wrote kernel.py six times in a row without running the check once."""
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "After each write, run `python3 kernel_check.py` before you write `kernel.py` again." in flat
