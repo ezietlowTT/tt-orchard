@@ -3297,3 +3297,48 @@ def test_the_skill_says_read_file_offset_and_limit_count_lines():
     flat = " ".join(kp.SKILL.read_text().split())
     assert "`read_file` with offset N and limit 60 reads from there (offset and limit count lines)" in flat
     assert "count characters" not in flat
+
+
+# ---- an unchanged rewrite after a failing check (pilot 6, 2026-10-17) ----------------------------------------------
+# The generic reply to an unchanged write says "end the step now". After a failing check that is the wrong advice: the
+# coder rewrote the same text three times, the watchdog saw the loop and ended the attempt at 18 of 40 turns.
+
+def _write(tools, content="x = 1\n"):
+    return tools.call("write_file", json.dumps({"path": "kernel.py", "content": content}))
+
+
+def test_an_unchanged_write_after_a_failing_check_says_the_check_failed_and_to_change_the_code(tmp_path):
+    tools, _ = _probe_tools(tmp_path, "print('FAIL: shape_mismatch: error: ValueError: tiles 2 vs 1')\nprint('where: kernel.py line 4: y')\n")
+    _write(tools)
+    again = _write(tools)
+    assert again.startswith("unchanged: kernel.py already holds exactly this content")
+    assert "its last check failed" in again and "FAIL: shape_mismatch: error: ValueError: tiles 2 vs 1" in again
+    assert "change the code" in again.lower() and "end the step" not in again
+
+
+def test_an_unchanged_write_after_a_passing_check_still_tells_the_model_to_end_the_step(tmp_path):
+    tools, _ = _probe_tools(tmp_path, "print('PASS')\n")
+    _write(tools)
+    again = _write(tools)
+    assert again.startswith("unchanged:") and "end the step now" in again and "failed" not in again
+
+
+def test_an_unchanged_write_before_any_check_keeps_the_generic_reply(tmp_path):
+    tools, adir = _probe_tools(tmp_path, "print('FAIL: x: y')\n")
+    (adir / "kernel.py").write_text("x = 1\n")                   # written outside the tool, so no check has run
+    assert "end the step now" in _write(tools)
+
+
+def test_a_changed_write_after_a_failing_check_runs_the_check_again_and_the_latest_result_counts(tmp_path):
+    tools, adir = _probe_tools(tmp_path, "import pathlib\nprint('PASS' if 'good' in pathlib.Path('kernel.py').read_text() else 'FAIL: c: bad')\n")
+    _write(tools, "bad\n")
+    assert "FAIL: c: bad" in _write(tools, "bad\n")
+    assert "kernel_check.py ran after this write" in _write(tools, "good\n")
+    assert "end the step now" in _write(tools, "good\n")          # the latest check passed
+
+
+def test_a_check_that_printed_neither_pass_nor_fail_counts_as_failed(tmp_path):
+    tools, _ = _probe_tools(tmp_path, "import sys\nsys.exit(3)\n")
+    _write(tools)
+    again = _write(tools)
+    assert "its last check failed" in again and "exit 3" in again and "end the step" not in again

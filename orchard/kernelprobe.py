@@ -269,12 +269,25 @@ class ProbeTools(Tools):
             return f"{body}\n[lines {first} to {last} of {len(lines)}: the end of the file]"
         return f"{body}\n[lines {first} to {last} of {len(lines)}; read on with offset={last + 1}]"
 
+    last_failure = None                  # the FAIL line of the latest check this tool ran, None after a PASS or before any
+
     def write_file(self, path, content) -> str:
         result = super().write_file(path, content)
         target = self.target(path) if isinstance(path, str) else None
-        if not result.startswith("wrote ") or target is None or target != Path(os.path.realpath(self.stage_dir)) / "kernel.py":
+        if target is None or target != Path(os.path.realpath(self.stage_dir)) / "kernel.py":
+            return result
+        if result.startswith("unchanged:") and self.last_failure:
+            # The generic reply says "end the step now". After a failing check that sends the coder away from the fix:
+            # in pilot 6 it rewrote the same text three times and the watchdog ended the attempt at 18 of 40 turns.
+            return ("unchanged: kernel.py already holds exactly this content, and its last check failed "
+                    f"({self.last_failure[:300]}). Change the code; writing the same text again does nothing.")
+        if not result.startswith("wrote "):
             return result
         shown = self.shell("python3 kernel_check.py")
+        lines = [l for l in shown.splitlines() if l.strip()]
+        fails = [l for l in lines if l.startswith("FAIL:")]
+        # Anything but a PASS is a failure: a check that was killed or crashed prints no FAIL line.
+        self.last_failure = fails[0] if fails else (None if any(l == "PASS" for l in lines) else " | ".join(lines[:2]))
         return f"{result}\nkernel_check.py ran after this write:\n{shown[:CHECK_AFTER_WRITE_CHARS]}"
 
 
