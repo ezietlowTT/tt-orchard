@@ -3207,3 +3207,93 @@ def test_a_write_in_a_real_attempt_shows_the_check_to_the_model(tmp_path, fake_k
         run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(authoritative))
         tool_msgs = [m["content"] for m in server.requests[1]["messages"] if m["role"] == "tool"]
     assert any("wrote 6 characters" in t and "kernel_check.py ran after this write" in t for t in tool_msgs), tool_msgs
+
+
+# ---- read_file counts lines in the probe (pilot 1 and pilot 5, 2026-10-17) -----------------------------------------
+# Twice the coder passed grep -n line numbers (1490, 1495, 1415) as read_file offsets, which count characters, got the
+# top of the file, and looped until the watchdog ended the attempt. The skill's advice to use sed was ignored in one of
+# the two. In the probe, offset and limit now count lines, the way the coder keeps using them.
+
+def _numbered_file(tmp_path, n=2000):
+    tools, adir = _probe_tools(tmp_path, "pass\n")
+    (adir / "reference").mkdir()
+    (adir / "reference" / "spec.md").write_text("".join(f"line {i}\n" for i in range(1, n + 1)))
+    return tools, adir
+
+
+def _read(tools, **args):
+    return tools.call("read_file", json.dumps({"path": "reference/spec.md", **args}))
+
+
+def test_probe_read_file_offset_and_limit_count_lines(tmp_path):
+    tools, _ = _numbered_file(tmp_path)
+    out = _read(tools, offset=1495, limit=3)
+    assert out.startswith("line 1495\nline 1496\nline 1497\n") and "line 1498" not in out.split("[")[0]
+    assert "[lines 1495 to 1497 of 2000; read on with offset=1498]" in out
+
+
+def test_probe_read_file_accepts_a_limit_the_model_sends_as_a_string(tmp_path):
+    tools, _ = _numbered_file(tmp_path)
+    assert _read(tools, offset=10, limit="2").startswith("line 10\nline 11\n[lines 10 to 11 of 2000")
+
+
+def test_probe_read_file_without_limit_pages_by_whole_lines_within_the_output_limit(tmp_path):
+    tools, _ = _numbered_file(tmp_path)
+    out = _read(tools, offset=1)
+    body, footer = out.rsplit("\n[", 1)
+    assert len(body) <= tools.limit and body.endswith(tuple("0123456789")) and body.startswith("line 1\n")
+    nxt = int(re.search(r"offset=(\d+)\]", footer)[1])
+    assert body.splitlines()[-1] == f"line {nxt - 1}"            # the page ends on a whole line, and the footer's next line follows it
+    assert _read(tools, offset=nxt).startswith(f"line {nxt}\n")
+
+
+def test_probe_read_file_of_a_small_file_returns_all_of_it(tmp_path):
+    tools, adir = _probe_tools(tmp_path, "pass\n")
+    (adir / "kernel_spec.json").write_text('{"op": "add"}\n')
+    assert tools.call("read_file", json.dumps({"path": "kernel_spec.json"})) == '{"op": "add"}\n'
+
+
+def test_probe_read_file_past_the_end_says_how_many_lines_there_are(tmp_path):
+    tools, _ = _numbered_file(tmp_path, n=5)
+    out = _read(tools, offset=99)
+    assert out.startswith("error:") and "5 lines" in out
+
+
+@pytest.mark.parametrize("args", [{"offset": -1}, {"offset": "x"}, {"offset": 1, "limit": 0}, {"offset": 1, "limit": "y"},
+                                  {"offset": True}])
+def test_probe_read_file_refuses_a_bad_offset_or_limit(tmp_path, args):
+    tools, _ = _numbered_file(tmp_path)
+    assert _read(tools, **args).startswith("error:")
+
+
+def test_probe_read_file_keeps_the_directory_and_link_rules(tmp_path):
+    tools, adir = _numbered_file(tmp_path)
+    assert tools.call("read_file", json.dumps({"path": "../../secret", "offset": 1})).startswith("refused:")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret\n")
+    (adir / "link.txt").symlink_to(outside)
+    assert tools.call("read_file", json.dumps({"path": "link.txt", "offset": 1})).startswith("refused:")
+    assert tools.call("read_file", json.dumps({"path": "reference", "offset": 1})).startswith("error:")
+
+
+def test_probe_tool_schema_says_lines_and_the_step_sends_it(tmp_path, fake_kenv):
+    tools, _ = _probe_tools(tmp_path / "x", "pass\n")
+    props = {s["function"]["name"]: s["function"]["parameters"]["properties"] for s in tools.schemas}["read_file"]
+    assert "line" in props["offset"]["description"] and "limit" in props
+    authoritative = {"passed": False, "category": "no_kernel", "first_line": "kernel.py does not exist", "sets": []}
+    with FakeModel(scripted(final("done"))) as server:
+        run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(authoritative))
+        sent = {s["function"]["name"]: s for s in server.requests[0]["tools"]}["read_file"]
+    assert "limit" in sent["function"]["parameters"]["properties"]
+
+
+def test_the_generic_read_file_still_counts_characters():
+    from orchard import agent
+    props = {s["function"]["name"]: s["function"]["parameters"]["properties"] for s in agent.TOOL_SCHEMAS}["read_file"]
+    assert "character" in props["offset"]["description"] and "limit" not in props
+
+
+def test_the_skill_says_read_file_offset_and_limit_count_lines():
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "`read_file` with offset N and limit 60 reads from there (offset and limit count lines)" in flat
+    assert "count characters" not in flat

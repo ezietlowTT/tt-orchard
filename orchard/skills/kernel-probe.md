@@ -13,7 +13,7 @@ Reference files:
   `ttl.block.fill`. It passes in the simulator. tt-lang's CI marks it `TTLANG_HARDWARE_CI: xfail-compiler`: it is
   expected to fail on the hardware compiler.
 - `reference/TTLangSpecification.md`: the specification of that tt-lang (version 0.20). It is long: `grep -n "reduce_sum" <file>`
-  finds a name, `sed -n 'N,Mp' <file>` reads lines N to M (`read_file` offsets count characters, not lines).
+  finds a name's line N, `read_file` with offset N and limit 60 reads from there (offset and limit count lines).
 - `reference/guide.md` and `reference/examples.md`: the tt-lang skill's guide and worked examples. They were written
   for specification 0.12, so take every name and signature from the two .py files and the specification.
 

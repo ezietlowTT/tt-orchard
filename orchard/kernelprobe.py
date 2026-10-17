@@ -49,6 +49,7 @@ stopped the run; 5 means a hardware run hung. With 3, 4 and 5 the report covers 
 """
 from __future__ import annotations
 
+import copy
 import errno
 import fcntl
 import hashlib
@@ -66,7 +67,7 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from orchard import defaults, ttlang_env
-from orchard.agent import AgentStep, Tools, agent_env, probe_model
+from orchard.agent import TOOL_SCHEMAS, AgentStep, Tools, agent_env, probe_model
 from orchard.canary import post_json
 from orchard.ledger import Ledger
 from orchard.stallwatch import StallWatcher, Watched, run_watched
@@ -203,6 +204,70 @@ class ProbeTools(Tools):
     Pilot 4 (2026-10-17): the coder wrote kernel.py three times and never ran kernel_check.py, although the skill says
     to after each write, so it never saw the failing line or the hint. This is the same `python3 kernel_check.py` the
     agent may run itself, so the authoritative check, which runs in a clean directory, is not affected."""
+
+    @property
+    def schemas(self) -> list:
+        """The tool schemas the model is sent: the generic ones with read_file's offset in lines and a limit in lines."""
+        out = []
+        for schema in TOOL_SCHEMAS:
+            if schema["function"]["name"] == "read_file":
+                schema = copy.deepcopy(schema)
+                schema["function"]["description"] = (
+                    "Read a text file inside the run directory (read only). The path is relative to the run directory, "
+                    "or to your stage directory when it is not found there. A long file comes back one page at a time: "
+                    "the page ends with the offset to pass to read the next one.")
+                props = schema["function"]["parameters"]["properties"]
+                props["offset"] = {"type": "integer", "description": "first line to read, counting from 1 (the number "
+                                   "grep -n prints); default 1"}
+                props["limit"] = {"type": "integer", "description": "how many lines to read (default: as many as fit)"}
+            out.append(schema)
+        return out
+
+    def call(self, name: str, arguments: str) -> str:
+        if name == "read_file":
+            try:
+                args = json.loads(arguments or "{}")
+            except ValueError:
+                return "error: the arguments are not JSON"
+            if isinstance(args, dict):
+                return self.read_lines(args.get("path"), args.get("offset"), args.get("limit"))
+        return super().call(name, arguments)
+
+    def read_lines(self, path, offset=None, limit=None) -> str:
+        """read_file for the probe: `offset` is the first line (from 1) and `limit` a number of lines. The coder kept
+        passing grep -n line numbers as the generic tool's character offsets (pilot 1 and 5, 2026-10-17). A number
+        sent as a string, as the coder sends `limit`, is accepted. A page ends on a whole line, within the output limit."""
+        def whole(v, default, low):
+            if v is None:
+                return default
+            if isinstance(v, bool) or not isinstance(v, (int, str)) or (isinstance(v, str) and not v.strip().isdigit()):
+                return None
+            v = int(v)
+            return v if v >= low else None
+        first, count = whole(offset, 1, 0), whole(limit, None, 1)
+        if first is None or (limit is not None and count is None):
+            return "error: offset is the first line to read (1 or more) and limit a number of lines (1 or more)"
+        first = max(first, 1)
+        found, error = self.readable(path)
+        if error:
+            return error
+        text = Path(found).read_text(encoding="utf-8", errors="replace")
+        lines = text.splitlines(keepends=True)
+        if first == 1 and count is None and len(text) <= self.limit:
+            return text
+        if first > len(lines):
+            return f"error: offset {first} is past the end of the file ({len(lines)} lines)"
+        chosen, size = [], 0
+        for line in lines[first - 1:first - 1 + (count or len(lines))]:
+            if chosen and size + len(line) > self.limit:
+                break
+            chosen.append(line)
+            size += len(line)
+        last = first + len(chosen) - 1
+        body = "".join(chosen).rstrip("\n")
+        if last >= len(lines):
+            return f"{body}\n[lines {first} to {last} of {len(lines)}: the end of the file]"
+        return f"{body}\n[lines {first} to {last} of {len(lines)}; read on with offset={last + 1}]"
 
     def write_file(self, path, content) -> str:
         result = super().write_file(path, content)
