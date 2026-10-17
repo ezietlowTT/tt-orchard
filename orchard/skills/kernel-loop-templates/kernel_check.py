@@ -392,6 +392,23 @@ def source_pointer(text: str) -> str:
     return ""
 
 
+TILE_SLICE_RE = re.compile(r"(?P<axis>\w+) slice (?P<start>\d+):(?P<stop>\d+) is outside the tensor, "
+                           r"which has (?P<extent>\d+) tile\(s\) along it")
+
+
+def unit_hint(text: str) -> str:
+    """One sentence for the commonest mistake: a slice counted in elements where the tensor counts tiles, or "".
+
+    With the failing line in front of it, the coder (pilot 3, 2026-10-17) still passed `0:32` to a tensor of 2 tiles
+    and did not fix it in 20 turns. The simulator's message says "tile(s)" and does not say that slices count tiles.
+    The hint states the unit and the extent from the message. It names no op and gives no answer."""
+    m = TILE_SLICE_RE.search(text)
+    if not m:
+        return ""
+    return (f"tensor slices count tiles, not elements (one tile is 32x32). This tensor has {m['extent']} tile(s) along "
+            f"the {m['axis']} axis, so a slice there must lie within 0:{m['extent']}; {m['start']}:{m['stop']} is too wide.")
+
+
 def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
@@ -639,6 +656,9 @@ def _main(argv=None) -> int:
     where = source_pointer(text) if category is not None else ""
     if where:
         print(f"where: {where}")            # after the FAIL line, which the probe reads, so that line is unchanged
+    hint = unit_hint(text) if category is not None else ""
+    if hint:
+        print(f"hint: {hint}")
     return 0 if category is None else 1
 
 

@@ -1301,3 +1301,40 @@ def test_where_follows_only_the_first_pointer_even_when_a_later_one_is_in_kernel
     text = ("error: E1\n  --> /venv/ttl/sim/dfb.py:9:1\n   |\n9 |     raise\n   |\n"
             "error: E2\n  --> /w/kernel.py:7:1\n   |\n7 |     y = 1\n   |\n")
     assert CHECK.source_pointer(text) == ""
+
+
+# --- hint: tensor slices count tiles (pilot 3, 2026-10-17) -------------------------------------------------------
+# With the failing line in front of it, the coder still passed element coordinates (`row slice 0:32`) to a tensor of
+# 2 tiles and did not fix it in 20 turns. The message says "tile(s)" and never says that slices count tiles.
+
+REAL_INDEX_ERROR = "error: IndexError: row slice 0:32 is outside the tensor, which has 2 tile(s) along it"
+
+
+def test_unit_hint_says_slices_count_tiles_and_names_the_extent():
+    hint = CHECK.unit_hint(REAL_INDEX_ERROR)
+    assert hint.startswith("tensor slices count tiles, not elements")
+    assert "32x32" in hint and "2 tile(s) along the row axis" in hint and "within 0:2" in hint and "0:32" in hint
+
+
+def test_unit_hint_names_the_axis_the_error_names():
+    assert "along the col axis" in CHECK.unit_hint("error: IndexError: col slice 8:16 is outside the tensor, "
+                                                    "which has 8 tile(s) along it")
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "error: ValueError: Shape mismatch in binary operation: left shape (2, 1) does not match right shape (2, 8).",
+    # a different unit is not the element-for-tile mistake
+    "error: IndexError: row slice 0:3 is outside the tensor, which has 2 element(s) along it",
+])
+def test_unit_hint_is_empty_for_other_errors(text):
+    assert CHECK.unit_hint(text) == ""
+
+
+@needs_sim
+def test_a_failing_check_prints_the_unit_hint_after_where(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_element_slices")
+    done, check = _run_check(tdir, adir)
+    lines = done.stdout.splitlines()
+    assert lines[0].startswith("FAIL: tt_lang_error: ") and lines[1].startswith("where: kernel.py line ")
+    assert len(lines) == 3 and lines[2].startswith("hint: tensor slices count tiles, not elements"), done.stdout
