@@ -1305,3 +1305,7 @@ preflight whether we have the latest even." The live probe had given the coder o
   `no_kernel: kernel.py defines no OPERATION`, because it named the function `rmsnorm`. The check now names a single
   misnamed `@ttl.operation` function and says to rename it (still `no_kernel`); the skill says the name is literally
   `OPERATION`, gives a skeleton, and says inputs come in the order of the spec's `inputs` keys.
+- Task 14c (2026-10-16): the next L4c rmsnorm attempt sliced in elements (tt-lang slices count tiles) and then
+  alternated two identical `sed` commands for 9 turns, which TurnRepeat did not report. The skill now states units,
+  dtype and the output as general facts, each checked against the harness, the specification or a simulator run.
+  TurnRepeat gained a cycle track (period 2 or 3, three full periods), which applies to every agent step.

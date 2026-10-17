@@ -420,3 +420,7 @@ Each item changes or adds to the approved design above. Reasons come from the im
       another name, the `no_kernel` line names it and says to rename it to `OPERATION` (the category stays
       `no_kernel`, and the probe's re-check and the hardware gate give the same line). The skill's step 3 says the
       name is literally `OPERATION`, with a skeleton, and that inputs come in the order of `inputs` in the spec.
+    - Task 14c: the skill states general facts on units (spec shapes and `x.shape` count elements; buffer shapes and
+      tensor slices count tiles of 32 x 32; inputs are bf16 in tile layout), the simulator's IndexError for a slice
+      in elements, and that the result is written into `out`. No op-specific code. The watchdog's TurnRepeat also
+      reports a cycle of period 2 or 3 repeated for three full periods (all stages; identical signatures only).
