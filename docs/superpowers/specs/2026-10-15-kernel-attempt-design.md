@@ -405,3 +405,14 @@ Each item changes or adds to the approved design above. Reasons come from the im
       current, dirty or on another branch, never a block, because bringup runs unattended. Orchard never updates a
       source; each result names the command a person runs.
     - Not measured: whether the extra reference files raise the probe's pass counts. No probe has run with them.
+    - After the independent review (fix wave): the skill says to copy only the operation function (the examples'
+      `from sim import ttl, ttnn`, `import torch` and from_torch/to_torch host code are refused; a test runs the gate
+      over every shipped reference and requires the skill to name each construct it refuses) and that the reduce
+      example is tagged `TTLANG_HARDWARE_CI: xfail-compiler`. An `unknown` result names no update. ls-remote's
+      answer is read by the exact ref `refs/heads/main`. A cache file that raises RecursionError is ignored. The
+      readers check the file type before the open and refuse a linked directory on the way to a reference file. The
+      skill files are read once and the same bytes are hashed and copied. A dry run and the UI preflight write no
+      cache. git runs with `http.followRedirects=false`, `core.fsmonitor=false` and `core.hooksPath=/dev/null`, and a
+      timed-out call is killed with its process group. The block on a tt-lang checkout behind upstream main stays; its
+      message says the fix is to move the pin and names `TTLANG_PIN`, `TTLANG_DIAGNOSTICS_SHA256` and
+      `tt-orchard kernel-env`.

@@ -1191,14 +1191,20 @@ result says what to run.
   with the old checkout moved aside. Until then the probe needs `--allow-stale-skills`.
 - A comparison that cannot be made (no network, an origin off github.com, a malformed answer) is `unknown`, never
   current. A check from the last 24 hours that found the same local state current covers it; otherwise the probe
-  refuses. Results are cached in `~/.cache/tt-orchard/skills-freshness.json`.
+  refuses. Results are cached in `~/.cache/tt-orchard/skills-freshness.json`; `kernel-env --check`, a bringup dry
+  run and the UI's preflight keep them in memory and write no file. An `unknown` result names no update; it says to
+  compare again when GitHub answers.
 - The checker runs only read-only git commands (`git status` without taking the index lock) and `gh api` GET
-  requests to github.com, each with a 15 s timeout and 45 s for all of them.
+  requests to github.com, each with a 15 s timeout and 45 s for all of them. git follows no HTTP redirect and runs no
+  fsmonitor command or hook, and a call that times out is killed with its whole process group.
 - The tt-lang skill documents tt-lang specification 0.12; the pinned checkout documents 0.20. The check warns when
   the skill's version is older. The probe gives the coder both: the skill's `guide.md` and `examples.md`, and the
   checkout's `TTLangSpecification.md`, `eltwise_add.py` and `eltwise_broadcast_reduce.py`, in each attempt's
   `reference/` directory. Its skill (`orchard/skills/kernel-probe.md`) says which file to read for each kind of op
-  and which names changed since 0.12. Each file's sha256 is in the report and in every attempt's provenance.
+  and which names changed since 0.12. Each file's sha256 is in the report and in every attempt's provenance. The
+  skill files are read once: the freshness check hashes the same bytes the coder gets. A reference file reached
+  through a linked directory is refused. `eltwise_broadcast_reduce.py` passes in the simulator and is tagged
+  `TTLANG_HARDWARE_CI: xfail-compiler` by tt-lang's CI, and the skill says so.
 
 ### 5.10 Tensor caches and disk
 

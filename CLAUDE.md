@@ -1296,3 +1296,8 @@ preflight whether we have the latest even." The live probe had given the coder o
   so the probe now refuses without `--allow-stale-skills` until the pin moves; the tt-lang skill matches its upstream; the
   tenstorrent/skills clone is 3 commits behind, dirty, on `tsingletaryTT/squeeze` (a bringup warning).
 - Not measured: whether the reference files change the probe's pass counts.
+- Fix wave after the independent review (`.superpowers/sdd/2026-10-15-kernel-attempt/task-14-review.md` in the
+  `kernel-attempt` worktree): I1 to I3, M1 to M9, and git hardening (no redirects, no fsmonitor or hooks, process-group
+  kill on a timeout), one commit each, test first. Notable: the conftest guard now fails a test that reaches the real
+  git or gh runner; a process test first passed under its mutation because the call still waited the full 60 s for the
+  grandchild to close the pipes, so it now bounds the call's duration.
