@@ -82,15 +82,28 @@ def default_cache_path() -> Path:
 
 
 def _raw_run(argv, timeout, env=None):
-    """(returncode, stdout, stderr), like ttlang_env.real_run. A timeout answers 124 and a missing program 127."""
+    """(returncode, stdout, stderr), like ttlang_env.real_run. A timeout answers 124 and a missing program 127.
+
+    The command runs in its own session. On a timeout the whole process group is killed, so a helper git started
+    (git-remote-https, ssh) does not outlive the call; subprocess.run would kill only the direct child."""
+    import signal
     import subprocess
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
-    except subprocess.TimeoutExpired:
-        return 124, "", f"timed out after {timeout:.0f} s"
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, env=env, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         return 127, "", f"{type(exc).__name__}: {exc}"
-    return done.returncode, done.stdout, done.stderr
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if proc.pid > 1:                                # its own group (start_new_session), never ours
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        proc.communicate()
+        return 124, "", f"timed out after {timeout:.0f} s"
+    return proc.returncode, out, err
 
 
 def _git_subcommand(argv) -> tuple[str | None, list[str]]:

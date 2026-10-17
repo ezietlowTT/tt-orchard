@@ -711,3 +711,33 @@ def test_a_configured_fsmonitor_does_not_run_during_the_status_check(tmp_path):
     rc, _, err = runner(["git", "-C", str(repo), "status", "--porcelain"], network=False)
     assert rc == 0, err
     assert not mark.exists()
+
+
+def test_a_timed_out_call_leaves_no_process_of_its_group_behind(tmp_path):
+    """subprocess.run kills only the direct child on a timeout; a git-remote-https or ssh child would stay. The raw
+    runner starts each command in its own session and kills the whole group."""
+    import signal
+    import time
+    pidfile = tmp_path / "pid"
+    started = time.monotonic()
+    rc, _, err = REAL_RAW_RUN(["sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"], 1.0)
+    elapsed = time.monotonic() - started
+    pid = int(pidfile.read_text())
+    try:
+        assert rc == 124 and "timed out" in err
+        # A runner that kills only `sh` then waits for the grandchild to close the pipes: the call takes the full 60 s.
+        assert elapsed < 10, elapsed
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            pytest.fail(f"the grandchild {pid} still runs after the timeout")
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
