@@ -43,8 +43,20 @@ Rules from the specification and the examples:
 Steps:
 1. Read `kernel_spec.json`. It lists the inputs, their shapes, the output shape, and what the op computes.
 2. Read `reference/eltwise_add.py` once, then the files listed above for your kind of op.
-3. Write `kernel.py` with write_file. Define `OPERATION`: it takes the inputs in the order `kernel_spec.json` lists
-   them, then the output tensor last.
+3. Write `kernel.py` with write_file. The function's name is literally `OPERATION`, whatever the op is called:
+   `def rmsnorm(...)` fails with `no_kernel`. It takes the inputs in the order of the keys under `inputs` in
+   `kernel_spec.json`, then the output tensor last; the parameter names are yours. The examples' functions are
+   named `eltwise_add` and `eltwise_broadcast_reduce`: when you copy one, rename it to `OPERATION`. The skeleton:
+
+   ```python
+   import ttl
+   import ttnn
+
+
+   @ttl.operation(grid="full")
+   def OPERATION(x, w, out):
+       ...
+   ```
 4. Run `python3 kernel_check.py`. It prints `PASS`, or `FAIL: <category>: <first line>`.
 5. Read that line. Change one thing. Run it again.
 

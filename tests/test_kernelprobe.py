@@ -727,9 +727,9 @@ def test_the_skill_states_every_rule_the_gate_enforces():
     assert "`__name__` and `__all__`" in flat and "from __future__" in flat
     # the file rule belongs to the probe, which applies it when it takes kernel.py
     assert "The probe also refuses" in flat
-    # The reference-file section (Task 14) took the skill from 46 to about 80 lines; the bound keeps it short enough
-    # for a small coder to read in one turn.
-    assert len(kp.SKILL.read_text().splitlines()) <= 90
+    # The reference-file section (Task 14) took the skill from 46 to about 80 lines and the OPERATION skeleton (Task 14b)
+    # to 93; the bound keeps it short enough for a small coder to read in one turn.
+    assert len(kp.SKILL.read_text().splitlines()) <= 100
 
 
 def test_the_report_header_says_the_wall_budget_can_overrun_by_one_tool_timeout(tmp_path, fake_kenv):
@@ -3037,3 +3037,48 @@ def test_the_hardware_gate_gives_the_same_rename_line(tmp_path, fake_kenv):
     hw = kp.hardware_phase(adir, attempt, env=fake_kenv, shared_python="/p", run_watched=hw_writer([GOOD_HW_SET], calls))
     assert calls == [] and hw["passed"] is False and hw["category"] == "no_kernel"
     assert hw["first_line"] == RENAME_LINE
+
+
+def _skeleton() -> str:
+    """The code block in the skill's step 3."""
+    text = kp.SKILL.read_text()
+    import textwrap
+    blocks = re.findall(r"```python\n(.*?)\n *```", text, flags=re.S)
+    assert len(blocks) == 1, "the skill has one code skeleton"
+    return textwrap.dedent(blocks[0]) + "\n"
+
+
+def test_the_skill_says_the_function_is_literally_named_operation_with_a_skeleton():
+    """Task 14b: "Define `OPERATION`" was read as a placeholder for the op's name."""
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "literally `OPERATION`" in flat and "whatever the op is called" in flat
+    assert "`def rmsnorm(...)` fails" in flat
+    lines = [l for l in _skeleton().splitlines() if l.strip()]
+    assert lines[0] == "import ttl" and lines[1] == "import ttnn"
+    assert lines[2] == '@ttl.operation(grid="full")' and lines[3].startswith("def OPERATION(")
+    assert lines[3].rstrip().endswith("out):")
+
+
+def test_the_skeleton_passes_the_gate_and_a_renamed_copy_does_not(tmp_path):
+    gate = kp._template("kernel_check")
+    k = tmp_path / "kernel.py"
+    k.write_text(_skeleton().replace("...", "pass"))
+    assert gate.check_kernel_source(k) == (True, "")
+    k.write_text(_skeleton().replace("...", "pass").replace("def OPERATION(", "def rmsnorm("))
+    ok, reason = gate.check_kernel_source(k)
+    assert ok is False and "named 'rmsnorm': rename it to OPERATION" in reason
+
+
+def test_the_skill_says_inputs_are_passed_in_the_order_of_the_spec_keys_then_out():
+    """The harness calls OPERATION(*inputs in the order of kernel_spec.json's `inputs` keys, out)."""
+    flat = " ".join(kp.SKILL.read_text().split())
+    assert "in the order of the keys under `inputs`" in flat and "output tensor last" in flat
+    harness = (kp.TEMPLATES / "kernel_harness.py").read_text()
+    assert 'for name, shape in spec["inputs"].items():' in harness and "operation(*tt_ins, out)" in harness
+
+
+def test_the_skill_says_the_examples_functions_must_be_renamed():
+    flat = " ".join(kp.SKILL.read_text().split())
+    for name in ("eltwise_add", "eltwise_broadcast_reduce"):
+        assert f"`{name}`" in flat, name
+    assert "rename it to `OPERATION`" in flat
