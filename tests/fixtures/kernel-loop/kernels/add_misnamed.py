@@ -2,8 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # Test fixture for tt-orchard's kernel loop: upstream tt-lang examples/eltwise_add.py with the
-# function renamed OPERATION and the host code removed. The function is named eltwise_add again, so the file is valid
-# and defines no OPERATION: the check must end no_kernel.
+# host code removed and the function keeping its upstream name, eltwise_add. Since Task 14d the operation's name is
+# free: the one @ttl.operation function is the operation, so this kernel must pass.
 import ttl
 import ttnn
 

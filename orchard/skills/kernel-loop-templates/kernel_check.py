@@ -17,8 +17,8 @@ and writes no check.json; the process then ends by that same signal, so its exit
 Before the simulator runs, a static gate (`check_kernel_source`) reads kernel.py with `ast` and refuses the shortcuts a
 model is likely to try: importing anything but ttl, ttnn and math (and a short list of names from typing and
 __future__), calling open/exec/eval and similar or reaching them or os/sys as an attribute, naming dunder
-attributes, naming ttnn's to_torch/from_torch, and an OPERATION that is not a top-level def decorated with
-ttl.operation. A refused kernel ends `forbidden_code` and never runs. The gate is best effort. The kernel still runs in
+attributes, naming ttnn's to_torch/from_torch, and an operation that is not exactly one top-level def decorated
+with ttl.operation (any name). A refused kernel ends `forbidden_code` and never runs. The gate is best effort. The kernel still runs in
 the harness's own process, so a determined kernel can find a way around a static check; the gate stops the easy ways.
 
 A kernel passes only when every input set is inside every bar: PCC, relative L2 error, least-squares slope, and
@@ -80,8 +80,8 @@ REMEDIES = {
     "import": "import only ttl, ttnn and math, and compute with ttl.math and block operators",
     "name": "remove it, a kernel does not need it",
     "dunder": "remove it, a kernel does not need dunder attributes",
-    "readback": "the harness reads the result back; remove the host code and keep only OPERATION",
-    "operation": "define OPERATION once, as a top-level def decorated only with @ttl.operation(...)",
+    "readback": "the harness reads the result back; remove the host code and keep only the @ttl.operation function",
+    "operation": "define one top-level function decorated only with @ttl.operation(...), with any name",
 }
 MAX_LISTED = 8                                          # violations printed in the FAIL line; check.json keeps all
 
@@ -192,15 +192,19 @@ def _violation(line: int, rule: str, detail: str, remedy: str | None = None) -> 
     return {"rule": rule, "line": line, "detail": detail, "remedy": remedy or REMEDIES[rule]}
 
 
-def _analyse(path) -> tuple[list, bool, list]:
-    """(violations sorted by line, whether a top-level def OPERATION exists, the names of top-level defs under
-    another name that are decorated with ttl's operation). A file that does not parse gives ([], True, []), so the
-    harness reports its SyntaxError."""
+def _analyse(path) -> tuple[list, str | None, bool]:
+    """(violations sorted by line, the operation's name or None, whether the file parsed).
+
+    The operation is the one top-level def decorated with ttl's operation, whatever its name (Task 14d: three live
+    runs named it after the op although the skill said OPERATION). Its name must be bound only by that def, it must
+    have that one decorator, and the name may not be one the gate forbids. Two or more such defs are a violation. A
+    def named OPERATION must carry the decorator, as before. A file that does not parse gives ([], None, False), and
+    the gate lets it through so the harness reports its SyntaxError."""
     source = Path(path).read_text(encoding="utf-8")
     try:
         tree = ast.parse(source)
     except SyntaxError:
-        return [], True, []
+        return [], None, False
     found = []
     for node in ast.walk(tree):
         line = getattr(node, "lineno", 0)
@@ -252,7 +256,7 @@ def _analyse(path) -> tuple[list, bool, list]:
     ttl_names, op_names = set(), set()
     for name, entries in bindings.items():
         kinds = {k for _, k in entries}
-        if name == "OPERATION" or not kinds & alias_kinds:
+        if name == "OPERATION" or not kinds & alias_kinds:    # OPERATION's own binding rule reports it once
             continue
         if len(kinds) > 1:                                # bound to ttl (or its operation) and also to something else
             for line, kind in sorted(entries):
@@ -261,19 +265,36 @@ def _analyse(path) -> tuple[list, bool, list]:
                                             "keep the names ttl and operation for the imports and use another name"))
             continue
         (ttl_names if "import ttl" in kinds else op_names).add(name)
-    defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "OPERATION"]
-    for line, kind in sorted(bindings.get("OPERATION", ())):
-        if kind != "def":
-            found.append(_violation(line, "operation", "OPERATION is bound by something other than its decorated def"))
-    for n in defs:
-        if len(n.decorator_list) != 1 or not _resolves_to_ttl_operation(n.decorator_list[0], ttl_names, op_names):
+    top_defs = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    decorated = [n for n in top_defs if any(_resolves_to_ttl_operation(d, ttl_names, op_names) for d in n.decorator_list)]
+    # A def named OPERATION keeps the old rule: it is meant as the operation, so it must carry the decorator.
+    for n in top_defs:
+        if n.name == "OPERATION" and n not in decorated:
             found.append(_violation(n.lineno, "operation", "OPERATION must be decorated with ttl.operation and nothing else"))
+    if len(decorated) > 1:
+        names = ", ".join(n.name for n in decorated)
+        found.append(_violation(decorated[1].lineno, "operation",
+                                f"{len(decorated)} functions are decorated with @ttl.operation ({names})",
+                                "define exactly one @ttl.operation function"))
+    op = decorated[0] if len(decorated) == 1 else None
+    if op is not None:
+        name = op.name
+        if len(op.decorator_list) != 1:
+            found.append(_violation(op.lineno, "operation", f"{name} must be decorated with ttl.operation and nothing else"))
+        if any(kind != "def" for _, kind in bindings.get(name, ())) or \
+                sum(1 for _, kind in bindings.get(name, ()) if kind == "def") > 1:
+            for line, kind in sorted(bindings.get(name, ())):
+                if line != op.lineno or kind != "def":
+                    found.append(_violation(line, "operation",
+                                            f"{name} is bound by something other than its decorated def"))
+        if name in FORBIDDEN_NAMES or name in CALL_ONLY_NAMES or name in READBACK_NAMES or _is_dunder(name):
+            found.append(_violation(op.lineno, "operation", f"the operation's name {name} is a name the gate refuses",
+                                    "give the @ttl.operation function another name"))
+    for line, kind in sorted(bindings.get("OPERATION", ())):
+        if kind != "def" and (op is None or op.name != "OPERATION"):
+            found.append(_violation(line, "operation", "OPERATION is bound by something other than its decorated def"))
     unique = {(v["line"], v["rule"], v["detail"]): v for v in found}
-    # Top-level defs under another name whose decorators include ttl's operation: the coder's operation, misnamed.
-    misnamed = [n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and n.name != "OPERATION"
-                and any(_resolves_to_ttl_operation(d, ttl_names, op_names) for d in n.decorator_list)]
-    return [unique[k] for k in sorted(unique)], bool(defs), misnamed
+    return [unique[k] for k in sorted(unique)], (op.name if op is not None else None), True
 
 
 def kernel_source_violations(path) -> list[dict]:
@@ -283,8 +304,9 @@ def kernel_source_violations(path) -> list[dict]:
     FROM_NAME_ALLOWED; no star imports), `name` (FORBIDDEN_NAMES as a name, an attribute, an imported name or the name
     an import binds; a call of input(); any dunder name but __name__ and __all__), `dunder` (an attribute
     whose name starts and ends with two underscores), `readback` (to_torch and from_torch, as an attribute, a name
-    or an imported name), `operation` (OPERATION must be bound only by one top-level def whose only decorator is ttl's
-    operation, reached through `import ttl [as x]` or `from ttl import operation [as x]`, names nothing rebinds).
+    or an imported name), `operation` (exactly one top-level def whose only decorator is ttl's operation, reached
+    through `import ttl [as x]` or `from ttl import operation [as x]`, names nothing rebinds; its name, any name the
+    gate does not refuse, is bound only by that def; a def named OPERATION must carry the decorator).
 
     The whole file is checked, including an `if __name__ == "__main__":` block. The harness loads kernel.py under
     another module name, so that block never runs, but the gate does not rely on that. Best effort: this reads the
@@ -292,15 +314,16 @@ def kernel_source_violations(path) -> list[dict]:
     return _analyse(path)[0]
 
 
-NO_OPERATION = "kernel.py defines no OPERATION"
+NO_OPERATION = "kernel.py defines no @ttl.operation function"
 
 
-def no_operation_text(misnamed: list[str]) -> str:
-    """The no_kernel line. With exactly one @ttl.operation function under another name it names that function, because
-    a coder reads "Define OPERATION" as a placeholder for the op's name; with none or several it is the plain line."""
-    if len(misnamed) == 1:
-        return f"{NO_OPERATION}; your @ttl.operation function is named {misnamed[0]!r}: rename it to OPERATION"
-    return NO_OPERATION
+def operation_name(path) -> str | None:
+    """The name of the operation the gate accepted: the one top-level @ttl.operation function, when kernel.py breaks
+    no rule. None when the gate refuses the file, finds no operation, or the file does not parse. The harness calls
+    this function, so every path that runs a kernel (the agent's check, the probe's re-check, the hardware phase)
+    calls the function the gate judged."""
+    found, name, parsed = _analyse(path)
+    return name if parsed and not found else None
 
 
 def violations_summary(found: list[dict]) -> str:
@@ -313,13 +336,14 @@ def violations_summary(found: list[dict]) -> str:
 
 def check_kernel_source(path) -> tuple[bool, str]:
     """The static gate. (True, "") when kernel.py breaks no rule; (False, violations_summary(...)) when it does;
-    (False, "no-operation: ...") when it breaks none and defines no OPERATION, which the check reports as no_kernel.
+    (False, "no-operation: ...") when it breaks none and defines no @ttl.operation function, which the check reports
+    as no_kernel.
     A file that does not parse passes, so the harness reports its SyntaxError as import_error."""
-    found, has_operation, misnamed = _analyse(path)
+    found, name, parsed = _analyse(path)
     if found:
         return False, violations_summary(found)
-    if not has_operation:
-        return False, "no-operation: " + no_operation_text(misnamed)
+    if parsed and name is None:
+        return False, "no-operation: " + NO_OPERATION
     return True, ""
 
 
@@ -384,7 +408,7 @@ def classify(*, kernel_present, timed_out, returncode, text, result, bar, phase=
     if diagnostics_present is not True and "FileNotFoundError" in blob and "diagnostics.py" in blob:
         return "harness_error", "tt-lang-sim's diagnostics.py is missing; run `tt-orchard kernel-env`"
     if err and err.get("type") == "NoOperation":
-        return "no_kernel", "kernel.py defines no OPERATION"
+        return "no_kernel", NO_OPERATION
     if err and err.get("phase") == "setup":         # the spec, the references, the device or the inputs
         first = ((err.get("text") or "").splitlines() or [""])[0]
         return "harness_error", f"{err.get('type')}: {first}"[:200]

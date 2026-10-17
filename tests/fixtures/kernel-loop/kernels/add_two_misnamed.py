@@ -2,8 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 # Test fixture for tt-orchard's kernel loop: upstream tt-lang examples/eltwise_add.py with the
-# function renamed OPERATION and the host code removed, defined twice under two names other than OPERATION. With
-# two candidates the check cannot say which one to rename, so it keeps the plain no_kernel message.
+# host code removed, plus a second @ttl.operation function. The gate refuses two operation functions
+# (forbidden_code: define exactly one @ttl.operation function).
 import ttl
 import ttnn
 
