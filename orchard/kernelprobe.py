@@ -193,13 +193,33 @@ def prepare_attempt(adir: Path, *, op: str, env, tt_lang: dict | None = None,
     return []
 
 
+CHECK_AFTER_WRITE_CHARS = 1500          # the most of the check's output that is shown after a write
+
+
+class ProbeTools(Tools):
+    """The agent's tools, with one addition: after every write of kernel.py the shipped check runs and its output is
+    appended to the write's result.
+
+    Pilot 4 (2026-10-17): the coder wrote kernel.py three times and never ran kernel_check.py, although the skill says
+    to after each write, so it never saw the failing line or the hint. This is the same `python3 kernel_check.py` the
+    agent may run itself, so the authoritative check, which runs in a clean directory, is not affected."""
+
+    def write_file(self, path, content) -> str:
+        result = super().write_file(path, content)
+        target = self.target(path) if isinstance(path, str) else None
+        if not result.startswith("wrote ") or target is None or target != Path(os.path.realpath(self.stage_dir)) / "kernel.py":
+            return result
+        shown = self.shell("python3 kernel_check.py")
+        return f"{result}\nkernel_check.py ran after this write:\n{shown[:CHECK_AFTER_WRITE_CHARS]}"
+
+
 def attempt_tools(adir: Path) -> Tools:
     """The agent's tools. The attempt directory is both the run and the stage directory, so the agent reads and writes
     only there. The environment is agent_env's: the no-chip device mask, no credentials, HOME inside the attempt. Every
     shell command goes through the runner's rules (no pip, no gozer writes, no resets, no uploads). A shell command may
     run as long as one simulator check plus a margin."""
     adir = Path(adir)
-    return Tools(adir, adir, agent_env(adir), timeout=AGENT_TOOL_TIMEOUT_S)
+    return ProbeTools(adir, adir, agent_env(adir), timeout=AGENT_TOOL_TIMEOUT_S)
 
 
 class ProbeControl:

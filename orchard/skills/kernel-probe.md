@@ -62,8 +62,8 @@ Steps:
    def my_op(x, w, out):
        ...
    ```
-4. After each write, run `python3 kernel_check.py` before you write `kernel.py` again. It prints `PASS`, or
-   `FAIL: <category>: <first line>`.
+4. Each write of `kernel.py` runs `python3 kernel_check.py` and shows its output below the write's result. It prints
+   `PASS`, or `FAIL: <category>: <first line>`, then `where:` (the failing line) and sometimes `hint:`.
 5. Read that line. Change one thing. Run it again.
 
 Advice:

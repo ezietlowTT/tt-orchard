@@ -3151,7 +3151,59 @@ def test_the_hardware_phase_runs_the_shipped_harness_which_asks_the_gate_for_the
     assert "operation = operation_of(module, a.kernel)" in harness
 
 
-def test_the_skill_says_to_run_the_check_after_every_write():
-    """Task 14d: the live coder wrote kernel.py six times in a row without running the check once."""
+def test_the_skill_says_each_write_runs_the_check_and_shows_where_and_hint():
+    """Task 14d: the live coder wrote kernel.py six times in a row without running the check once. The tool now runs
+    it after each write (ProbeTools), and the skill says so, so the coder reads the output below the write."""
     flat = " ".join(kp.SKILL.read_text().split())
-    assert "After each write, run `python3 kernel_check.py` before you write `kernel.py` again." in flat
+    assert "Each write of `kernel.py` runs `python3 kernel_check.py` and shows its output below the write's result." in flat
+    assert "`where:` (the failing line)" in flat and "`hint:`" in flat
+
+
+# ---- the check runs after every write of kernel.py (pilot 4, 2026-10-17) -------------------------------------------
+# Pilot 4: the coder wrote kernel.py three times and never ran kernel_check.py, although the skill says to, so it never
+# saw the failing line or the hint. The tool now runs the shipped check after each write and appends its output.
+
+def _probe_tools(tmp_path, check_body):
+    adir = tmp_path / "add" / "attempt-1"
+    adir.mkdir(parents=True)
+    (adir / "kernel_check.py").write_text(check_body)
+    return kp.attempt_tools(adir), adir
+
+
+def test_attempt_tools_run_the_check_after_a_write_of_kernel_py(tmp_path):
+    tools, adir = _probe_tools(tmp_path, "print('FAIL: tt_lang_error: error: boom')\nprint('where: kernel.py line 3: x')\n")
+    out = tools.call("write_file", json.dumps({"path": "kernel.py", "content": "x = 1\n"}))
+    assert (adir / "kernel.py").read_text() == "x = 1\n"
+    assert out.startswith("wrote 6 characters to kernel.py")
+    assert "kernel_check.py ran after this write" in out and "FAIL: tt_lang_error: error: boom" in out
+    assert "where: kernel.py line 3: x" in out
+
+
+def test_other_files_and_unchanged_rewrites_do_not_run_the_check(tmp_path):
+    tools, adir = _probe_tools(tmp_path, "open('ran', 'a').write('x')\nprint('FAIL: x: y')\n")
+    assert "ran after" not in tools.call("write_file", json.dumps({"path": "notes.txt", "content": "a"}))
+    assert not (adir / "ran").exists()
+    tools.call("write_file", json.dumps({"path": "kernel.py", "content": "x = 1\n"}))
+    again = tools.call("write_file", json.dumps({"path": "kernel.py", "content": "x = 1\n"}))
+    assert again.startswith("unchanged:") and "ran after" not in again
+    assert (adir / "ran").read_text() == "x"                     # once, for the one real write
+
+
+def test_a_refused_write_does_not_run_the_check(tmp_path):
+    tools, adir = _probe_tools(tmp_path, "open('ran', 'a').write('x')\n")
+    out = tools.call("write_file", json.dumps({"path": "../kernel.py", "content": "x"}))
+    assert out.startswith("refused:") and not (adir / "ran").exists()
+
+
+def test_the_appended_check_output_is_bounded(tmp_path):
+    tools, _ = _probe_tools(tmp_path, "print('FAIL: x: ' + 'a' * 20000)\n")
+    out = tools.call("write_file", json.dumps({"path": "kernel.py", "content": "x"}))
+    assert len(out) < 3000
+
+
+def test_a_write_in_a_real_attempt_shows_the_check_to_the_model(tmp_path, fake_kenv):
+    authoritative = {"passed": False, "category": "no_kernel", "first_line": "kernel.py does not exist", "sets": []}
+    with FakeModel(scripted(call("write_file", path="kernel.py", content="x = 1\n"), final("done"))) as server:
+        run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(authoritative))
+        tool_msgs = [m["content"] for m in server.requests[1]["messages"] if m["role"] == "tool"]
+    assert any("wrote 6 characters" in t and "kernel_check.py ran after this write" in t for t in tool_msgs), tool_msgs
