@@ -22,6 +22,16 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))      # references.py sits next to this file; tt-lang-sim does not add the script's directory
 
 
+def operation_of(module, kernel_path):
+    """The operation in the loaded kernel module: the one top-level @ttl.operation function, whatever its name, found
+    by the static gate's own reading of the file (kernel_check.operation_candidate), or None with none or several.
+    Every path that runs a kernel (the agent's check, the probe's re-check, the hardware phase) applies the gate first
+    and then this harness, so they all call the function the gate judged."""
+    import kernel_check                                 # next to this file (HERE is on sys.path)
+    name = kernel_check.operation_candidate(kernel_path)
+    return getattr(module, name, None) if name else None
+
+
 def progress(msg: str) -> None:
     print(f"PROGRESS {msg}", flush=True)
 
@@ -82,7 +92,7 @@ def main(argv=None) -> int:
     a = ap.parse_args(args)
     result = {"phase": a.phase, "sets": [], "error": None}
     # The phase names who is at fault. `setup`: the spec, the references, the environment, the device, the inputs and
-    # the reference output, none of which is the kernel's. `import`: loading kernel.py. `run`: calling OPERATION and
+    # the reference output, none of which is the kernel's. `import`: loading kernel.py. `run`: calling the operation and
     # reading its output back. Only `import` and `run` are charged to the kernel.
     stage = "setup"
     try:
@@ -97,9 +107,10 @@ def main(argv=None) -> int:
         loader = importlib.util.spec_from_file_location("kernel_under_test", a.kernel)
         module = importlib.util.module_from_spec(loader)
         loader.loader.exec_module(module)
-        operation = getattr(module, "OPERATION", None)
+        operation = operation_of(module, a.kernel)
         if operation is None:
-            result["error"] = {"phase": "import", "type": "NoOperation", "text": "kernel.py defines no OPERATION"}
+            result["error"] = {"phase": "import", "type": "NoOperation",
+                               "text": "kernel.py defines no @ttl.operation function"}
         else:
             stage = "setup"                             # a device that will not open is not the kernel's fault
             progress("open_device")

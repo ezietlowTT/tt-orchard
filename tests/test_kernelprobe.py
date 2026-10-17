@@ -3132,3 +3132,25 @@ def test_the_skill_holds_no_worked_solution_for_a_measured_op():
     assert len(re.findall(r"```", text)) == 2                     # one fenced block: the skeleton
     for word in (r"\brsqrt\b", r"\bmean\(", r"\bh\[t", r"\ba\[t\]", r"1e-6", r"\beps\b", r"\bepsilon\b"):
         assert not re.search(word, text), word
+
+
+@needs_sim
+def test_the_probes_recheck_passes_a_kernel_with_a_freely_named_operation(tmp_path, kenv):
+    """The probe-owned re-check (the shipped check on a clean copy, on the real simulator) agrees with the agent's own
+    check: the one @ttl.operation function is the operation, whatever its name."""
+    from orchard.stallwatch import run_watched as real_run_watched
+    adir = tmp_path / "probe" / "add" / "attempt-1"
+    kp.prepare_attempt(adir, op="add", env=kenv)
+    (adir / "kernel.py").write_text((KERNELS / "add_misnamed.py").read_text())
+    got = kp.authoritative_check(adir, op="add", env=kenv, run_watched=real_run_watched)
+    assert got["passed"] is True, got
+
+
+def test_the_hardware_phase_runs_the_shipped_harness_which_asks_the_gate_for_the_operation(tmp_path, fake_kenv):
+    adir, attempt = _passed_attempt(tmp_path, fake_kenv, kernel="add_misnamed.py")
+    calls = []
+    kp.hardware_phase(adir, attempt, env=fake_kenv, shared_python="/p", run_watched=hw_writer([GOOD_HW_SET], calls))
+    (argv,) = calls
+    assert str(kp.TEMPLATES / "kernel_harness.py") in argv
+    harness = (kp.TEMPLATES / "kernel_harness.py").read_text()
+    assert "operation = operation_of(module, a.kernel)" in harness

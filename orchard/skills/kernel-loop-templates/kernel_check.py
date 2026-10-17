@@ -317,6 +317,13 @@ def kernel_source_violations(path) -> list[dict]:
 NO_OPERATION = "kernel.py defines no @ttl.operation function"
 
 
+def operation_candidate(path) -> str | None:
+    """The name of the one top-level @ttl.operation function, whether or not the file breaks other rules; None with
+    none or several, or when the file does not parse. The harness runs this: the gate has already refused a file that
+    breaks a rule on every path that reaches the harness, and a test runs the harness directly on a refused kernel."""
+    return _analyse(path)[1]                           # None for a file that does not parse
+
+
 def operation_name(path) -> str | None:
     """The name of the operation the gate accepted: the one top-level @ttl.operation function, when kernel.py breaks
     no rule. None when the gate refuses the file, finds no operation, or the file does not parse. The harness calls

@@ -1220,3 +1220,31 @@ def test_a_slice_counted_in_elements_is_refused_by_the_simulator_with_the_tiles_
     assert check["category"] == "tt_lang_error"
     assert re.search(r"IndexError: row slice \d+:\d+ is outside the tensor, which has \d+ tile\(s\) along it",
                      check["first_line"]), check["first_line"]
+
+
+# ---- Task 14d: the harness calls the function the gate found -----------------------------------------------------
+
+def _harness():
+    spec = importlib.util.spec_from_file_location("kernel_harness_under_test", TEMPLATES / "kernel_harness.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_harness_takes_the_operation_the_gate_names():
+    from types import SimpleNamespace
+    harness = _harness()
+    module = SimpleNamespace(eltwise_add="the operation", OPERATION=None, helper="not it")
+    assert harness.operation_of(module, KERNELS / "add_misnamed.py") == "the operation"
+    module = SimpleNamespace(OPERATION="the old name")
+    assert harness.operation_of(module, KERNELS / "add_good.py") == "the old name"
+    for kernel in ("add_undecorated_named.py", "add_two_misnamed.py", "add_no_def.py"):
+        assert harness.operation_of(SimpleNamespace(eltwise_add="x", OPERATION="y"), KERNELS / kernel) is None, kernel
+
+
+@needs_sim
+def test_a_kernel_with_a_freely_named_operation_passes_the_agents_check(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_misnamed")
+    done, check = _run_check(tdir, adir)
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert done.stdout.strip() == "PASS" and check["passed"] is True
