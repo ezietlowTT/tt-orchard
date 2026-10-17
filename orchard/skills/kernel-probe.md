@@ -26,12 +26,12 @@ Read first, by kind of op:
   example has a recurrence.
 
 Rules from the specification and the examples:
-- Units: `kernel_spec.json` shapes count elements, and so does `x.shape` inside `OPERATION`; a tile is 32 x 32
+- Units: `kernel_spec.json` shapes count elements, and so does `x.shape` inside your operation; a tile is 32 x 32
   elements, and every input is bf16 in tile layout. Buffer shapes and tensor slices count tiles: the tiles along a
   dimension are `x.shape[0] // TILE_SIZE` with `TILE_SIZE = 32`, as in the examples. A slice counted in elements fails
   with `IndexError: row slice 0:32 is outside the tensor, which has 2 tile(s) along it`.
 - The result goes into `out`, the last parameter: the check creates it as zeros of the spec's output shape and reads
-  it back after the call, and `OPERATION` returns nothing. Write every tile of it with `ttl.copy(block, out[...])`.
+  it back after the call, and the operation returns nothing. Write every tile of it with `ttl.copy(block, out[...])`.
 - A block is used whole. On a compute thread a block is an operand of a block expression (Python operators and
   `ttl.math` functions), and `blk.store(expr)` writes an expression into a block whose shape it matches exactly. On a
   data movement thread a block is the source or destination of `ttl.copy`. Do not index a block element by element
@@ -49,10 +49,9 @@ Rules from the specification and the examples:
 Steps:
 1. Read `kernel_spec.json`. It lists the inputs, their shapes, the output shape, and what the op computes.
 2. Read `reference/eltwise_add.py` once, then the files listed above for your kind of op.
-3. Write `kernel.py` with write_file. The function's name is literally `OPERATION`, whatever the op is called:
-   `def rmsnorm(...)` fails with `no_kernel`. It takes the inputs in the order of the keys under `inputs` in
-   `kernel_spec.json`, then the output tensor last; the parameter names are yours. The examples' functions are
-   named `eltwise_add` and `eltwise_broadcast_reduce`: when you copy one, rename it to `OPERATION`. The skeleton:
+3. Write `kernel.py` with write_file. It holds one function decorated with `@ttl.operation(...)`, with any name; that
+   function is the operation. It takes the inputs in the order of the keys under `inputs` in `kernel_spec.json`, then
+   the output tensor last; the parameter names are yours. The skeleton:
 
    ```python
    import ttl
@@ -60,14 +59,14 @@ Steps:
 
 
    @ttl.operation(grid="full")
-   def OPERATION(x, w, out):
+   def my_op(x, w, out):
        ...
    ```
 4. Run `python3 kernel_check.py`. It prints `PASS`, or `FAIL: <category>: <first line>`.
 5. Read that line. Change one thing. Run it again.
 
 Advice:
-- Copy the example's three thread functions into `OPERATION`: a reader with `@ttl.datamovement()`, a compute
+- Copy the example's three thread functions into your operation: a reader with `@ttl.datamovement()`, a compute
   function with `@ttl.compute()`, and a writer with `@ttl.datamovement()`. Without them the simulator fails with
   `ModuleNotFoundError: ttl.dfb_reset`.
 - Copy only the `@ttl.operation` function from an example. Write `import ttl` and `import ttnn` at the top: the
@@ -85,7 +84,8 @@ rule broken, its line, and what to do instead:
   `importlib`, `builtins`, `breakpoint`, `atexit`, `references`, and calling `input()`.
 - Names and attributes with double underscores are refused, except `__name__` and `__all__`.
 - Read-back: `to_torch` and `from_torch` are refused, as a name, an attribute or an import.
-- `OPERATION`: one plain top-level `def`, with one decorator, `@ttl.operation(...)`. `import ttl as tl` with
+- The operation: exactly one plain top-level `def` with one decorator, `@ttl.operation(...)`, and any name except
+  the forbidden ones above. Two `@ttl.operation` functions are refused. `import ttl as tl` with
   `@tl.operation(...)`, and `from ttl import operation` with `@operation(...)`, are accepted.
 
 The probe also refuses a `kernel.py` that is a link or larger than 256 KiB, when it takes the file after you finish.

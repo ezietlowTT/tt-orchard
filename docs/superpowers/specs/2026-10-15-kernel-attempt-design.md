@@ -424,3 +424,12 @@ Each item changes or adds to the approved design above. Reasons come from the im
       tensor slices count tiles of 32 x 32; inputs are bf16 in tile layout), the simulator's IndexError for a slice
       in elements, and that the result is written into `out`. No op-specific code. The watchdog's TurnRepeat also
       reports a cycle of period 2 or 3 repeated for three full periods (all stages; identical signatures only).
+    - Task 14d: the operation's name is free. The gate takes the one top-level def decorated with `ttl.operation`
+      (any accepted spelling) as the operation; its name keeps the old protections (bound only by that def, one
+      decorator, not a refused name); two such defs are refused; none is `no_kernel` ("defines no @ttl.operation
+      function"). The harness calls the function the gate's own reading names, so the agent's check, the probe's
+      re-check and the hardware phase agree. This replaces Task 14b's rename message and literal-name instruction.
+      Reason: the coder ignored the naming instruction in three live runs (L4 linear_scan; L4c rmsnorm twice, the
+      second with the rule and a `def OPERATION` skeleton in its prompt: it wrote `def rmsnorm` six times in turns 10
+      to 19). Evidence: the scratchpad archives `live/aborted2/probe-c-rmsnorm/rmsnorm/attempt-1/` and
+      `live/aborted3/probe-c-rmsnorm/rmsnorm/attempt-1/` (session scratchpad, not in the repository).

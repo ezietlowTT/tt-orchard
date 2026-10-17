@@ -347,7 +347,7 @@ def test_prepare_attempt_copies_the_reference_example_from_the_checkout_and_vend
 def test_the_skill_names_the_gate_rules_and_the_thread_functions():
     text = kp.SKILL.read_text()
     flat = " ".join(text.split())
-    for needle in ("kernel.py", "kernel_check.py", "reference/eltwise_add.py", "OPERATION", "@ttl.operation",
+    for needle in ("kernel.py", "kernel_check.py", "reference/eltwise_add.py", "@ttl.operation",
                    "import torch", "from_torch", "to_torch", "Do not open a device", "main()", "@ttl.compute()",
                    "@ttl.datamovement()", "import only", "forbidden_code", "ttl.dfb_reset"):
         assert needle in flat, needle
@@ -711,7 +711,7 @@ def test_the_skill_states_every_rule_the_gate_enforces():
     skill names it. Each REMEDIES rule needs its word; every name the gate refuses or allows by name must appear."""
     gate = kp._template("kernel_check")
     words = {"import": "import only", "name": "getattr", "dunder": "double underscores",
-             "readback": "to_torch", "operation": "OPERATION"}
+             "readback": "to_torch", "operation": "one function decorated with `@ttl.operation"}
     assert set(words) == set(gate.REMEDIES)
     flat = " ".join(kp.SKILL.read_text().split())
     for rule, word in words.items():
@@ -727,8 +727,7 @@ def test_the_skill_states_every_rule_the_gate_enforces():
     assert "`__name__` and `__all__`" in flat and "from __future__" in flat
     # the file rule belongs to the probe, which applies it when it takes kernel.py
     assert "The probe also refuses" in flat
-    # The reference-file section (Task 14) took the skill from 46 to about 80 lines and the OPERATION skeleton (Task 14b)
-    # to 93; the bound keeps it short enough for a small coder to read in one turn.
+    # The reference-file section (Task 14) took the skill from 46 to about 80 lines and the skeleton (Task 14b) to 93; the bound keeps it short enough for a small coder to read in one turn.
     assert len(kp.SKILL.read_text().splitlines()) <= 100
 
 
@@ -3043,14 +3042,16 @@ def _skeleton() -> str:
     return textwrap.dedent(blocks[0]) + "\n"
 
 
-def test_the_skill_says_the_function_is_literally_named_operation_with_a_skeleton():
-    """Task 14b: "Define `OPERATION`" was read as a placeholder for the op's name."""
-    flat = " ".join(kp.SKILL.read_text().split())
-    assert "literally `OPERATION`" in flat and "whatever the op is called" in flat
-    assert "`def rmsnorm(...)` fails" in flat
+def test_the_skill_says_one_operation_function_with_any_name_and_shows_the_skeleton():
+    """Task 14d: the name is free. The skill says so, has no literal-name rule left, and keeps the skeleton's shape."""
+    text = kp.SKILL.read_text()
+    flat = " ".join(text.split())
+    assert "one function decorated with `@ttl.operation(...)`, with any name" in flat
+    assert "literally" not in flat and "rename it to `OPERATION`" not in flat and "`OPERATION`" not in flat
     lines = [l for l in _skeleton().splitlines() if l.strip()]
     assert lines[0] == "import ttl" and lines[1] == "import ttnn"
-    assert lines[2] == '@ttl.operation(grid="full")' and lines[3].startswith("def OPERATION(")
+    assert lines[2] == '@ttl.operation(grid="full")' and lines[3].startswith("def ")
+    assert not lines[3].startswith("def OPERATION(")      # a name in the skeleton would read as a required name
     assert lines[3].rstrip().endswith("out):")
 
 
@@ -3059,23 +3060,17 @@ def test_the_skeleton_passes_the_gate_under_any_name(tmp_path):
     k = tmp_path / "kernel.py"
     k.write_text(_skeleton().replace("...", "pass"))
     assert gate.check_kernel_source(k) == (True, "")
-    k.write_text(_skeleton().replace("...", "pass").replace("def OPERATION(", "def rmsnorm("))
-    assert gate.check_kernel_source(k) == (True, "")             # Task 14d: any name
+    name = re.search(r"def (\w+)\(", _skeleton()).group(1)
+    k.write_text(_skeleton().replace("...", "pass").replace(f"def {name}(", "def rmsnorm("))
+    assert gate.check_kernel_source(k) == (True, "")
 
 
 def test_the_skill_says_inputs_are_passed_in_the_order_of_the_spec_keys_then_out():
-    """The harness calls OPERATION(*inputs in the order of kernel_spec.json's `inputs` keys, out)."""
+    """The harness calls the operation with the inputs in the order of kernel_spec.json's `inputs` keys, then out."""
     flat = " ".join(kp.SKILL.read_text().split())
     assert "in the order of the keys under `inputs`" in flat and "output tensor last" in flat
     harness = (kp.TEMPLATES / "kernel_harness.py").read_text()
     assert 'for name, shape in spec["inputs"].items():' in harness and "operation(*tt_ins, out)" in harness
-
-
-def test_the_skill_says_the_examples_functions_must_be_renamed():
-    flat = " ".join(kp.SKILL.read_text().split())
-    for name in ("eltwise_add", "eltwise_broadcast_reduce"):
-        assert f"`{name}`" in flat, name
-    assert "rename it to `OPERATION`" in flat
 
 
 def test_an_agent_alternating_two_commands_is_reported_by_the_watchdog(tmp_path, fake_kenv):
@@ -3127,7 +3122,7 @@ def test_the_units_and_output_facts_hold_in_the_harness_and_the_simulator():
 
 def test_the_skill_holds_no_worked_solution_for_a_measured_op():
     """The probe measures whether the coder can write rmsnorm and linear_scan; a worked solution would void it. The
-    skill may name those ops (which files to read) but holds no code beyond the OPERATION skeleton."""
+    skill may name those ops (which files to read) but holds no code beyond the skeleton."""
     text = kp.SKILL.read_text()
     assert len(re.findall(r"```", text)) == 2                     # one fenced block: the skeleton
     for word in (r"\brsqrt\b", r"\bmean\(", r"\bh\[t", r"\ba\[t\]", r"1e-6", r"\beps\b", r"\bepsilon\b"):
