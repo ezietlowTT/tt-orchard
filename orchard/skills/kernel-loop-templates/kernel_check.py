@@ -366,6 +366,32 @@ def first_line(text: str) -> str:
     return ""
 
 
+POINTER_RE = re.compile(r"^\s*-->\s+(?P<path>\S+):(?P<line>\d+):\d+\s*$")
+WHERE_MAX = 160
+
+
+def source_pointer(text: str) -> str:
+    """`kernel.py line N: <that line>` for the first place the simulator pointed at, or "" when there is none.
+
+    The simulator prints `--> <file>:<line>:<col>` and the source line under each diagnostic. The coder read only the
+    one-line summary, so it fixed errors without knowing which line raised them (pilot 2, 2026-10-17). Only a pointer
+    into kernel.py counts: a pointer into the simulator's own code says nothing the coder can act on. The path is
+    cut to the file name, so no machine path reaches the coder, and the line is cut to WHERE_MAX characters."""
+    lines = text.splitlines()
+    for i, raw in enumerate(lines):
+        m = POINTER_RE.match(raw)
+        if not m:
+            continue
+        if Path(m["path"]).name != "kernel.py":
+            return ""
+        for nxt in lines[i + 1:i + 6]:
+            code = re.match(rf"^\s*{m['line']}\s*\|\s?(.*)$", nxt)
+            if code:
+                return f"kernel.py line {m['line']}: {code[1].strip()}"[:WHERE_MAX]
+        return ""
+    return ""
+
+
 def _number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
@@ -610,6 +636,9 @@ def _main(argv=None) -> int:
                         "spec": sha256_file(spec_path)}}
     Path(a.out or adir / "check.json").write_text(json.dumps(check, indent=2) + "\n", encoding="utf-8")
     print("PASS" if category is None else f"FAIL: {category}: {line}")
+    where = source_pointer(text) if category is not None else ""
+    if where:
+        print(f"where: {where}")            # after the FAIL line, which the probe reads, so that line is unchanged
     return 0 if category is None else 1
 
 

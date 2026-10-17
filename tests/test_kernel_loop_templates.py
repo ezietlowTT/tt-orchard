@@ -1248,3 +1248,56 @@ def test_a_kernel_with_a_freely_named_operation_passes_the_agents_check(tmp_path
     done, check = _run_check(tdir, adir)
     assert done.returncode == 0, done.stdout + done.stderr
     assert done.stdout.strip() == "PASS" and check["passed"] is True
+
+
+# --- where: the source line the simulator blamed (pilot 2, 2026-10-17) ---------------------------------------------
+# The coder's own check printed only `FAIL: <category>: <one line>`. The simulator's pointer to the failing line sat
+# in harness-output.txt, which the coder never reads, so it fixed errors without knowing which line raised them.
+
+def _fixture_text(name):
+    return (OUT / name).read_text(encoding="utf-8")
+
+
+def test_where_names_the_kernel_line_the_simulator_blamed():
+    # Recorded in pilot 2: a compute-thread error in a kernel.py.
+    assert CHECK.source_pointer(_fixture_text("binary-op-shape-with-pointer.txt")) == \
+        "kernel.py line 87: out_blk.store(x_v * bcast * w_v)"
+    assert CHECK.source_pointer(_fixture_text("shape_mismatch.txt")) == "kernel.py line 46: tx_a = ttl.copy(a[r, c], a_block)"
+
+
+def test_where_takes_the_first_diagnostic_when_several_threads_blocked():
+    assert CHECK.source_pointer(_fixture_text("tt_lang_error.txt")) == "kernel.py line 44: a_dfb.wait() as a_blk,"
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "PROGRESS import\nsome kernel print\n",
+    # a pointer into the simulator's own code is not the coder's line
+    "error: ValueError: x\n  --> /venv/site-packages/ttl/sim/dfb.py:891:9\n   |\n891 |     raise ValueError(\n   |\n",
+    # a pointer with no excerpt line
+    "error: ValueError: x\n  --> /w/kernel.py:7:1\n   |\n",
+])
+def test_where_is_empty_without_a_kernel_line(text):
+    assert CHECK.source_pointer(text) == ""
+
+
+def test_where_is_one_bounded_line_without_the_machine_path():
+    long = "x = " + "a" * 500
+    out = CHECK.source_pointer(f"error: E\n  --> /secret/home/dir/kernel.py:3:1\n   |\n3 |     {long}\n   |\n")
+    assert out.startswith("kernel.py line 3: x = aaa") and "\n" not in out and "/secret" not in out and len(out) <= 200
+
+
+@needs_sim
+def test_a_failing_check_prints_where_under_the_unchanged_fail_line(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_shape_error", op="add")
+    done, check = _run_check(tdir, adir)
+    lines = done.stdout.splitlines()
+    assert lines[0].startswith("FAIL: shape_mismatch: ")          # the first line is still the one the probe reads
+    assert len(lines) == 2 and re.fullmatch(r"where: kernel\.py line \d+: .+", lines[1]), done.stdout
+    assert check["first_line"] == lines[0].split(": ", 2)[2]       # check.json is unchanged by the extra line
+
+
+def test_where_follows_only_the_first_pointer_even_when_a_later_one_is_in_kernel_py():
+    text = ("error: E1\n  --> /venv/ttl/sim/dfb.py:9:1\n   |\n9 |     raise\n   |\n"
+            "error: E2\n  --> /w/kernel.py:7:1\n   |\n7 |     y = 1\n   |\n")
+    assert CHECK.source_pointer(text) == ""
