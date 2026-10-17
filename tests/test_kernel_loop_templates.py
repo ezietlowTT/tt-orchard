@@ -1169,3 +1169,14 @@ def test_an_interrupted_check_exits_with_the_signal_that_stopped_it(tmp_path, si
             proc.wait(timeout=5)
         for p in (_pids(marks) if marks else []):
             _kill_if_ours(p, marker)
+
+
+@needs_sim
+def test_a_slice_counted_in_elements_is_refused_by_the_simulator_with_the_tiles_message(tmp_path):
+    """Task 14c: tensor slices count tiles. A slice counted in elements reaches past the tensor, and the simulator
+    says so in tiles; the kernel-probe skill quotes this message."""
+    tdir, adir = _attempt(tmp_path, "add_element_slices")
+    done, check = _run_check(tdir, adir)
+    assert check["category"] == "tt_lang_error"
+    assert re.search(r"IndexError: row slice \d+:\d+ is outside the tensor, which has \d+ tile\(s\) along it",
+                     check["first_line"]), check["first_line"]

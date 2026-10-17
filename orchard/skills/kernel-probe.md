@@ -26,6 +26,12 @@ Read first, by kind of op:
   example has a recurrence.
 
 Rules from the specification and the examples:
+- Units: `kernel_spec.json` shapes count elements, and so does `x.shape` inside `OPERATION`; a tile is 32 x 32
+  elements, and every input is bf16 in tile layout. Buffer shapes and tensor slices count tiles: the tiles along a
+  dimension are `x.shape[0] // TILE_SIZE` with `TILE_SIZE = 32`, as in the examples. A slice counted in elements fails
+  with `IndexError: row slice 0:32 is outside the tensor, which has 2 tile(s) along it`.
+- The result goes into `out`, the last parameter: the check creates it as zeros of the spec's output shape and reads
+  it back after the call, and `OPERATION` returns nothing. Write every tile of it with `ttl.copy(block, out[...])`.
 - A block is used whole. On a compute thread a block is an operand of a block expression (Python operators and
   `ttl.math` functions), and `blk.store(expr)` writes an expression into a block whose shape it matches exactly. On a
   data movement thread a block is the source or destination of `ttl.copy`. Do not index a block element by element

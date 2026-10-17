@@ -3097,3 +3097,44 @@ def test_an_agent_alternating_two_commands_is_reported_by_the_watchdog(tmp_path,
         run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(NO_KERNEL), max_turns=20)
     ledger = (tmp_path / "probe" / "add" / "attempt-1" / "ledger.jsonl").read_text()
     assert '"detector":"turn_repeat"' in ledger.replace(" ", "") and '"match":"cycle"' in ledger.replace(" ", "")
+
+
+# ---- Task 14c: units, dtype and the output, as general facts -------------------------------------------------------
+
+def test_the_skill_states_the_units_dtype_and_output_facts():
+    flat = " ".join(kp.SKILL.read_text().split())
+    for needle in ("`kernel_spec.json` shapes count elements", "a tile is 32 x 32 elements",
+                   "bf16", "Buffer shapes and tensor slices count tiles",
+                   "`IndexError: row slice 0:32 is outside the tensor, which has 2 tile(s) along it`",
+                   "The result goes into `out`", "`ttl.copy(block, out[...])`", "returns nothing"):
+        assert needle in flat, needle
+
+
+def test_the_units_and_output_facts_hold_in_the_harness_and_the_simulator():
+    """Each fact the skill states, checked where it comes from: the harness builds bf16 tile-layout inputs, makes `out`
+    as zeros of the spec's output shape and reads it back after the call; the specification says a tile is 32 by 32
+    scalar elements; the simulator's slice check counts tiles and words its IndexError the way the skill quotes it."""
+    harness = (kp.TEMPLATES / "kernel_harness.py").read_text()
+    for needle in ("ins[name] = x.to(torch.bfloat16)",
+                   "ttnn.from_torch(v, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)",
+                   'out = ttnn.from_torch(torch.zeros(spec["output"], dtype=torch.bfloat16)',
+                   "operation(*tt_ins, out)\n                        got = ttnn.to_torch(out).float()"):
+        assert needle in harness, needle
+    for op in kp.OPS:
+        assert kp.load_spec(op)["dtype"] == "bfloat16", op
+    if (SRC / "docs").is_dir():
+        spec = (SRC / "docs" / "sphinx" / "specs" / "TTLangSpecification.md").read_text()
+        assert "Shape unit can be either a tile (32 by 32 scalar elements)" in spec
+        sim = (SRC / "python" / "sim" / "ttnnsim.py").read_text()
+        assert 'f"{dim_name} slice {start}:{stop} is outside the tensor, which has "' in sim
+        assert 'f"{extent} {unit}(s) along it"' in sim
+        assert "TILE_SHAPE: Shape = (_TILE_SIZE, _TILE_SIZE)" in (SRC / "python" / "sim" / "constants.py").read_text()
+
+
+def test_the_skill_holds_no_worked_solution_for_a_measured_op():
+    """The probe measures whether the coder can write rmsnorm and linear_scan; a worked solution would void it. The
+    skill may name those ops (which files to read) but holds no code beyond the OPERATION skeleton."""
+    text = kp.SKILL.read_text()
+    assert len(re.findall(r"```", text)) == 2                     # one fenced block: the skeleton
+    for word in (r"\brsqrt\b", r"\bmean\(", r"\bh\[t", r"\ba\[t\]", r"1e-6", r"\beps\b", r"\bepsilon\b"):
+        assert not re.search(word, text), word
