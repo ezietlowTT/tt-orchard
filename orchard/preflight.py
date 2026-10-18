@@ -386,6 +386,7 @@ class Signals:
     lab_status: Callable | None = None          # () -> (answered, text of the lab's `gozer status`, error)
     research: Callable | None = None            # (model_id, hub, base_override, installed) -> report dict
     cpu_standin: Callable | None = None         # (endpoint, model) -> why the CPU tier does not answer, or None
+    sfpi: Callable | None = None                # (bundle name) -> (installed SFPI version, version the bundle pins)
 
 
 def check_lab(lab, status) -> Check:
@@ -496,6 +497,15 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     if getattr(cfg, "mode", "local") == "lab" and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
+    bundle = (base_check.data or {}).get("bundle") if isinstance(base_check.data, dict) else None
+    if bundle and s.sfpi is not None:
+        from orchard import sfpi as sfpi_check
+        try:
+            row = sfpi_check.check_sfpi(*s.sfpi(bundle), bundle)
+            if row is not None:
+                out.append(row)
+        except Exception as exc:                      # a warning: the row guards against a drift it cannot always see
+            out.append(Check("sfpi", WARN, f"could not check the SFPI compiler: {type(exc).__name__}: {exc}"))
     ref = cfg.reference_python
     guarded("reference", "config-invalid", lambda: check_reference(
         ref, s.reference_problem(ref) if ref is not None and s.reference_problem else None))
@@ -577,8 +587,12 @@ def default_signals(cfg, research_options=None) -> Signals:
         research = lambda model_id, hub, override, inst: research_report.build(     # noqa: E731
             model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
             hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
+    def sfpi_versions(bundle: str):
+        from orchard import sfpi as sfpi_check
+        return sfpi_check.installed_version(), sfpi_check.pinned_version(models_root(), bundle)
+
     return Signals(
-        cpu_standin=cpu_standin_problem,
+        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions,
         installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,
