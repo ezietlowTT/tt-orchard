@@ -211,3 +211,18 @@ TTLANG_NEGATIVE_EXAMPLES = (
 # The ops the kernel probe can ask for (orchard/kernelprobe.py re-exports this as OPS). It lives here so the CLI can
 # offer the choices without importing the probe and the agent machinery behind it.
 KERNEL_PROBE_OPS = ("add", "silu_mul", "rmsnorm", "linear_scan")
+
+# ---- decode speed watch (orchard/speedwatch.py) ------------------------------------------------------------------
+# Measured 2026-10-17 on this Quietbox 2, Qwen3-Coder-Next on one board: one 400-token greedy answer 38.7 tok/s idle;
+# 2 clients at once 29.6 tok/s each, 3 clients 23.4 each (77% and 60% of the single-client speed). Decode also slows
+# with context: 300 tokens took 9.1 s at a 2.3K-token prompt and 12.4 s at 16K. The watcher's own request has a short
+# prompt, so context length does not enter it.
+SPEED_MAX_TOKENS = 300          # choice: long enough that prefill is a small part of the time, about 8 s at full speed
+SPEED_MIN_TOKENS = 100          # choice: a shorter answer is mostly prefill and says little about decode
+SPEED_TIMEOUT_S = 300.0         # choice: 300 tokens at 1 tok/s; a server slower than that is not decoding
+SPEED_SLOW_RATIO = 0.5          # choice: below half the best speed seen. Three clients measured 60%, so ordinary sharing
+                                # does not trip it; four or more clients can, and the message says so
+SPEED_SLOW_CONSECUTIVE = 3      # choice: three samples in a row, so one busy moment is only "suspect"
+SPEED_PROMPT = ("Write a Python function that merges two sorted lists, with a docstring and three tests.")
+                                # the prompt of the 2026-10-17 measurements; the answer is a few hundred tokens
+SPEED_BASELINE_FILE = "speed-baseline.json"   # under the cache directory (~/.cache/tt-orchard)

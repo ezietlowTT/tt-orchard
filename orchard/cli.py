@@ -12,6 +12,7 @@
     tt-orchard coder    [status | stop [--yes]]
     tt-orchard kernel-env [--check] [--src-dir DIR] [--venv-dir DIR] [--tt-lang-skill-dir DIR] [--allow-stale-skills]
     tt-orchard inventory TARGET [--python P] [--ttnn-python P] [--against F] [--layers N] [--seq N] [--class C] [--out DIR]
+    tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]
     tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
@@ -170,6 +171,24 @@ def _parser() -> argparse.ArgumentParser:
     inv.add_argument("--seq", type=int, default=8, help="sequence length to trace (default 8)")
     inv.add_argument("--class", dest="cls", help="the transformers class to trace if not config.json's first architecture")
     inv.add_argument("--out", help="output directory (default ./ops-inventory)")
+    cs = sub.add_parser("coder-speed", parents=[common],
+                        help="measure how fast a model server decodes and compare it with the best it has done "
+                             "(read-only; it reports a slow server and never restarts one)")
+    cs.add_argument("--endpoint", help="the server's OpenAI-compatible URL (default: the coder tier of the tier config)")
+    cs.add_argument("--model", help="the model id the server serves; needed with --endpoint")
+    cs.add_argument("--tiers", action="store_true", help="check every distinct server the tier config names")
+    cs.add_argument("--samples", type=int, default=1,
+                    help="samples per server in one run (default 1); three low samples in a row make a server slow")
+    cs.add_argument("--interval", type=float, default=sw_interval(),
+                    help="seconds between the samples of one run (default %(default)s)")
+    cs.add_argument("--watch", type=float, metavar="SECONDS",
+                    help="keep sampling every SECONDS until a server is slow (exit 3), or three errors in a row (exit 2)")
+    cs.add_argument("--baseline", type=float, metavar="TOK_S",
+                    help="compare with this speed instead of the stored best (the stored best is not changed)")
+    cs.add_argument("--reset-baseline", action="store_true",
+                    help="forget the stored best for these servers first (after changing a server on purpose)")
+    cs.add_argument("--baseline-file", help="where the best speeds are kept (default ~/.cache/tt-orchard/speed-baseline.json)")
+    cs.add_argument("--json", action="store_true", help="print one JSON list instead of lines")
     from orchard.defaults import KERNEL_PROBE_OPS
     kp = sub.add_parser("kernel-probe", parents=[common],
                         help="ask the running coder to write a tt-lang kernel for one op, N times, and check each "
@@ -228,6 +247,24 @@ def _inventory(args, env, home, out) -> int:
     return opinventory.run_inventory(args.target, python=python, ttnn_python=ttnn_python,
                                      out_dir=args.out or "ops-inventory", layers=args.layers, seq=args.seq,
                                      cls=args.cls, against=args.against, say=say)
+
+
+def sw_interval() -> float:
+    from orchard.speedwatch import DEFAULT_INTERVAL_S
+    return DEFAULT_INTERVAL_S
+
+
+def _coder_speed(args, env, home, out) -> int:
+    """`coder-speed`: the server comes from --endpoint and --model, or from the tier config bringup.toml names."""
+    from orchard import speedwatch, tiers
+    tier_config = None
+    if args.tiers or not (args.endpoint and args.model):
+        try:
+            cfg = bringup_config.load(find_config(getattr(args, "config", None), env, CHECKOUT, home))
+            tier_config = tiers.load(cfg.tiers)
+        except (NoConfig, bringup_config.BringupConfigError, tiers.TierConfigError) as exc:
+            print(f"note: no tier config read ({exc})", file=out)
+    return speedwatch.run(args, out=out, home=home, tier_config=tier_config)
 
 
 def _kernel_probe(args, env, home, out) -> int:
@@ -523,6 +560,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _inventory(args, env, home, out)
     if args.cmd == "kernel-probe":
         return _kernel_probe(args, env, home, out)
+    if args.cmd == "coder-speed":
+        return _coder_speed(args, env, home, out)
     if args.cmd == "ui":
         return _ui(args, env, home, out)
     if args.cmd == "caches":
