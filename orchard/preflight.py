@@ -544,6 +544,9 @@ def default_signals(cfg, research_options=None) -> Signals:
         org, name = model_id.split("/", 1)
         snaps = hf_home_for(cfg) / "hub" / f"models--{org}--{name}" / "snapshots"
         found = sorted(snaps.glob("*/config.json")) if snaps.is_dir() else []
+        # A config alone is not a model. An old manifest-only fetch leaves config.json and README.md, and counting that as
+        # local skipped the download. `exists()` follows the link, so a weight file whose blob is gone does not count.
+        found = [c for c in found if any(w.exists() for w in c.parent.glob("*.safetensors"))]
         return found[-1].parent if found else None
 
     def gozer_status() -> str:
