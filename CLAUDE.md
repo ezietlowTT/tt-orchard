@@ -1144,3 +1144,56 @@ Prompt (operator): "get the new screenshot". No browser tool was available in th
 - Pushed to GitHub (`2f8c3d5`) and re-uploaded to the Hugging Face companion repo. The page running under tt-disco on 7871 still has the old code, so it has the blank-steps
   bug until it is restarted from the catalog. The weights upload was at 7.6 GB; `finish_weights.sh` has not run yet.
 
+## 2026-10-18: making unattended bring-up need fewer people (branch `autonomy`, on `kernel-attempt`)
+Prompt (operator): "proceed in making the harness 'good at' bringing up models without Claude supervision", after the RAG-Gate replay
+test. Method: list every stop in the past runs that a person cleared, keep the ones whose cause is known, and fix each test first with a
+mutation per guard. The causes come from the entries above (RAG-Gate-27B, Clef, the SFPI downgrade, the music run). Each change is a
+precaution or a check with a stated evidence base; none was seen to change a real run's outcome yet.
+- Pre-test reset (`supervisor._reset_test_chips`): a test that needs two or more boards resets its leased chips in place before it
+  runs. The park resets only the coder's board, and the RAG-Gate 4-chip test failed twice on chips earlier tests had used and passed
+  after all four were reset. The cause was not isolated. A refused reset blocks with its text.
+- Preflight `cpu` row: the CPU stand-in (ollama) must answer and list the tier's model. On the RAG-Gate run it was down and the park's
+  canary failed three hours in. Blocks as `coder-unusable`.
+- Preflight `sfpi` row (`orchard/sfpi.py`): the box's SFPI must be at least what the chosen bundle pins in its ttnn wheel. A system
+  update to 7.67.0 broke every host boot of the Qwen3.8 bundle (pin 7.73.0); 7.83.0 and 7.87.0 booted it. Three observations, so the
+  rule is stated as fitted to them. Blocks as `hardware-unhealthy`; installing the package stays the operator's.
+- `bringup --auto-retries N` (default 2, 0 off): a run blocked as `coder-unusable`, `hardware-unhealthy` or `agent-stuck` is retried after
+  60 s (a released board shows busy for about a minute). Other blocks are never retried (`blocked.AUTO_RETRY`).
+- `bringup --prune-caches`: when disk is the only block and removing regenerable tensor caches can cover it, remove the oldest ones no
+  unfinished run uses, just enough; never the kernel cache or anything outside the cache root; all or nothing; `--dry-run` only reports.
+- Decided against (for now): a hardware-test stall rule. Six healthy cold boots had at most 198 s between log lines; the music hang was
+  silent 40 to 60 minutes. But a test's own stdout is nearly silent during a healthy boot (its server log goes to a file), and the hang
+  burns CPU, so neither signal the stall watcher has would catch it. A rule needs "no file under the stage directory grew for N s".
+- RAG-Gate-27B replay (kernel probe): see the ledger for the comparison written before the run.
+- Found on the live box: the Coder-Next container answered `/v1/models` while its prefill had hung after the overnight suspend; only a
+  completion shows that. `coder-speed` timed out on it. A bring-up's coder canary asks a real question, so it would catch this at start.
+- Not done: the live unattended run of a new model. It needs both boards, so the kernel-probe coder (also used through qwencode) has to stop
+  first, which is the operator's decision. Candidates checked by dry run: `bytkim/Qwen3.8-27B-pi` (preflight passes apart from the coder
+  port), `tsinghua-sigs-robot-lab/VeriLoop-E2` and `perplexity-ai/pplx-decider-v1.1-27b` (disk: 136 and 132 GB needed, 111 free).
+
+## 2026-10-18 (later): the first unattended bring-up with the new setup (`bytkim/Qwen3.8-27B-pi`, version 0.7.1)
+Prompt (operator): "go ahead" to stop the kernel-probe coder and run an unattended bring-up of a new model. Run directory
+`~/orchard-runs/bytkim--qwen3.8-27b-pi`. It ended `ready-for-operator-review` after six launches of the same command. Stage 2 (one chip):
+32 of 32 tokens, ready in 682 s. Stage 4: 2 chips 1.0, 4 chips 0.96875 (ready in 254 s). Stages 3, 5, 6, 7 skipped by design. Nothing was
+published, pushed or uploaded. Interventions, each with its cause:
+1. ollama was down after the suspend. The new `cpu` preflight row blocked before anything started (the row did its job). I restarted ollama
+   with `OLLAMA_MODELS` set.
+2. A cache entry for the model held only `config.json` and `README.md`. `local_snapshot` counted any snapshot with a config as local, so the
+   59 GB of weights were never fetched, stage 0 compared an empty model and called it a full port, and stage 1 failed four times. Fixed: a
+   snapshot is local only if a weight file exists behind its link (2 tests, mutation red).
+3. A retry kept stage 0's stale verdict. `bringup` now moves the earlier run directory aside (`<run>.stale-<time>`) when it has to fetch the
+   weights (3 tests, 2 mutations red). For this run I did the move by hand once, because the weights were already on disk.
+4. Disk: stage 4 wants 110 GB free at entry. Twice the free space was short (49 GB, then 109 GB). The operator chose deleting the Clef and
+   RAG-Gate run directories (kept small files in `*.kept`: ledger, evidence, package staging, gate-check results). Then I removed this run's
+   own stage 2 and 4-chip caches. `--prune-caches` could not help: the only caches were this run's own.
+5. The 4-chip test failed with `Fabric Router Sync: Timeout` after 57 s, the same as the RAG-Gate run. The pre-test reset had run and did
+   not prevent it, so the 2026-10-13 "stale chip state" guess is not enough. By hand, one lease on all four chips, one `gozer reset`, then the
+   supervisor's script passed (31 of 32, ready 302 s). Resetting board 1 then board 0 (the supervisor's order) got past fabric start and then
+   hung loading the warm tensor cache, which looks like the cached-tensor load hang found on the music container (2026-10-15). I stopped my
+   own container by id and released my leases. The cause of the fabric failure is still not isolated; the same procedure passed on the last
+   attempt (260 s, top-1 0.969).
+Added from this: a multi-board test that fails within 180 s without timing out is reset (every leased chip) and run once more
+(`FAST_FAIL_S`, 5 tests, 5 mutations red). That retry did not fire in the final attempt, so it has not run on real hardware.
+Also seen: a launcher that saves `$!` after `setsid nohup` saves the wrapper's pid, which exits at once; wait on the run's `supervisor.pid`.
+The stall rule is still deferred. A shared-venv, no-weights stage 0 verdict is still possible if a snapshot is replaced mid-run.
+Not done: merge of `autonomy` into `kernel-attempt`; the L5 hardware smoke test; the 4-chip warm-cache hang (not investigated here).
