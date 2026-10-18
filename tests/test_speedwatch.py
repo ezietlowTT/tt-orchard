@@ -13,6 +13,14 @@ import pytest
 
 from orchard import speedwatch as sw
 
+REAL_RUNNING_REQUESTS = sw.running_requests          # the autouse fixture below replaces the module's own
+
+
+@pytest.fixture(autouse=True)
+def no_real_metrics_request(monkeypatch):
+    """Nothing here may reach a real server: unless a test says otherwise, no other request is running."""
+    monkeypatch.setattr(sw, "running_requests", lambda endpoint, **kw: 0)
+
 
 def fake_post(tokens=300, seconds=10.0, now=None):
     """A post function that answers like a server and advances a fake clock by `seconds`."""
@@ -209,3 +217,260 @@ def test_a_given_baseline_is_not_stored_even_when_the_sample_is_faster_than_the_
     post = fake_post(tokens=450, seconds=10.0)                                         # 45 tok/s
     sw.check("http://h/v1", "m", store, history=[], baseline=25.0, post=post, clock=lambda: post.now[0])
     assert store.get("http://h/v1", "m") == 30.0
+
+
+# ---- confirm: one low sample is re-checked before it is called slow ----------------------------------------------
+
+class Sequence:
+    """A post that yields a speed per call (tok/s), on a fake clock."""
+
+    def __init__(self, speeds, tokens=300):
+        self.speeds, self.tokens, self.now, self.slept = list(speeds), tokens, [0.0], []
+
+    def post(self, url, body, timeout):
+        v = self.speeds.pop(0) if len(self.speeds) > 1 else self.speeds[0]
+        self.now[0] += self.tokens / v
+        return {"usage": {"completion_tokens": self.tokens}}
+
+    def kw(self):
+        return dict(post=self.post, clock=lambda: self.now[0], sleep=self.slept.append)
+
+
+def confirm(tmp_path, speeds, baseline=40.0, history=None, **extra):
+    store = sw.Baselines(tmp_path / "b.json")
+    if baseline:
+        store.update("http://h/v1", "m", baseline)
+    seq = Sequence(speeds)
+    h = [] if history is None else history
+    return sw.confirm("http://h/v1", "m", store, history=h, interval=5, **seq.kw(), **extra), seq, h
+
+
+def test_a_healthy_first_sample_is_taken_once(tmp_path):
+    c, seq, h = confirm(tmp_path, [39.0])
+    assert c.verdict.state == "ok" and len(h) == 1 and seq.slept == []
+
+
+def test_a_low_sample_is_rechecked_and_a_recovery_is_ok(tmp_path):
+    c, seq, h = confirm(tmp_path, [10.0, 39.0])
+    assert c.verdict.state == "ok" and len(h) == 2 and seq.slept == [5]
+
+
+def test_three_low_samples_in_a_row_are_slow(tmp_path):
+    c, seq, h = confirm(tmp_path, [10.0, 11.0, 12.0])
+    assert c.verdict.state == "slow" and len(h) == 3 and seq.slept == [5, 5]
+
+
+def test_two_low_then_a_recovery_is_ok_after_two_rechecks(tmp_path):
+    c, seq, h = confirm(tmp_path, [10.0, 11.0, 39.0])
+    assert c.verdict.state == "ok" and len(h) == 3 and seq.slept == [5, 5]
+
+
+def test_confirm_counts_samples_from_earlier_calls_in_the_same_history(tmp_path):
+    c, seq, h = confirm(tmp_path, [10.0], history=[9.0, 8.0])
+    assert c.verdict.state == "slow" and len(h) == 3 and seq.slept == []              # the first new sample made three
+
+
+def test_with_no_baseline_the_first_sample_is_the_baseline_and_nothing_is_rechecked(tmp_path):
+    c, seq, h = confirm(tmp_path, [39.0], baseline=None)
+    assert c.verdict.state == "unknown" and len(h) == 1 and seq.slept == []
+
+
+def test_an_error_while_rechecking_is_raised(tmp_path):
+    store = sw.Baselines(tmp_path / "b.json")
+    store.update("http://h/v1", "m", 40.0)
+    calls = []
+
+    def post(url, body, timeout):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError("gone")
+        return {"usage": {"completion_tokens": 300}}
+    now = [0.0]
+
+    def slow_clock():
+        now[0] += 30.0
+        return now[0]
+    with pytest.raises(sw.SpeedError, match="gone"):
+        sw.confirm("http://h/v1", "m", store, history=[], interval=1, post=post, clock=slow_clock, sleep=lambda s: None)
+
+
+# ---- probe_check: the dict the kernel probe records ------------------------------------------------------------------
+
+def test_probe_check_returns_the_numbers_the_probe_records_and_keeps_history_per_server(tmp_path):
+    seq = Sequence([40.0])
+    check_fn = sw.probe_check(tmp_path, **seq.kw())
+    first = check_fn("http://h/v1", "m")
+    assert first["state"] == "unknown" and first["tok_s"] == pytest.approx(40.0) and first["baseline"] is None
+    seq.speeds = [38.0]
+    second = check_fn("http://h/v1", "m")
+    assert second["state"] == "ok" and second["baseline"] == pytest.approx(40.0) and 0.9 < second["ratio"] < 1.0
+    assert "message" in second
+    assert (tmp_path / ".cache" / "tt-orchard" / "speed-baseline.json").is_file()
+
+
+def test_probe_check_turns_a_failed_request_into_an_error_state_not_an_exception(tmp_path):
+    def boom(url, body, timeout):
+        raise OSError("refused")
+    r = sw.probe_check(tmp_path, post=boom, clock=lambda: 0.0, sleep=lambda s: None)("http://h/v1", "m")
+    assert r["state"] == "error" and "refused" in r["message"] and r.get("tok_s") is None
+
+
+def test_probe_check_reports_slow_after_the_rechecks(tmp_path):
+    seq = Sequence([40.0])
+    check_fn = sw.probe_check(tmp_path, **seq.kw())
+    check_fn("http://h/v1", "m")
+    seq.speeds = [10.0]
+    r = check_fn("http://h/v1", "m")
+    assert r["state"] == "slow" and seq.slept == [sw.CONFIRM_INTERVAL_S] * 2
+
+
+def test_probe_check_keeps_a_separate_history_for_each_server(tmp_path):
+    """Server A is slow (three low samples). Server B then has one low sample and recovers: with one shared history B
+    would inherit A's low samples and be called slow at once."""
+    store = sw.Baselines(tmp_path / ".cache" / "tt-orchard" / "speed-baseline.json")
+    store.update("http://a/v1", "m", 40.0)
+    store.update("http://b/v1", "m", 40.0)
+    seq = Sequence([10.0])
+    check_fn = sw.probe_check(tmp_path, **seq.kw())
+    assert check_fn("http://a/v1", "m")["state"] == "slow"
+    seq.speeds = [10.0, 39.0]
+    assert check_fn("http://b/v1", "m")["state"] == "ok"
+
+
+def test_probe_check_rounds_the_speed_to_one_decimal_for_the_record(tmp_path):
+    r = sw.probe_check(tmp_path, **Sequence([38.66]).kw())("http://h/v1", "m")
+    assert r["tok_s"] == 38.7
+
+
+# ---- contention: another client's request makes this one slow, which says nothing about the server --------------------
+# 2026-10-17, live: with a long agent conversation running on the coder, a fresh 300-token request measured 7.3 tok/s;
+# the same request on the idle coder gave 38.7. A decode step serves every running request, so a long context in the
+# batch slows all of them. Two short requests together gave 29.6 tok/s each. The server reports how many requests are
+# running (vllm:num_requests_running); a sample taken while another request ran does not count towards slow.
+
+METRICS = """# HELP vllm:num_requests_running Number of requests in model execution batches.
+# TYPE vllm:num_requests_running gauge
+vllm:num_requests_running{engine="0",model_name="Qwen/Qwen3-Coder-Next"} 2.0
+vllm:num_requests_waiting{engine="0",model_name="Qwen/Qwen3-Coder-Next"} 0.0
+"""
+
+
+def get_text(text=METRICS, calls=None):
+    def get(url, timeout):
+        if calls is not None:
+            calls.append((url, timeout))
+        return text
+    return get
+
+
+def test_running_requests_reads_the_vllm_gauge_from_the_servers_origin():
+    calls = []
+    assert REAL_RUNNING_REQUESTS("http://127.0.0.1:8011/v1", get=get_text(calls=calls)) == 2
+    assert calls == [("http://127.0.0.1:8011/metrics", sw.METRICS_TIMEOUT_S)]
+    REAL_RUNNING_REQUESTS("http://127.0.0.1:8001", get=get_text(calls=calls))
+    REAL_RUNNING_REQUESTS("http://127.0.0.1:8001/v1/", get=get_text(calls=calls))
+    assert [c[0] for c in calls[1:]] == ["http://127.0.0.1:8001/metrics"] * 2
+
+
+def test_running_requests_adds_the_engines_and_ignores_the_waiting_gauge():
+    text = ('vllm:num_requests_running{engine="0"} 1.0\nvllm:num_requests_running{engine="1"} 3.0\n'
+            'vllm:num_requests_waiting{engine="0"} 9.0\n')
+    assert REAL_RUNNING_REQUESTS("http://h/v1", get=get_text(text)) == 4
+
+
+@pytest.mark.parametrize("text", ["", "no gauge here\n", "vllm:num_requests_running{engine=\"0\"} many\n"])
+def test_running_requests_is_none_when_the_server_does_not_say(text):
+    assert REAL_RUNNING_REQUESTS("http://h/v1", get=get_text(text)) is None
+
+
+def test_running_requests_is_none_when_the_request_fails():
+    def boom(url, timeout):
+        raise OSError("refused")
+    assert REAL_RUNNING_REQUESTS("http://h/v1", get=boom) is None
+
+
+def test_a_sample_carries_how_many_other_requests_were_running_before_and_after():
+    seen = iter([1, 0])
+    post = fake_post(tokens=300, seconds=10.0)
+    s = sw.measure("http://h/v1", "m", post=post, clock=lambda: post.now[0], running=lambda e: next(seen))
+    assert s.others == 1                                                  # the larger of the two readings
+
+
+def test_a_sample_with_no_metrics_has_unknown_contention():
+    post = fake_post()
+    s = sw.measure("http://h/v1", "m", post=post, clock=lambda: post.now[0], running=lambda e: None)
+    assert s.others is None
+
+
+def test_a_contended_sample_is_busy_not_slow_and_is_not_kept_in_the_history(tmp_path):
+    store = sw.Baselines(tmp_path / "b.json")
+    store.update("http://h/v1", "m", 40.0)
+    history = []
+    post = fake_post(tokens=300, seconds=40.0)                            # 7.5 tok/s
+    r = sw.check("http://h/v1", "m", store, history=history, post=post, clock=lambda: post.now[0], running=lambda e: 1)
+    assert r.verdict.state == "busy" and history == []
+    assert "1 other request" in r.verdict.message and "does not say whether the server is slow" in r.verdict.message
+    assert r.verdict.tok_s == pytest.approx(7.5) and store.get("http://h/v1", "m") == 40.0
+
+
+def test_three_contended_samples_in_a_row_never_make_a_server_slow(tmp_path):
+    store = sw.Baselines(tmp_path / "b.json")
+    store.update("http://h/v1", "m", 40.0)
+    history = []
+    for _ in range(3):
+        post = fake_post(tokens=300, seconds=40.0)
+        r = sw.check("http://h/v1", "m", store, history=history, post=post, clock=lambda p=post: p.now[0],
+                     running=lambda e: 2)
+    assert r.verdict.state == "busy" and history == []
+
+
+def test_a_busy_sample_does_not_hide_low_samples_taken_when_the_server_was_quiet(tmp_path):
+    store = sw.Baselines(tmp_path / "b.json")
+    store.update("http://h/v1", "m", 40.0)
+    history = [9.0, 10.0]                                                  # two quiet low samples already
+    post = fake_post(tokens=300, seconds=40.0)
+    sw.check("http://h/v1", "m", store, history=history, post=post, clock=lambda: post.now[0], running=lambda e: 1)
+    post2 = fake_post(tokens=300, seconds=30.0)                            # then a quiet low one: three in a row
+    r = sw.check("http://h/v1", "m", store, history=history, post=post2, clock=lambda: post2.now[0], running=lambda e: 0)
+    assert r.verdict.state == "slow"
+
+
+def test_unknown_contention_still_counts_and_the_message_says_it_could_not_tell(tmp_path):
+    store = sw.Baselines(tmp_path / "b.json")
+    store.update("http://h/v1", "m", 40.0)
+    history = []
+    for _ in range(3):
+        post = fake_post(tokens=300, seconds=30.0)
+        r = sw.check("http://h/v1", "m", store, history=history, post=post, clock=lambda p=post: p.now[0],
+                     running=lambda e: None)
+    assert r.verdict.state == "slow" and "could not tell whether other requests were running" in r.verdict.message
+
+
+def test_known_quiet_samples_do_not_get_the_could_not_tell_note(tmp_path):
+    store = sw.Baselines(tmp_path / "b.json")
+    store.update("http://h/v1", "m", 40.0)
+    post = fake_post(tokens=300, seconds=40.0)
+    r = sw.check("http://h/v1", "m", store, history=[], post=post, clock=lambda: post.now[0], running=lambda e: 0)
+    assert r.verdict.state == "suspect" and "could not tell" not in r.verdict.message
+
+
+def test_confirm_does_not_recheck_a_busy_sample(tmp_path):
+    store = sw.Baselines(tmp_path / "b.json")
+    store.update("http://h/v1", "m", 40.0)
+    seq = Sequence([7.0])
+    slept = []
+    c = sw.confirm("http://h/v1", "m", store, history=[], interval=5, post=seq.post, clock=lambda: seq.now[0],
+                   sleep=slept.append, running=lambda e: 1)
+    assert c.verdict.state == "busy" and slept == []
+
+
+def test_probe_check_reports_busy_with_the_numbers(tmp_path, monkeypatch):
+    store = sw.Baselines(tmp_path / ".cache" / "tt-orchard" / "speed-baseline.json")
+    store.update("http://h/v1", "m", 40.0)
+    monkeypatch.setattr(sw, "running_requests", lambda endpoint, **kw: 1)
+    r = sw.probe_check(tmp_path, **Sequence([7.0]).kw())("http://h/v1", "m")
+    assert r["state"] == "busy" and r["tok_s"] == 7.0 and r["baseline"] == 40.0 and "1 other request" in r["message"]
+
+
+def test_running_requests_is_none_for_a_gauge_value_that_is_not_a_number():
+    assert REAL_RUNNING_REQUESTS("http://h/v1", get=get_text('vllm:num_requests_running{engine="0"} 1.2.3\n')) is None

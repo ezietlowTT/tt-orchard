@@ -1143,6 +1143,12 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   attempts' results.
 - A run that stops early still writes its report from the attempts that finished, with the reason. An exception
   exits 3, Ctrl-C or SIGTERM exits 4, and no hardware run starts after either.
+- Before each attempt the probe measures the coder's decode speed (section 5.9e) and records it in the attempt's
+  `attempt.json` as `coder_speed`. The report lists the speed before each attempt. If the coder is slow (three samples in a
+  row below half of the best speed seen), the probe stops before that attempt, writes its report and exits 6, and no hardware
+  run starts. `--allow-slow-coder` runs anyway. A coder that is busy with another client (`busy`), and a server that
+  cannot be measured, do not stop the probe. The attempts that ran while the coder was busy or below its best speed are
+  marked in the report as not comparable in turns, wall time and request timeouts.
 
 Flags:
 
@@ -1170,6 +1176,8 @@ Flags:
   `~/.claude/skills/ttm-tt-lang`, or `$ORCHARD_TTLANG_SKILL`).
 - `--allow-stale-skills`: run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or
   could not be compared. The report records it, with each source's local and upstream shas.
+- `--allow-slow-coder`: run even when the coder is decoding far below its best speed. The report records each
+  measurement.
 
 ### 5.9d The latest skills
 
@@ -1225,13 +1233,18 @@ that uses the server.
 | `ok` | At or above half of the best speed. |
 | `suspect` | Below half, but fewer than three samples in a row. |
 | `slow` | The last three samples were all below half of the best speed. |
+| `busy` | Another client's request was running, so the sample says nothing about the server. It is not counted. |
 
 The best speed is kept per model and endpoint in `~/.cache/tt-orchard/speed-baseline.json`. A slow sample never
-lowers it, so a server that has gone slow is still compared with its healthy speed. Exit codes: 0 for `ok`, `suspect` or
+lowers it, so a server that has gone slow is still compared with its healthy speed. Exit codes: 0 for `ok`, `suspect`, `busy` or
 `unknown`; 2 when a server could not be measured; 3 when one is `slow`.
 
-What the number does not tell you. Other clients sharing the server lower it: measured on this machine, two clients get
-about 77% of the single-client speed each and three about 60%. A server changed on purpose (another profile or model
+Other clients lower the number. A decode step serves every request that is running, so one long conversation slows all of
+them: on 2026-10-17 a fresh request next to an agent's long conversation measured 7.3 tok/s, and the same request on the
+idle coder 38.7. Two short requests together got about 77% of the single-client speed each and three about 60%. Before
+and after its own request the check reads `vllm:num_requests_running` from the server's `/metrics`. If another request
+was running the sample is `busy` and does not count towards `slow`. A server that does not report the count (not vLLM,
+or no answer) is measured anyway, and a `suspect` or `slow` message says it could not tell. A server changed on purpose (another profile or model
 build) needs `--reset-baseline`, because the old best no longer applies. A long conversation decodes more slowly than the
 short prompt this check uses, so a slow agent does not always mean a slow server.
 

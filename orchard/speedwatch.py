@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
-from dataclasses import dataclass
+import urllib.request
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from orchard.canary import CanaryError, post_json
@@ -29,6 +31,7 @@ from orchard.defaults import (SPEED_BASELINE_FILE, SPEED_MAX_TOKENS, SPEED_MIN_T
 
 MAX_TOKENS, MIN_TOKENS, PROMPT = SPEED_MAX_TOKENS, SPEED_MIN_TOKENS, SPEED_PROMPT
 TIMEOUT_S, SLOW_RATIO, SLOW_CONSECUTIVE = SPEED_TIMEOUT_S, SPEED_SLOW_RATIO, SPEED_SLOW_CONSECUTIVE
+METRICS_TIMEOUT_S = 3.0    # choice: /metrics answers at once on a live server; a server that does not is not asked twice
 
 
 class SpeedError(Exception):
@@ -40,11 +43,13 @@ class Sample:
     tok_s: float
     tokens: int
     seconds: float
+    others: int | None = None     # requests of other clients running on the server during this one; None: not known
 
 
 @dataclass(frozen=True)
 class Verdict:
-    state: str                  # unknown (no baseline), ok, suspect (low, but not for long enough), slow
+    state: str                  # unknown (no baseline), ok, suspect (low, but not for long enough), slow,
+                                # busy (another client's request was running: the sample says nothing)
     tok_s: float                # the newest sample
     baseline: float | None
     ratio: float | None         # newest sample over the baseline
@@ -65,17 +70,47 @@ def _base_url(endpoint: str) -> str:
     return base + "/chat/completions"
 
 
-def measure(endpoint: str, model: str, *, post=post_json, clock=time.monotonic, timeout: float = TIMEOUT_S) -> Sample:
+def _origin(endpoint: str) -> str:
+    base = endpoint.rstrip("/")
+    return base[:-3] if base.endswith("/v1") else base
+
+
+def _get_text(url: str, timeout: float) -> str:
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+GAUGE_RE = re.compile(r"^vllm:num_requests_running\{[^}]*\}\s+([0-9.eE+-]+)\s*$", re.MULTILINE)
+
+
+def running_requests(endpoint: str, *, get=_get_text) -> int | None:
+    """How many requests the server is running now, from vLLM's /metrics (`vllm:num_requests_running`, added over the
+    engines), or None when the server does not say (another kind of server, no answer, an odd value)."""
+    try:
+        text = get(_origin(endpoint) + "/metrics", METRICS_TIMEOUT_S)
+        values = [float(v) for v in GAUGE_RE.findall(text)]
+    except (OSError, ValueError):
+        return None
+    return int(sum(values)) if values else None
+
+
+def measure(endpoint: str, model: str, *, post=post_json, clock=time.monotonic, timeout: float = TIMEOUT_S,
+            running=None) -> Sample:
     """One fixed greedy answer, timed by the client."""
     url = _base_url(endpoint)
     body = {"model": model, "messages": [{"role": "user", "content": PROMPT}], "temperature": 0,
             "max_tokens": MAX_TOKENS, "stream": False, "chat_template_kwargs": {"enable_thinking": False}}
+    running = running or running_requests
+    before = running(endpoint)
     start = clock()
     try:
         data = post(url, body, timeout)
     except (OSError, ValueError, CanaryError) as exc:
         raise SpeedError(f"the speed request to {url} failed: {exc}") from exc
     seconds = clock() - start
+    after = running(endpoint)
+    seen = [n for n in (before, after) if n is not None]
+    others = max(seen) if seen else None
     usage = data.get("usage") if isinstance(data, dict) else None
     tokens = usage.get("completion_tokens") if isinstance(usage, dict) else None
     if isinstance(tokens, bool) or not isinstance(tokens, int):
@@ -84,7 +119,7 @@ def measure(endpoint: str, model: str, *, post=post_json, clock=time.monotonic, 
         raise SpeedError(f"{url}: the request took no measurable time")
     if tokens < MIN_TOKENS:
         raise SpeedError(f"{url} answered with only {tokens} tokens, too few to time (need {MIN_TOKENS})")
-    return Sample(tok_s=tokens / seconds, tokens=tokens, seconds=seconds)
+    return Sample(tok_s=tokens / seconds, tokens=tokens, seconds=seconds, others=others)
 
 
 def judge(samples: list[float], baseline: float | None, *, ratio: float = SLOW_RATIO,
@@ -161,16 +196,72 @@ class Baselines:
 
 
 def check(endpoint: str, model: str, store: Baselines, *, history: list, baseline: float | None = None,
-          post=post_json, clock=time.monotonic) -> Check:
+          post=post_json, clock=time.monotonic, running=None) -> Check:
     """Measure once, judge against the baseline (a given `baseline` wins and is not stored), learn, and append the
-    sample to `history`. The baseline is judged before it is raised, so a fast sample cannot hide a slow trend."""
-    sample = measure(endpoint, model, post=post, clock=clock)
-    history.append(sample.tok_s)
+    sample to `history`. The baseline is judged before it is raised, so a fast sample cannot hide a slow trend.
+
+    A sample taken while another client's request was running is `busy`: it is not appended to `history`, does not
+    count towards slow and does not touch the baseline. A decode step serves every running request, so one long
+    conversation in the batch slows all of them (2026-10-17: 7.3 tok/s for a fresh request beside an agent's long
+    conversation, 38.7 on the idle server). When the server does not report its running requests, the sample counts
+    and a slow or suspect verdict says it could not tell."""
+    sample = measure(endpoint, model, post=post, clock=clock, running=running)
     stored = store.get(endpoint, model)
-    verdict = judge(history, baseline if baseline is not None else stored)
+    base = baseline if baseline is not None else stored
+    if sample.others:
+        n = sample.others
+        return Check(sample, Verdict(
+            "busy", sample.tok_s, base, None if base is None else sample.tok_s / base,
+            f"{n} other request{'s were' if n != 1 else ' was'} running on the server, so this {sample.tok_s:.1f} tok/s "
+            "sample does not say whether the server is slow (a long conversation in the batch slows every request)."))
+    history.append(sample.tok_s)
+    verdict = judge(history, base)
+    if sample.others is None and verdict.state in ("slow", "suspect"):
+        verdict = replace(verdict, message=verdict.message + " (The server did not report its running requests, so I "
+                          "could not tell whether other requests were running; another client may be why.)")
     if baseline is None:
         store.update(endpoint, model, sample.tok_s)
     return Check(sample, verdict)
+
+
+CONFIRM_INTERVAL_S = 10.0    # choice: between the re-checks of a low sample; a sample takes about 8 s on a healthy server
+
+
+def confirm(endpoint: str, model: str, store: Baselines, *, history: list, baseline: float | None = None,
+            interval: float = CONFIRM_INTERVAL_S, post=post_json, clock=time.monotonic, sleep=time.sleep,
+            running=None) -> Check:
+    """`check`, and while the verdict is only `suspect`, up to SLOW_CONSECUTIVE - 1 more samples, so a single busy
+    moment is not reported as slow and three low samples in a row are, within about half a minute. Stops at the first
+    sample that is not low. A request that fails raises SpeedError."""
+    result = check(endpoint, model, store, history=history, baseline=baseline, post=post, clock=clock, running=running)
+    for _ in range(SLOW_CONSECUTIVE - 1):
+        if result.verdict.state != "suspect":
+            break
+        sleep(interval)
+        result = check(endpoint, model, store, history=history, baseline=baseline, post=post, clock=clock,
+                       running=running)
+    return result
+
+
+def probe_check(home, *, post=post_json, clock=time.monotonic, sleep=time.sleep, running=None):
+    """The speed check the kernel probe runs before each attempt: a function (endpoint, model) -> dict, which keeps one
+    history per server across the calls. The dict is what the attempt's record holds: state, tok_s, baseline, ratio and
+    message. A server that cannot be measured gives state `error`, which never stops a probe (the attempt then shows
+    what the coder does)."""
+    store = Baselines(Path(home) / ".cache" / "tt-orchard" / SPEED_BASELINE_FILE)
+    histories: dict[str, list] = {}
+
+    def run_check(endpoint: str, model: str) -> dict:
+        history = histories.setdefault(Baselines.key(endpoint, model), [])
+        try:
+            c = confirm(endpoint, model, store, history=history, post=post, clock=clock, sleep=sleep, running=running)
+        except SpeedError as exc:
+            return {"state": "error", "tok_s": None, "baseline": None, "ratio": None, "message": str(exc)}
+        v = c.verdict
+        return {"state": v.state, "tok_s": round(c.sample.tok_s, 1),
+                "baseline": None if v.baseline is None else round(v.baseline, 1),
+                "ratio": None if v.ratio is None else round(v.ratio, 3), "message": v.message}
+    return run_check
 
 
 # ---- the command: tt-orchard coder-speed ---------------------------------------------------------------------------
@@ -212,7 +303,8 @@ def _line(t: dict, v: Verdict) -> str:
     return f"{t['label']:<8} {t['endpoint']}  {t['model']}: [{v.state}] {v.message}"
 
 
-def run(args, *, out, home, tier_config=None, post=post_json, clock=time.monotonic, sleep=time.sleep) -> int:
+def run(args, *, out, home, tier_config=None, post=post_json, clock=time.monotonic, sleep=time.sleep,
+        running=None) -> int:
     """Measure each server; exit 0 (ok, suspect or no baseline yet), 2 (a server could not be measured) or 3 (slow)."""
     targets, error = _targets(args, tier_config)
     if error:
@@ -234,7 +326,7 @@ def run(args, *, out, home, tier_config=None, post=post_json, clock=time.monoton
             for t in targets:
                 try:
                     c = check(t["endpoint"], t["model"], store, history=history[id(t)], baseline=args.baseline,
-                              post=post, clock=clock)
+                              post=post, clock=clock, running=running)
                 except SpeedError as exc:
                     results[id(t)] = (None, str(exc))
                     round_failed = True

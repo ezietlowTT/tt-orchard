@@ -16,7 +16,7 @@
     tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
                             [--temperature T | --temperatures T1,T2] [--top-p P] [--seed N]
                             [--src-dir D] [--venv-dir D] [--shared-python P] [--tt-lang-skill-dir D]
-                            [--allow-stale-skills]
+                            [--allow-stale-skills] [--allow-slow-coder]
 
 It is a thin layer over `python3 -m orchard.supervisor`. `bringup` reads config/bringup.toml, checks what
 can be checked without a lease (orchard/preflight.py), fetches the model snapshot when it is not local
@@ -222,6 +222,9 @@ def _parser() -> argparse.ArgumentParser:
     kp.add_argument("--tt-lang-skill-dir", help="the installed tt-lang skill whose guide.md and examples.md go into "
                                                 "each attempt's reference/ (default ~/.claude/skills/ttm-tt-lang, or "
                                                 "$ORCHARD_TTLANG_SKILL)")
+    kp.add_argument("--allow-slow-coder", action="store_true",
+                    help="run even when the coder is decoding far below its best speed (the probe measures it before "
+                         "each attempt and otherwise stops, exit 6); the report records each measurement")
     kp.add_argument("--allow-stale-skills", action="store_true",
                     help="run even when the tt-lang checkout or the tt-lang skill is not the latest upstream has, or "
                          "could not be compared; the report records it with the shas")
@@ -280,7 +283,8 @@ def _kernel_probe(args, env, home, out) -> int:
             tier_config = tiers.load(cfg.tiers)
         except (NoConfig, bringup_config.BringupConfigError, tiers.TierConfigError) as exc:
             print(f"note: no tier config read ({exc})", file=out)
-    return kernelprobe.main(args, out=out, tier_config=tier_config)
+    from orchard import speedwatch
+    return kernelprobe.main(args, out=out, tier_config=tier_config, speed_check=speedwatch.probe_check(home))
 
 
 def _refuse(message: str) -> int:

@@ -803,8 +803,10 @@ def build_watchdog(control: ProbeControl, ledger) -> Watchdog:
 def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id, max_turns=BUDGET["max_turns"],
                 wall_s=BUDGET["wall_s"], http=post_json, clock=time.time, watchdog=None, run_watched=run_watched,
                 tt_lang: dict | None = None, temperature: float = 0.0, top_p: float | None = None,
-                seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None) -> dict:
+                seed: int | None = None, references: list[dict] | None = None, skills: dict | None = None,
+                coder_speed: dict | None = None) -> dict:
     """One attempt: prepare the directory, run the agent, run the authoritative check, write and return attempt.json.
+    `coder_speed` is the decode-speed check made just before the attempt (speedwatch.probe_check), kept in the record.
     The sampling (temperature, top_p, seed) goes to the coder and into the record as `sampling`; the reference files
     written into the attempt (with their sha256) go into the provenance block."""
     sampling = {"temperature": temperature, "top_p": top_p, "seed": seed}
@@ -840,7 +842,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
         "category": None if passed else check.get("category"), "first_line": check.get("first_line") or "",
         **measures, "violations": check.get("violations") or [], "sets": sets, "hw": None,
         "agent_check_untrusted": agent_check_untrusted(_read_agent_check(adir / "check.json"), check, op),
-        "swept": swept, "sampling": dict(sampling),
+        "swept": swept, "sampling": dict(sampling), "coder_speed": coder_speed,
         "provenance": provenance(kernel_sha256=check.get("kernel_sha256"), tt_lang=facts,
                                  coder_model=coder_model, probe_id=probe_id, simulator_pcc_min=measures["pcc_min"],
                                  sampling=dict(sampling), references=copied or None, skills=skills),
@@ -1167,6 +1169,24 @@ def _distinct_lines(g: dict) -> list[str]:
     return lines
 
 
+def _speed_lines(attempts: list[dict]) -> list[str]:
+    """The coder's decode speed before each attempt, from the records; nothing when no attempt was measured."""
+    rows = [(a["op"], a["attempt"], a["coder_speed"]) for a in sorted(attempts, key=lambda a: (a["op"], a["attempt"]))
+            if isinstance(a.get("coder_speed"), dict)]
+    if not rows:
+        return []
+    lines = ["## Coder decode speed", "",
+             "Coder decode speed, measured just before each attempt (against the best seen for this server):", ""]
+    for op, n, sp in rows:
+        text = (f"{sp['tok_s']:.1f} tok/s ({sp.get('state')})" if sp.get("tok_s") is not None
+                else f"not measured ({sp.get('message')})")
+        lines.append(f"- {op} attempt {n}: {text}")
+    if any(sp.get("state") in ("busy", "suspect", "slow") for _, _, sp in rows):
+        lines += ["", "For some attempts the coder was busy with another client or below its best speed. Their turns, "
+                      "wall times and request timeouts are not comparable with attempts that ran at full speed."]
+    return lines + [""]
+
+
 def _skills_lines(header: dict) -> list[str]:
     """The report's section on the skill sources: each one's state against upstream with both shas, and a line when a
     stale source was allowed."""
@@ -1234,6 +1254,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
              *([_sampling_text(header["sampling"]), ""] if isinstance(header.get("sampling"), dict) else []),
              *([f"{header['ignored_records']} unrelated or unreadable records ignored under {VERDICT_DIR}.", ""]
                if header.get("ignored_records") else []),
+             *_speed_lines(attempts),
              "## tt-lang", "",
              f"- simulator version: {t.get('sim_version')}",
              f"- source SHA: {t.get('source_sha')}",
@@ -1290,7 +1311,7 @@ def write_report(probe_dir, attempts: list[dict], header: dict) -> dict:
 # ---- the command ------------------------------------------------------------------------------------------------
 
 # The same codes as orchard/cli.py (a test checks they agree): 3 a crash, 4 an interrupt, 5 a hardware hang.
-EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5
+EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED, EXIT_SLOW = 0, 2, 3, 4, 5, 6
 CODER_STAGE = 2              # the probe's agent is the coder that writes stage 2's code, so it uses stage 2's tier
 
 
@@ -1343,6 +1364,16 @@ def _attempt_line(a: dict) -> str:
     result = "passed in the simulator" if a.get("passed_sim") else (a.get("category") or "failed")
     first = f" ({a['first_line']})" if a.get("first_line") and not a.get("passed_sim") else ""
     return f"{a['op']} {a['attempt']}: {result}{first}, {a.get('turns')} turns, {a.get('agent_wall_s')} s"
+
+
+def _speed_line(n: int, speed: dict, allow_slow: bool) -> str:
+    """One line before an attempt: what the speed check found."""
+    if speed.get("state") == "error":
+        return f"could not measure the coder's speed: {speed.get('message')}"
+    line = f"coder decode speed before attempt {n}: {speed.get('tok_s'):.1f} tok/s ({speed.get('state')})"
+    if speed.get("state") == "slow" and allow_slow:
+        line += "; the coder is slow, continuing (--allow-slow-coder)"
+    return line
 
 
 def _hw_line(a: dict) -> str:
@@ -1547,7 +1578,7 @@ def _crash(where: str, exc: BaseException) -> str:
 
 
 def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_watched_fn=run_watched,
-         tier_config=None) -> int:
+         tier_config=None, speed_check=None) -> int:
     """`tt-orchard kernel-probe --op NAME [--attempts N] [--phase sim|hw] [--out DIR] [--endpoint URL] [--model NAME]
     [--src-dir D] [--venv-dir D] [--shared-python P]`.
 
@@ -1567,7 +1598,12 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
     A run that stops early still writes its report from what finished, with "The probe stopped: <reason>" in it:
     a hung hardware run (ProbeBlocked) exits 5, an exception in an attempt or in the hardware phase exits 3, and Ctrl-C
     or SIGTERM exits 4. No hardware runs after a crash or an interrupt. If the report itself cannot be written, the
-    records are printed to stderr as JSON and the exit is 3. URLs are printed without any user:password part."""
+    records are printed to stderr as JSON and the exit is 3. URLs are printed without any user:password part.
+
+    `speed_check(endpoint, model)` (speedwatch.probe_check; the command line passes it) measures the coder's decode speed
+    before each attempt and returns a dict with a `state`. The dict goes into the attempt's record. A `slow` coder stops
+    the probe before the attempt (exit 6, the report written) unless --allow-slow-coder; `error` and `suspect` never stop
+    it. With no `speed_check` nothing is measured."""
     say = (lambda line: print(line, file=out)) if out is not None else print
 
     def refuse(message: str) -> int:
@@ -1649,16 +1685,23 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             try:
                 # n counts every attempt of the run from 1, across the temperature groups.
                 jobs = [t for t in plan["temperatures"] for _ in range(attempts)]
+                allow_slow = bool(getattr(args, "allow_slow_coder", False))
                 for n, temperature in enumerate(jobs, start=1):
                     where = f"attempt {n}"
+                    speed = speed_check(endpoint, model) if speed_check is not None else None
+                    if speed is not None:
+                        say(_speed_line(n, speed, allow_slow))
+                        if speed.get("state") == "slow" and not allow_slow:
+                            stopped, code = f"coder slow before attempt {n}: {speed.get('message')}", EXIT_SLOW
+                            break
                     record = run_attempt(op=args.op, n=n, probe_dir=probe_dir, env=env, endpoint=endpoint,
                                          model=model, coder_model=model, probe_id=probe_id, http=http,
                                          run_watched=run_watched_fn, tt_lang=facts, temperature=temperature,
                                          top_p=plan["top_p"], seed=attempt_seed(base, n, temperature),
-                                         references=references, skills=skills_record)
+                                         references=references, skills=skills_record, coder_speed=speed)
                     records.append(record)
                     say(_attempt_line(record))
-                if getattr(args, "phase", "sim") == "hw":
+                if getattr(args, "phase", "sim") == "hw" and not stopped:
                     where, hw_started = "the hardware phase", True
                     shared = (getattr(args, "shared_python", None)
                               or str(Path.home() / ".tenstorrent-venv" / "bin" / "python"))
@@ -1699,7 +1742,7 @@ def main(args, *, env=None, out=None, http=post_json, probe=probe_model, run_wat
             write_report(probe_dir, records, header)
             say(f"report: {probe_dir / 'kernel-probe-report.md'}")
             if stopped:
-                say(f"stopped: {stopped}")
+                say(f"stopped: {stopped}" + (" (pass --allow-slow-coder to run anyway)" if code == EXIT_SLOW else ""))
         except Exception as exc:                            # never let the last step lose the records
             try:
                 print(f"the report could not be written ({type(exc).__name__}: {exc}); the attempt records follow",

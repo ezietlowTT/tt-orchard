@@ -143,6 +143,31 @@ two-process lock test.
   the run blocks and does not retry. A restart with a baseline skips the question; a resume after a block
   asks it again. Each guard was checked by mutation: remove it and a test goes red.
 
+## 2026-10-17: `tt-orchard coder-speed`, and a correction (branch `ka-speedwatch`, version 0.6.2)
+Prompt (operator): "can we add something that detects when coder gets too slow and needs a restart (or any model we're
+using because it will change over time)". Context: during the kernel-probe batches I reported the coder had slowed from 38
+to 7.6 tok/s, twice, and the operator approved a restart and reset for it. Both reports read vLLM's "Avg generation
+throughput" log line, which is tokens over the whole 10 s window. An agent's turns are short tool calls with idle time
+between them, so a healthy server reads 5 to 8 tok/s there. Measured idle, the same server decoded at 38.7 tok/s. The
+restart was probably not needed. The ledger and the operator were told.
+- `orchard/speedwatch.py` asks a server for one fixed greedy answer (about 300 tokens, thinking off) and divides the tokens
+  the server reports by the seconds the client measured. It keeps the best speed seen per model and endpoint
+  (`~/.cache/tt-orchard/speed-baseline.json`; a slow sample never lowers it) and calls a server `slow` when the last three
+  samples are all below half of that. It reports and never restarts, because a restart interrupts every client.
+- Found by running it live: a fresh request beside the batch's long conversation measured 7.3 tok/s, while two short requests
+  together got 29.6 each. A decode step serves every running request, so one long context slows all of them. The check now
+  reads `vllm:num_requests_running` before and after its own request; a sample taken beside another request is `busy`, is not
+  counted and teaches nothing. A server with no such count is measured anyway and the message says it could not tell.
+- `tt-orchard coder-speed [--endpoint URL --model NAME | --tiers] [--samples N] [--watch SECONDS] [--json]`; exit 0, 2
+  (could not measure) or 3 (slow). `kernel-probe` measures before each attempt, records `coder_speed` in each attempt.json,
+  lists it in the report and stops with exit 6 when the coder is slow (`--allow-slow-coder` overrides); `busy` and `error`
+  never stop it, and the report marks those attempts as not comparable.
+- Tests first. 85 in the two new files and 13 in the probe; about 55 mutations over the module and the wiring, each red,
+  except one equivalent (an extra re-check that can never run). Tests that call the module never reach a server: an autouse
+  fixture replaces the metrics call, because 127.0.0.1:8011 is a live coder on the machine they were written on.
+- Not done: the supervisor's watchdog does not use it (restarting the coder inside a bring-up needs the park and restore
+  machinery); the baseline needs `--reset-baseline` after a change on purpose; one pass over `--tiers` takes a sample per tier.
+
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,
   wrapper options). Two fix rounds replaced it with the lexer. Later reviews were limited to

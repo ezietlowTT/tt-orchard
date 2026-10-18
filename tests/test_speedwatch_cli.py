@@ -18,6 +18,13 @@ from orchard.tiers import TierConfig
 URL, MODEL = "http://127.0.0.1:8011/v1", "coder"
 
 
+@pytest.fixture(autouse=True)
+def no_real_metrics_request(monkeypatch):
+    """127.0.0.1:8011 is a live coder on the machine these tests were written on. Nothing here may ask it anything:
+    unless a test says otherwise, no other request is running."""
+    monkeypatch.setattr(sw, "running_requests", lambda endpoint, **kw: 0)
+
+
 class Server:
     """A fake post and clock. `tok_s` is a list consumed one value per request; the last one repeats."""
 
@@ -44,10 +51,10 @@ def args(*argv):
     return cli._parser().parse_args(["coder-speed", *argv])
 
 
-def run(tmp_path, server, *argv, tier_config=None):
+def run(tmp_path, server, *argv, tier_config=None, running=None):
     out = io.StringIO()
     code = sw.run(args(*argv), out=out, home=tmp_path, tier_config=tier_config, post=server.post, clock=server.clock,
-                  sleep=server.sleep)
+                  sleep=server.sleep, running=running)
     return code, out.getvalue()
 
 
@@ -237,3 +244,32 @@ def test_errors_that_are_not_in_a_row_never_end_the_watch(tmp_path):
     s.sleep = sleep
     code, text = run(tmp_path, s, *target("--watch", "30"))
     assert code == 0 and "stopped" in text and len(s.calls) == 8 and "errors in a row" not in text
+
+
+# ---- another client is using the server ------------------------------------------------------------------------------
+
+def test_a_busy_server_is_reported_busy_exits_zero_and_learns_nothing(tmp_path):
+    code, text = run(tmp_path, Server([7.0]), *target(), running=lambda e: 1)
+    assert code == 0 and "[busy]" in text and "1 other request" in text
+    assert store(tmp_path).get(URL, MODEL) is None                        # a contended sample is not a baseline
+
+
+def test_busy_samples_never_end_a_run_as_slow(tmp_path):
+    store(tmp_path).update(URL, MODEL, 40.0)
+    code, text = run(tmp_path, Server([7.0]), *target("--samples", "3"), running=lambda e: 2)
+    assert code == 0 and "[busy]" in text and "[slow]" not in text
+
+
+def test_json_says_busy(tmp_path):
+    store(tmp_path).update(URL, MODEL, 40.0)
+    code, text = run(tmp_path, Server([7.0]), *target("--json"), running=lambda e: 1)
+    (row,) = json.loads(text)
+    assert code == 0 and row["state"] == "busy" and row["tok_s"] == pytest.approx(7.0)
+
+
+def test_a_watch_over_a_busy_server_keeps_going_and_a_later_quiet_slow_run_ends_it(tmp_path):
+    store(tmp_path).update(URL, MODEL, 40.0)
+    s = Server([7.0])
+    load = iter([1, 1, 1, 1, 0, 0, 0, 0, 0, 0])                           # busy for two samples (two readings each), then quiet
+    code, text = run(tmp_path, s, *target("--watch", "30"), running=lambda e: next(load))
+    assert code == 3 and text.count("[busy]") == 2 and "[slow]" in text.splitlines()[-1] and len(s.calls) == 5
