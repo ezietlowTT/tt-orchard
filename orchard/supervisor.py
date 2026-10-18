@@ -132,7 +132,7 @@ from orchard.context import build_messages, facts_from
 from orchard.defaults import (AGENT_CONTINUATION_TURNS, AGENT_WRAPUP_TURNS, CHIPS_PER_BOARD, CMD_TIMEOUT_S,
                               COLD_BOOT_BUDGET_S, CONTROL_POLL_S, FIRST_BOOT_EXPECTED,
                               FIRST_BOOT_PROMPT, PACKAGE_DEFERRED, PACKAGE_FORMATS,
-                              RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB)
+                              RUN_CANARY_PROMPT, STOP_TIMEOUT_S, TEST_DISK_GB, FAST_FAIL_S)
 from orchard.handoff import (NOTE_KEYS, Blocked, Budgets, Handoff, decide_park, progress, reacquire,
                              recover, wait_stopped)
 from orchard.hwtests import (failed_tests, load_plan, move_aside, pending, read_plan, suspect_caches,
@@ -1895,10 +1895,22 @@ class Supervisor:
         chosen = held[:test.chips]
         out_dir = stage_dir / "tests" / str(test.chips)
         out_dir.mkdir(parents=True, exist_ok=True)
-        result = self._spawn(n, test.command(n), [c for _, c in chosen], [i for i, _ in chosen],
-                             min(test.deadline_s, spec.budget_s), out_dir / "output.txt",
-                             config=test.chips, cache=test.cache,
-                             lease_ids=[lease.lease_id for lease in leases])
+        def spawn() -> dict:
+            return self._spawn(n, test.command(n), [c for _, c in chosen], [i for i, _ in chosen],
+                               min(test.deadline_s, spec.budget_s), out_dir / "output.txt",
+                               config=test.chips, cache=test.cache,
+                               lease_ids=[lease.lease_id for lease in leases])
+        result = spawn()
+        if (test.boards >= 2 and result["returncode"] != 0 and not result["timed_out"]
+                and result["seconds"] < FAST_FAIL_S):
+            # A multi-board test that dies this early failed to start (the 4-chip test's `Fabric Router Sync:
+            # Timeout`, seen after 13 to 57 s and gone after the chips were reset together). The cause is not
+            # isolated, so reset every chip the test holds and run it once more. Its record is the second try's.
+            self.ledger.append("decision", n, decision="test failed at startup; resetting the test chips and trying once more",
+                               config=test.chips, returncode=result["returncode"], seconds=result["seconds"])
+            for lease in leases:
+                self._reset_test_chips(n, test, lease)
+            result = spawn()
         path = write_record(stage_dir, test.chips, {"config": test.chips, **result,
                                                     "device_ids": [i for i, _ in chosen]})
         self.ledger.append("evidence", n, what="hardware test", config=test.chips, cache=test.cache,
