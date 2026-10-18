@@ -75,7 +75,31 @@ def metrics(got, exp, torch) -> dict:
         "rel_l2": clean((g - e).norm() / exp_norm) if exp_norm > 0 else None,
         "slope": clean((g * e).sum() / exp_sq) if exp_sq > 0 else None,
         "exp_abs_max": clean(e.abs().max()) if e.numel() else None,
+        "worst": worst_positions(got, exp, torch, clean),
     }
+
+
+WORST_COUNT = 3        # how many places the result keeps; the check prints two of them
+
+
+def worst_positions(got, exp, torch, clean) -> list:
+    """The places where got is furthest from exp: {"at": [index...], "expected", "got"}, worst first. A value that is
+    not finite ranks above any finite error, and is recorded as null. The coder sees these through the check, so it can
+    tell a wrong scale from a wrong pattern (L4e, 2026-10-17: two attempts never learned their output was about 964
+    times too large)."""
+    g, e = got.flatten().double(), exp.flatten().double()
+    if g.numel() == 0:
+        return []
+    err = (g - e).abs()
+    rank = torch.where(torch.isfinite(err), err, torch.full_like(err, float("inf")))
+    shape, found = tuple(got.shape), []
+    for flat in torch.topk(rank, min(WORST_COUNT, rank.numel())).indices.tolist():
+        at, rest = [], flat
+        for size in reversed(shape):
+            at.append(rest % size)
+            rest //= size
+        found.append({"at": at[::-1], "expected": clean(e[flat]), "got": clean(g[flat])})
+    return found
 
 
 def main(argv=None) -> int:

@@ -438,6 +438,52 @@ def _set_problem(s: dict, bar: float, bars: dict) -> str | None:
     return None
 
 
+def _pair(w: dict) -> str:
+    def v(x):
+        return "nan or inf" if x is None else f"{x:.5g}"
+    exp = "nan or inf" if w.get("expected") is None else f"{w['expected']:.4g}"
+    return f"{w.get('at')}: expected {exp}, got {v(w.get('got'))}"
+
+
+def numeric_detail(sets: list, bar: float, bars: dict) -> str:
+    """One line about the first input set that fails the numeric bars, or "" when none does.
+
+    The line says what the first-line summary cannot: how far off the scale is (slope), the relative error, the largest
+    error beside the size of the expected values, and the worst places with their expected and got values. In L4e
+    (2026-10-17) two attempts at different seeds wrote the same wrong kernel and were told only `pcc 0.9796`; the result
+    held a slope of 964 that they never saw. The line states measured facts and names no op and no fix."""
+    failing = [s for s in sets if isinstance(s, dict) and _set_problem(s, bar, bars) is not None]
+    if not failing:
+        return ""
+    s = failing[0]
+    slope = s.get("slope")
+    if s.get("finite") is not True:
+        scale = "got is not finite (nan or inf somewhere)"
+    elif not _number(slope):
+        scale = "the scale could not be measured"
+    elif slope < 0:
+        scale = f"got has the opposite sign of expected (slope {slope:.3g})"
+    elif slope > 1.25 or slope < 0.8:
+        scale = f"got is about {slope:.3g}x expected"
+    else:
+        scale = f"scale is about right (slope {slope:.3g})"
+    parts = [scale]
+    if _number(s.get("pcc")):
+        parts.append(f"pcc {s['pcc']:.4g}")
+    if _number(s.get("rel_l2")):
+        parts.append(f"rel_l2 {s['rel_l2']:.3g}")
+    if _number(s.get("max_abs_err")):
+        reach = f" where expected values reach {s['exp_abs_max']:.3g}" if _number(s.get("exp_abs_max")) else ""
+        parts.append(f"max_abs_err {s['max_abs_err']:.5g}{reach}")
+    line = f"{s.get('name')}: " + ", ".join(parts)
+    worst = [w for w in s.get("worst") or [] if isinstance(w, dict)][:2]
+    if worst:
+        line += "; worst: " + "; ".join(_pair(w) for w in worst)
+    if len(sets) > 1:
+        line += f"; {len(failing)} of {len(sets)} input sets fail"
+    return line
+
+
 def classify(*, kernel_present, timed_out, returncode, text, result, bar, phase="sim", bars=None,
              diagnostics_present=None):
     """(category or None, first line). None means the kernel passed.
@@ -659,6 +705,10 @@ def _main(argv=None) -> int:
     hint = unit_hint(text) if category is not None else ""
     if hint:
         print(f"hint: {hint}")
+    numbers = numeric_detail((result or {}).get("sets") or [], spec["pcc_bar_sim"], bars) \
+        if category == "numeric_mismatch" and bars else ""
+    if numbers:
+        print(f"numbers: {numbers}")
     return 0 if category is None else 1
 
 

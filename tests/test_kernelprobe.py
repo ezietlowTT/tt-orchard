@@ -3156,7 +3156,7 @@ def test_the_skill_says_each_write_runs_the_check_and_shows_where_and_hint():
     it after each write (ProbeTools), and the skill says so, so the coder reads the output below the write."""
     flat = " ".join(kp.SKILL.read_text().split())
     assert "Each write of `kernel.py` runs `python3 kernel_check.py` and shows its output below the write's result." in flat
-    assert "`where:` (the failing line)" in flat and "`hint:`" in flat
+    assert "`where:` (the failing line)" in flat and "`hint:`" in flat and "`numbers:`" in flat
 
 
 # ---- the check runs after every write of kernel.py (pilot 4, 2026-10-17) -------------------------------------------

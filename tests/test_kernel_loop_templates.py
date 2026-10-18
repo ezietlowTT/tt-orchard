@@ -1338,3 +1338,137 @@ def test_a_failing_check_prints_the_unit_hint_after_where(tmp_path):
     lines = done.stdout.splitlines()
     assert lines[0].startswith("FAIL: tt_lang_error: ") and lines[1].startswith("where: kernel.py line ")
     assert len(lines) == 3 and lines[2].startswith("hint: tensor slices count tiles, not elements"), done.stdout
+
+
+# --- numbers: what the numeric mismatch looked like (L4e, 2026-10-17) -------------------------------------------------
+# Two sampled attempts at different seeds wrote the same wrong rmsnorm (the mean divided by 8 tiles, not 256 elements).
+# Both got `FAIL: numeric_mismatch: set seed0: pcc 0.9796, finite True, bar 0.999` and never saw that their output was
+# about 964 times too large, a number the check had in its own result. The check now prints it, with the worst
+# expected-and-got pairs, on a line under the FAIL line.
+
+def _torch():
+    return pytest.importorskip("torch")
+
+
+def test_metrics_lists_the_worst_positions_with_expected_and_got():
+    torch = _torch()
+    exp = torch.zeros(4, 5)
+    got = torch.zeros(4, 5)
+    got[2, 3] = 50.0
+    got[0, 1] = -7.0
+    got[3, 4] = 2.0
+    worst = _harness().metrics(got, exp, torch)["worst"]
+    assert [w["at"] for w in worst] == [[2, 3], [0, 1], [3, 4]]
+    assert [w["got"] for w in worst] == [50.0, -7.0, 2.0] and all(w["expected"] == 0.0 for w in worst)
+
+
+def test_metrics_lists_at_most_three_and_puts_non_finite_values_first():
+    torch = _torch()
+    exp = torch.ones(2, 6)
+    got = torch.ones(2, 6) * 2
+    got[1, 5] = float("nan")
+    got[0, 0] = float("inf")
+    worst = _harness().metrics(got, exp, torch)["worst"]
+    assert len(worst) == 3 and {tuple(w["at"]) for w in worst[:2]} == {(1, 5), (0, 0)}
+    assert all(w["got"] is None for w in worst[:2])                    # nan and inf are not JSON numbers: recorded as null
+    json.dumps(worst, allow_nan=False)
+
+
+def test_metrics_worst_follows_the_shape_of_a_one_dimensional_output():
+    torch = _torch()
+    got = torch.zeros(10)
+    got[7] = 3.0
+    assert _harness().metrics(got, torch.zeros(10), torch)["worst"][0]["at"] == [7]
+
+
+SET = {"name": "seed0", "seed": 0, "heavy_tail": False, "pcc": 0.9796, "max_abs_err": 9094.4, "finite": True,
+       "rel_l2": 983.1, "slope": 964.0, "exp_abs_max": 6.4,
+       "worst": [{"at": [0, 12], "expected": 0.12, "got": 9094.5}, {"at": [3, 4], "expected": -1.5, "got": 800.25},
+                 {"at": [9, 9], "expected": 0.5, "got": 700.0}]}
+BARS = {"pcc": 0.999, "rel_l2": 0.01, "slope": [0.98, 1.02], "max_abs_atol": 0.01, "max_abs_rtol": 0.01}
+
+
+def detail(sets, bars=BARS, bar=0.999):
+    return CHECK.numeric_detail(sets, bar, bars)
+
+
+def test_numbers_says_how_many_times_too_big_and_names_the_worst_places():
+    line = detail([SET])
+    assert line.startswith("seed0: ")
+    assert "about 964x expected" in line and "pcc 0.9796" in line and "rel_l2 983" in line
+    assert "max_abs_err 9094" in line and "expected values reach 6.4" in line
+    assert "[0, 12]: expected 0.12, got 9094.5" in line and "[3, 4]: expected -1.5, got 800.25" in line
+    assert "[9, 9]" not in line                                           # two places are enough on one line
+    assert "\n" not in line and len(line) < 420
+
+
+def test_numbers_says_too_small_opposite_sign_and_right_scale_differently():
+    assert "about 0.0058x expected" in detail([dict(SET, slope=0.0058)]).replace("0.00580", "0.0058")
+    assert "opposite sign" in detail([dict(SET, slope=-0.9)])
+    right = detail([dict(SET, slope=1.0, pcc=0.4)])
+    assert "scale is about right" in right and "pcc 0.4" in right
+
+
+def test_numbers_says_when_the_output_is_not_finite():
+    line = detail([dict(SET, finite=False, pcc=None, slope=None, rel_l2=None, worst=[{"at": [1, 1], "expected": 1.0, "got": None}])])
+    assert "not finite" in line and "[1, 1]: expected 1, got nan or inf" in line
+
+
+def test_numbers_names_the_first_failing_set_and_counts_the_rest():
+    good = dict(SET, name="seed1", pcc=1.0, slope=1.0, rel_l2=0.0, max_abs_err=0.0)
+    line = detail([good, SET, dict(SET, name="seed2")])
+    assert line.split(":")[0] == "seed0"                                   # the first set that fails, not the first set
+    assert "2 of 3 input sets fail" in line
+    assert "1 of 2 input sets fail" in detail([good, SET])                 # the count appears when there is more than one set
+    assert "input sets fail" not in detail([SET])                          # and not for a single set
+
+
+def test_numbers_works_for_a_result_with_no_worst_list():
+    old = {k: v for k, v in SET.items() if k != "worst"}
+    line = detail([old])
+    assert "about 964x expected" in line and "worst" not in line
+
+
+def test_numbers_is_empty_when_no_set_fails_or_there_are_none():
+    good = dict(SET, pcc=1.0, slope=1.0, rel_l2=0.0, max_abs_err=0.0)
+    assert detail([good]) == "" and detail([]) == ""
+
+
+def test_numbers_reads_the_recorded_numeric_fixture():
+    result = json.loads((OUT / "numeric_mismatch.result.json").read_text())
+    line = detail(result["sets"], bar=0.999)
+    assert "slope" in line.lower() or "x expected" in line
+
+
+@needs_sim
+def test_a_numeric_mismatch_prints_numbers_under_the_unchanged_fail_line(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_wrong_op", op="add")
+    done, check = _run_check(tdir, adir)
+    lines = done.stdout.splitlines()
+    assert lines[0].startswith("FAIL: numeric_mismatch: set ") and check["first_line"] == lines[0].split(": ", 2)[2]
+    assert len(lines) == 2 and lines[1].startswith("numbers: seed0"), done.stdout
+    assert re.search(r"x expected|scale is about right|opposite sign", lines[1]), lines[1]
+    assert "worst" in lines[1] and "expected" in lines[1] and "got" in lines[1]
+
+
+@needs_sim
+def test_a_non_numeric_failure_prints_no_numbers_line(tmp_path):
+    tdir, adir = _attempt(tmp_path, "add_shape_error", op="add")
+    done, _ = _run_check(tdir, adir)
+    assert not any(l.startswith("numbers:") for l in done.stdout.splitlines())
+
+
+@pytest.mark.parametrize("slope,expect", [(1.3, "about 1.3x expected"), (0.6, "about 0.6x expected"), (1.2, "scale is about right"),
+                                          (0.85, "scale is about right"), (3.0, "about 3x expected")])
+def test_numbers_calls_a_scale_error_from_a_quarter_over_or_a_fifth_under(slope, expect):
+    assert expect in detail([dict(SET, slope=slope)])
+
+
+def test_numbers_names_the_worst_first_and_keeps_the_order_the_harness_gave():
+    line = detail([SET])
+    assert line.index("[0, 12]") < line.index("[3, 4]")
+
+
+def test_numbers_prints_nothing_for_a_non_finite_set_with_no_numbers_beyond_what_it_has():
+    line = detail([{"name": "seed0", "finite": False, "pcc": None}])
+    assert line.startswith("seed0: got is not finite") and "pcc" not in line and "rel_l2" not in line
