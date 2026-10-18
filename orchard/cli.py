@@ -538,6 +538,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _refuse("--no-fetch was given and the snapshot is not in " + str(hf_home))
     else:
         snapshot = fetch.snapshot_dir(hf_home, args.model, hub.sha)      # where the download will put it
+    if local is None and resuming and not args.dry_run:
+        # The weights are about to be downloaded, so an earlier run read a snapshot with none. Its stage 0 verdict (a full port,
+        # for bytkim/Qwen3.8-27B-pi) and stage 1 reference describe that empty snapshot, and a retry would keep both.
+        # The directory is moved, not deleted.
+        aside = run_dir.with_name(f"{run_dir.name}.stale-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
+        run_dir.rename(aside)
+        resuming = False
+        print(f"{style.icon('🍂')}the earlier run read a snapshot with no weights; set aside as {aside}", file=out)
     base_data = next(c for c in checks if c.name == "base").data or {}
     base_hub, base_snapshot = None, base_data.get("snapshot")
     if base_data.get("needs_fetch"):
