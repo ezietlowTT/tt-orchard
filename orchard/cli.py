@@ -37,9 +37,11 @@ import threading
 import time
 from pathlib import Path
 
-from orchard import __version__, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import __version__, blocked, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
+AUTO_RETRIES = 2            # a choice: a transient block gets two more tries, then a person decides
+AUTO_RETRY_WAIT_S = 60.0    # `gozer status` shows a released board BUSY-UNTRACKED for about a minute
 CONFIG_ENV = "ORCHARD_BRINGUP_CONFIG"
 CHECKOUT = Path(__file__).resolve().parent.parent
 
@@ -88,6 +90,10 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--auto-retries", type=int, default=AUTO_RETRIES, metavar="N",
+                   help=f"retry a run that ends blocked for a transient reason (coder-unusable, hardware-unhealthy, "
+                        f"agent-stuck) up to N times, waiting {AUTO_RETRY_WAIT_S:.0f} s before each. 0 turns it off. "
+                        f"Default {AUTO_RETRIES}")
     b.add_argument("--offline", action="store_true",
                    help="skip the base-model research and make no request for it. The preflight's hub lookup, "
                         "`tt model search` and any download still happen")
@@ -393,8 +399,16 @@ def _ui(args, env, home, out) -> int:
     return EXIT_OK
 
 
+def _block_code(run_dir: Path) -> str:
+    """The reason code in the run's blocked.json, or "blocked" when it is missing or unreadable."""
+    try:
+        return str(json.loads((run_dir / "blocked.json").read_text(encoding="utf-8"))["code"])
+    except (OSError, ValueError, KeyError):
+        return "blocked"
+
+
 def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None,
-         chooser=None, puller=None) -> int:
+         chooser=None, puller=None, sleep=None) -> int:
     env = os.environ if env is None else env
     out = sys.stdout if stdout is None else stdout
     if supervisor_main is None:
@@ -556,21 +570,30 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         # An existing run shows its last few entries first, so a resume says where it left off.
         narrator = narrate.Narrator(run_dir, style, out, replay=6 if resuming else False)
         narrator.start()
+    retried = 0
     try:
         code = supervisor_main(argv_run)
+        while code == EXIT_BLOCKED and retried < args.auto_retries:
+            reason = _block_code(run_dir)
+            if reason not in blocked.AUTO_RETRY:
+                break
+            retried += 1
+            print(f"{style.icon('🔁')}blocked: {reason}. Retrying automatically ({retried} of {args.auto_retries}) "
+                  f"after {AUTO_RETRY_WAIT_S:.0f} s.", file=out)
+            (sleep or time.sleep)(AUTO_RETRY_WAIT_S)
+            code = supervisor_main(argv_run)
     finally:
         if narrator is not None:
             narrator.stop()
+    if retried and code == EXIT_BLOCKED:
+        print(f"Still blocked after {retried} automatic retries.", file=out)
     where = run_dir / "stages" / "8" / "bundle"
     if code == EXIT_OK:
         print(lexicon.closing_line("ready-for-operator-review", style, where=str(where)), file=out)
     elif code == EXIT_ABORTED:
         print(lexicon.closing_line("aborted", style, where=str(run_dir)), file=out)
     elif code == EXIT_BLOCKED:
-        try:
-            reason = json.loads((run_dir / "blocked.json").read_text(encoding="utf-8"))["code"]
-        except (OSError, ValueError, KeyError):
-            reason = "blocked"
+        reason = _block_code(run_dir)
         print(lexicon.frost_line(reason, style) + f" See {run_dir / 'BLOCKED.md'}. Run the same command "
               "again to retry.", file=out)
         _print_block_digest(run_dir, reason, args.model, out)
