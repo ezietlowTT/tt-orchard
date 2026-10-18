@@ -1861,7 +1861,23 @@ class Supervisor:
         self.test_lease = lease
         self.ledger.append("decision", n, decision="test lease taken", config=test.chips,
                            test_lease=lease.record(), **({"where": self._where()} if self.lab is not None else {}))
+        if test.boards >= 2:
+            self._reset_test_chips(n, test, lease)
         return lease
+
+    def _reset_test_chips(self, n: int, test, lease: Lease) -> None:
+        """Reset a multi-board test's chips in place, so the test starts on chips reset after their last use.
+
+        The park resets only the coder's board. On 2026-10-13 the 4-chip test failed twice with fabric router
+        timeouts on the chips the smaller tests had used, and passed once all four were reset. The cause was
+        not isolated, so this is a precaution that costs about 42 s per board, and a refused reset blocks."""
+        try:
+            self.test_adapter.reset(lease)
+        except AdapterError as exc:
+            self._block(n, f"resetting the chips for the {test.chips}-chip test failed: {exc}",
+                        lease_id=lease.lease_id, config=test.chips)
+        self.ledger.append("decision", n, decision="test chips reset", config=test.chips,
+                           lease_id=lease.lease_id)
 
     def _give_back_test_lease(self, n: int, lease: Lease) -> None:
         try:
