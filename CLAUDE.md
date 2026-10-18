@@ -1143,3 +1143,4 @@ Prompt (operator): "get the new screenshot". No browser tool was available in th
   Page text now reads "The song ended at 5.2 s, before the 20 s asked for: the lyrics were finished." The README and the card say the page explains an early end again.
 - Pushed to GitHub (`2f8c3d5`) and re-uploaded to the Hugging Face companion repo. The page running under tt-disco on 7871 still has the old code, so it has the blank-steps
   bug until it is restarted from the catalog. The weights upload was at 7.6 GB; `finish_weights.sh` has not run yet.
+
