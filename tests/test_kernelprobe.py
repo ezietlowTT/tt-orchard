@@ -3342,3 +3342,121 @@ def test_a_check_that_printed_neither_pass_nor_fail_counts_as_failed(tmp_path):
     _write(tools)
     again = _write(tools)
     assert "its last check failed" in again and "exit 3" in again and "end the step" not in again
+
+
+# ---- the coder's decode speed is measured before each attempt (2026-10-17) ---------------------------------------------
+# A probe batch ran for hours at a fraction of the coder's speed, and the numbers it produced (turns, wall time, request
+# timeouts) were not comparable with the earlier runs. The probe now measures the coder before each attempt, records it,
+# and stops when the coder is confirmed slow, unless --allow-slow-coder.
+
+OK_SPEED = {"state": "ok", "tok_s": 38.7, "baseline": 38.7, "ratio": 1.0, "message": "38.7 tok/s, 100% of the best seen"}
+SLOW_SPEED = {"state": "slow", "tok_s": 9.0, "baseline": 38.7, "ratio": 0.233, "message": "SLOW: 9.0 tok/s, 23% of the best seen"}
+
+
+def speeds(*dicts):
+    """A speed_check that answers the given dicts in order (the last repeats) and records what it was asked."""
+    asked, it = [], list(dicts)
+
+    def check(endpoint, model):
+        asked.append((endpoint, model))
+        return it.pop(0) if len(it) > 1 else it[0]
+    check.asked = asked
+    return check
+
+
+def main_with(tmp_path, fake_kenv, speed_check, *, attempts=2, **kw):
+    out = io.StringIO()
+    with FakeModel(lambda r: final("nothing")) as server:
+        code = kp.main(probe_args(tmp_path, attempts=attempts, endpoint=server.endpoint, **kw), env=fake_kenv, out=out,
+                       probe=lambda e, m: True, run_watched_fn=no_run, speed_check=speed_check)
+    return code, out.getvalue(), server
+
+
+def test_the_speed_is_measured_before_each_attempt_and_recorded_in_its_attempt_json(tmp_path, fake_kenv, env_ready):
+    check = speeds(OK_SPEED)
+    code, text, server = main_with(tmp_path, fake_kenv, check)
+    assert code == 0 and check.asked == [(server.endpoint, "fake")] * 2
+    for n in (1, 2):
+        rec = json.loads((tmp_path / "out" / "add" / f"attempt-{n}" / "attempt.json").read_text())
+        assert rec["coder_speed"] == OK_SPEED
+    assert "coder decode speed before attempt 1: 38.7 tok/s" in text
+
+
+def test_a_confirmed_slow_coder_stops_the_probe_before_the_next_attempt_with_exit_six(tmp_path, fake_kenv, env_ready):
+    code, text, _ = main_with(tmp_path, fake_kenv, speeds(OK_SPEED, SLOW_SPEED), attempts=3)
+    assert code == kp.EXIT_SLOW == 6
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert [a["attempt"] for a in data["attempts"]] == [1]                       # attempt 2 never started
+    assert not (tmp_path / "out" / "add" / "attempt-2").exists()
+    assert "coder slow before attempt 2" in data["header"]["stopped"] and "23%" in data["header"]["stopped"]
+    assert "stopped: coder slow before attempt 2" in text and "--allow-slow-coder" in text
+
+
+def test_a_slow_coder_does_not_start_the_hardware_phase(tmp_path, fake_kenv, env_ready):
+    code, _, _ = main_with(tmp_path, fake_kenv, speeds(OK_SPEED, SLOW_SPEED), attempts=2, phase="hw")
+    assert code == 6                                                              # run_watched_fn is no_run: gozer would raise
+
+
+def test_allow_slow_coder_keeps_going_and_records_the_slow_state(tmp_path, fake_kenv, env_ready):
+    code, text, _ = main_with(tmp_path, fake_kenv, speeds(SLOW_SPEED), allow_slow_coder=True)
+    assert code == 0
+    data = json.loads((tmp_path / "out" / "kernel-probe-report.json").read_text())
+    assert [a["coder_speed"]["state"] for a in data["attempts"]] == ["slow", "slow"]
+    assert "coder is slow, continuing (--allow-slow-coder)" in text and "stopped" not in data["header"]
+
+
+def test_a_failed_speed_measurement_does_not_stop_the_probe(tmp_path, fake_kenv, env_ready):
+    err = {"state": "error", "tok_s": None, "baseline": None, "ratio": None, "message": "connection refused"}
+    code, text, _ = main_with(tmp_path, fake_kenv, speeds(err))
+    assert code == 0 and "could not measure the coder's speed: connection refused" in text
+
+
+def test_a_suspect_coder_runs_the_attempt(tmp_path, fake_kenv, env_ready):
+    suspect = dict(OK_SPEED, state="suspect", tok_s=15.0, ratio=0.39)
+    code, _, _ = main_with(tmp_path, fake_kenv, speeds(suspect))
+    assert code == 0
+
+
+def test_without_a_speed_check_nothing_is_measured_and_the_record_says_so(tmp_path, fake_kenv, env_ready):
+    code, text, _ = main_with(tmp_path, fake_kenv, None, attempts=1)
+    rec = json.loads((tmp_path / "out" / "add" / "attempt-1" / "attempt.json").read_text())
+    assert code == 0 and rec["coder_speed"] is None and "decode speed" not in text
+
+
+def test_the_report_lists_the_speed_before_each_attempt_and_warns_about_the_unlike_ones(tmp_path, fake_kenv, env_ready):
+    main_with(tmp_path, fake_kenv, speeds(OK_SPEED, dict(SLOW_SPEED, state="suspect")), attempts=2)
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "Coder decode speed, measured just before each attempt" in md
+    assert "attempt 1: 38.7 tok/s (ok)" in md and "attempt 2: 9.0 tok/s (suspect)" in md
+    assert "not comparable" in md
+
+
+def test_the_report_has_no_speed_section_when_nothing_was_measured(tmp_path, fake_kenv, env_ready):
+    main_with(tmp_path, fake_kenv, None, attempts=1)
+    assert "decode speed" not in (tmp_path / "out" / "kernel-probe-report.md").read_text()
+
+
+def test_the_command_line_gives_the_probe_the_real_speed_check_and_the_override_flag(monkeypatch, tmp_path):
+    from orchard import cli
+    seen = {}
+
+    def fake_main(args, **kw):
+        seen["args"], seen["kw"] = args, kw
+        return 0
+    monkeypatch.setattr(kp, "main", fake_main)
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m",
+              "--allow-slow-coder"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert seen["args"].allow_slow_coder is True and callable(seen["kw"]["speed_check"])
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m"],
+             env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert seen["args"].allow_slow_coder is False
+
+
+def test_a_busy_coder_runs_the_attempt_and_the_report_says_the_timings_are_not_comparable(tmp_path, fake_kenv, env_ready):
+    busy = {"state": "busy", "tok_s": 7.0, "baseline": 38.7, "ratio": 0.18,
+            "message": "1 other request was running on the server, so this 7.0 tok/s sample does not say whether the "
+                       "server is slow"}
+    code, text, _ = main_with(tmp_path, fake_kenv, speeds(busy), attempts=2)
+    assert code == 0 and "(busy)" in text
+    md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
+    assert "attempt 1: 7.0 tok/s (busy)" in md and "not comparable" in md and "another client" in md
