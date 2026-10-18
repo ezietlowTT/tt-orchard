@@ -908,6 +908,16 @@ Before a multi-board hardware test (stage 4's 4-chip test) the supervisor also r
 through gozer. The 4-chip test failed twice with fabric router timeouts on chips that earlier tests had used and passed
 after all four were reset. The cause was not isolated, so this is a precaution that costs about 42 seconds per board.
 
+### 5.5b Freeing disk with `--prune-caches`
+
+A full disk is the stop that most often needed a person. `tt-orchard bringup MODEL --prune-caches` clears it when the
+disk check is the only block and removing tensor caches can cover the shortfall: it removes the oldest caches that no
+unfinished run uses (the same ones `tt-orchard caches --prune` would offer), just enough to fit, says each one, and
+checks again. It never removes the shared kernel cache, a cache an unfinished run names, or anything outside the cache
+root. When the unused caches together cannot cover the shortfall it removes nothing. A shortfall on a hub disk that the
+caches do not share is not touched. With `--dry-run` it only says what it would remove. Deleting is opt-in: without the
+flag the run is refused as before. A removed cache is rebuilt by the next test that needs it (about 20 minutes).
+
 ### 5.6 The credentials preflight
 
 Agent shells run as your user. The supervisor gives them an environment with no tokens and a home

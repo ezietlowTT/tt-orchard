@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 
 from orchard import __version__, blocked, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import caches as tensor_caches
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
 AUTO_RETRIES = 2            # a choice: a transient block gets two more tries, then a person decides
@@ -90,6 +91,10 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--prune-caches", action="store_true",
+                   help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
+                        "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
+                        "only says what it would remove")
     b.add_argument("--auto-retries", type=int, default=AUTO_RETRIES, metavar="N",
                    help=f"retry a run that ends blocked for a transient reason (coder-unusable, hardware-unhealthy, "
                         f"agent-stuck) up to N times, waiting {AUTO_RETRY_WAIT_S:.0f} s before each. 0 turns it off. "
@@ -509,6 +514,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                 return _refuse(why)
             checks = preflight_page()
     stops = preflight.blocked(checks)
+    if stops and args.prune_caches and all(c.reason == "disk-full" for c in stops):
+        short = preflight.prunable_shortfall(next(c for c in stops if c.name == "disk"))
+        if short:
+            ok, _gone = tensor_caches.prune_to_fit(cfg, short, say=lambda m: print(f"{style.icon('🧹')}{m}", file=out),
+                                            dry_run=args.dry_run)
+            if ok and not args.dry_run:
+                checks = preflight_page()
+                stops = preflight.blocked(checks)
     if stops:
         print(lexicon.refused_line([c.reason for c in stops], style), file=out)
         for c in stops:

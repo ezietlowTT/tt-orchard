@@ -121,9 +121,26 @@ def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_f
     short = [f"{label}: needs {need[label]:.0f} GB, {free_gb[label]:.0f} GB free" for label in need
              if free_gb[label] < need[label]]
     if short:
-        return Check("disk", BLOCK, "; ".join(short), "disk-full")
+        # How far short each disk is, so `--prune-caches` knows how much to free and whether it can.
+        data = {"short_gb": {label: round(need[label] - free_gb[label], 3) for label in need
+                             if free_gb[label] < need[label]}, "same_device": same_device}
+        return Check("disk", BLOCK, "; ".join(short), "disk-full", data)
     return Check("disk", OK, ", ".join(f"{label} {free_gb[label]:.0f} GB free (needs {need[label]:.0f})"
                                        for label in need))
+
+
+def prunable_shortfall(check: Check) -> float | None:
+    """GB that removing tensor caches would have to free to clear this disk block, or None when it cannot help.
+
+    The caches live under cache_root. Removing them frees the cache_root disk, and the hf_home disk only when the two
+    share one (check_disk then reports the sum under hf_home). A shortfall on a separate hub disk is not theirs to fix."""
+    data = check.data if check.status == BLOCK and isinstance(check.data, dict) else None
+    if not data or "short_gb" not in data:
+        return None
+    short = data["short_gb"]
+    if "hf_home" in short and not data.get("same_device"):
+        return None
+    return max(short.values()) if short else None
 
 
 def check_credentials(found: list[Path], accepted: bool) -> Check:
