@@ -35,6 +35,7 @@ from orchard.defaults import TEST_DISK_GB
 OK, WARN, BLOCK = "ok", "warn", "block"
 HUB_TIMEOUT_S = 20
 GOZER_TIMEOUT_S = 10
+CPU_PROBE_TIMEOUT_S = 5
 REFERENCE_IMPORT_TIMEOUT_S = 180     # importing torch and transformers cold can take a minute
 _LICENSE_FILE = re.compile(r"(licen[cs]e|copying)", re.IGNORECASE)
 _CHIP_LINE = re.compile(r"^\s*chip\s+(\d+)\s+\S+\s+(\S+)", re.MULTILINE)
@@ -169,6 +170,28 @@ def _kept_on_port(cfg) -> bool:
     from orchard.caches import cache_root_of
     rec = kept_coder.read(cache_root_of(cfg)) or {}
     return (rec.get("identity") or {}).get("port") == cfg.coder.port
+
+
+def check_cpu_standin(problem: str | None, endpoint: str, model: str) -> Check:
+    """The CPU tier takes the coder's place while stage 4's 4-chip test parks it. A park whose stand-in is down
+    fails its canary hours into a run (RAG-Gate-27B, 2026-10-13), so the run does not start without it."""
+    if problem is None:
+        return Check("cpu", OK, f"the CPU stand-in answers: {model} at {endpoint}")
+    return Check("cpu", BLOCK, f"the CPU stand-in {model} at {endpoint} is not usable: {problem}. Start it with "
+                 "`OLLAMA_MODELS=<your models directory> ollama serve` (and `ollama pull` the model if it is "
+                 "missing); the coder is parked behind it during stage 4's 4-chip test", "coder-unusable")
+
+
+def cpu_standin_problem(endpoint: str, model: str, timeout: float = CPU_PROBE_TIMEOUT_S) -> str | None:
+    """Ask the CPU tier's server for its model list. None means it answers and lists `model`."""
+    try:
+        with urllib.request.urlopen(endpoint.rstrip("/") + "/models", timeout=timeout) as resp:
+            ids = [str(m.get("id")) for m in json.load(resp).get("data", [])]
+    except (OSError, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if model not in ids:
+        return f"the server does not list {model} (it lists {', '.join(ids) or 'nothing'}); run `ollama pull {model}`"
+    return None
 
 
 def check_reference(python: Path | None, problem: str | None) -> Check:
@@ -345,6 +368,7 @@ class Signals:
     search_bundles: Callable | None = None      # (query) -> [{"name", "installed"}] or None
     lab_status: Callable | None = None          # () -> (answered, text of the lab's `gozer status`, error)
     research: Callable | None = None            # (model_id, hub, base_override, installed) -> report dict
+    cpu_standin: Callable | None = None         # (endpoint, model) -> why the CPU tier does not answer, or None
 
 
 def check_lab(lab, status) -> Check:
@@ -441,6 +465,16 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
                                                           kept=_kept_on_port(cfg)))
+    if s.cpu_standin is not None:
+        def cpu() -> Check:
+            tier = next(t for t in s.load_tiers(Path(cfg.tiers)).tiers.values() if t.get("placement") == "cpu")
+            return check_cpu_standin(s.cpu_standin(tier["endpoint"], tier["model"]), tier["endpoint"], tier["model"])
+        # The tiers row already reports a config that cannot be read; this row is only about the stand-in.
+        try:
+            s.load_tiers(Path(cfg.tiers))
+            guarded("cpu", "coder-unusable", cpu)
+        except Exception:
+            pass
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status(), kept=_kept_on_port(cfg)))
     if getattr(cfg, "mode", "local") == "lab" and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
@@ -527,6 +561,7 @@ def default_signals(cfg, research_options=None) -> Signals:
             model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
             hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
     return Signals(
+        cpu_standin=cpu_standin_problem,
         installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,
