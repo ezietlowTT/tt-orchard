@@ -1143,6 +1143,10 @@ it likes. The ops are `add` (a calibration op whose working kernel is upstream's
   attempts' results.
 - A run that stops early still writes its report from the attempts that finished, with the reason. An exception
   exits 3, Ctrl-C or SIGTERM exits 4, and no hardware run starts after either.
+- When a kernel fails the numeric bars, the check prints a `numbers:` line under the `FAIL` line: the first input set that
+  fails, how far off the scale is (the least-squares slope, for example "got is about 964x expected"), the PCC, the
+  relative L2 error, the largest error beside the size of the expected values, and the two worst places with their
+  expected and got values. The first line, and `check.json`, are unchanged. The coder sees the same text.
 - Before each attempt the probe measures the coder's decode speed (section 5.9e) and records it in the attempt's
   `attempt.json` as `coder_speed`. The report lists the speed before each attempt. If the coder is slow (three samples in a
   row below half of the best speed seen), the probe stops before that attempt, writes its report and exits 6, and no hardware

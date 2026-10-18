@@ -3156,7 +3156,7 @@ def test_the_skill_says_each_write_runs_the_check_and_shows_where_and_hint():
     it after each write (ProbeTools), and the skill says so, so the coder reads the output below the write."""
     flat = " ".join(kp.SKILL.read_text().split())
     assert "Each write of `kernel.py` runs `python3 kernel_check.py` and shows its output below the write's result." in flat
-    assert "`where:` (the failing line)" in flat and "`hint:`" in flat
+    assert "`where:` (the failing line)" in flat and "`hint:`" in flat and "`numbers:`" in flat
 
 
 # ---- the check runs after every write of kernel.py (pilot 4, 2026-10-17) -------------------------------------------
@@ -3460,3 +3460,39 @@ def test_a_busy_coder_runs_the_attempt_and_the_report_says_the_timings_are_not_c
     assert code == 0 and "(busy)" in text
     md = (tmp_path / "out" / "kernel-probe-report.md").read_text()
     assert "attempt 1: 7.0 tok/s (busy)" in md and "not comparable" in md and "another client" in md
+
+
+# ---- a cap on the length of the coder's replies (2026-10-17) -----------------------------------------------------------
+# 6 of 14 attempts at temperature 0.7 ended on two 900 s request timeouts, against 1 of 14 at temperature 0. The largest
+# reply any attempt ever produced is 2706 tokens; a timed-out request is a reply of about 8K tokens decoding at about
+# 9 tok/s. The probe's replies are capped well above the real ones and far below the generic 16384, so a degenerate reply
+# ends as `finish_reason: length` (handled, with a nudge) in minutes and not as a 900 s timeout.
+
+def test_the_probe_budget_names_a_reply_cap_well_below_the_generic_one_and_above_the_longest_real_reply():
+    from orchard.defaults import AGENT_MAX_TOKENS
+    assert kp.BUDGET["max_tokens"] == 4096 and kp.BUDGET["max_tokens"] < AGENT_MAX_TOKENS
+    assert kp.BUDGET["max_tokens"] > 2706                      # the longest completion in 27 recorded attempts
+
+
+def test_every_request_of_an_attempt_carries_the_probe_reply_cap(tmp_path, fake_kenv):
+    authoritative = {"passed": False, "category": "no_kernel", "first_line": "kernel.py does not exist", "sets": []}
+    with FakeModel(scripted(call("shell", command="ls"), final("done"))) as server:
+        run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(authoritative))
+        sent = [r["max_tokens"] for r in server.requests]
+    assert sent == [kp.BUDGET["max_tokens"]] * 2
+
+
+def test_a_reply_cut_at_the_cap_is_nudged_not_waited_for(tmp_path, fake_kenv):
+    from fake_model import truncated
+    authoritative = {"passed": False, "category": "no_kernel", "first_line": "kernel.py does not exist", "sets": []}
+    with FakeModel(scripted(truncated(kp.BUDGET["max_tokens"]), final("done"))) as server:
+        attempt = run_attempt(tmp_path, fake_kenv, server, run_watched=check_writer(authoritative))
+        later = [m["content"] for m in server.requests[1]["messages"] if m["role"] == "user"]
+    from orchard.agent import TRUNCATION_NUDGE
+    assert attempt["turns"] >= 1 and TRUNCATION_NUDGE in later
+
+
+def test_the_report_header_records_the_reply_cap_with_the_other_budgets():
+    header = kp.report_header(env=None, coder_model="m", probe_id="p", ops=["add"], hw=None,
+                              tt_lang={"sim_version": "x"}, ignored_records=0)
+    assert header["budget"]["max_tokens"] == 4096

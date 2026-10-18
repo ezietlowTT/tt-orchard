@@ -63,7 +63,7 @@ Steps:
        ...
    ```
 4. Each write of `kernel.py` runs `python3 kernel_check.py` and shows its output below the write's result. It prints
-   `PASS`, or `FAIL: <category>: <first line>`, then `where:` (the failing line) and sometimes `hint:`.
+   `PASS`, or `FAIL: <category>: <first line>`, then `where:` (the failing line) and sometimes `hint:` or `numbers:`.
 5. Read that line. Change one thing. Run it again.
 
 Advice:

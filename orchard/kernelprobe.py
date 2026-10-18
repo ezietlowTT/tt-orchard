@@ -80,7 +80,11 @@ TEMPLATES = Path(__file__).resolve().parent / "skills" / "kernel-loop-templates"
 SKILL = Path(__file__).resolve().parent / "skills" / "kernel-probe.md"
 OPS = defaults.KERNEL_PROBE_OPS
 # Provisional: none of these has been measured (spec section 5.3).
-BUDGET = {"max_turns": 40, "wall_s": 1800.0, "sim_timeout_s": 300.0, "hw_backstop_s": 600.0}
+# max_tokens caps each reply of the coder. Choice, from 27 recorded attempts: the longest reply was 2706 tokens, and a
+# request that timed out (6 of 14 attempts at temperature 0.7, 1 of 14 at 0) was a reply of about 8K tokens decoding at
+# about 9 tok/s. At 4096 a degenerate reply ends as finish_reason "length" in about 7 minutes at that speed, which the
+# agent loop nudges, and not as a 900 s request timeout (twice). The generic loop's 16384 is for reasoning models.
+BUDGET = {"max_turns": 40, "wall_s": 1800.0, "sim_timeout_s": 300.0, "hw_backstop_s": 600.0, "max_tokens": 4096}
 GOZER_WHO = "claude:orchard-kernel-probe"
 # How long a `gozer run` gets after the watcher's SIGTERM before the SIGKILL. gozer forwards the SIGTERM to its child,
 # waits for it, and then releases its lease in a `finally`; the release resets the chip, measured at 41.7 s on this
@@ -822,7 +826,7 @@ def run_attempt(*, op, n, probe_dir, env, endpoint, model, coder_model, probe_id
                          stage=0, phase="probe", feed=dog.feed, control=control, run_dir=adir,
                          evidence_dir=adir / "evidence", log_path=adir / "log" / "probe-00001.jsonl", http=http,
                          clock=clock, guard=RetryGuard(), max_turns=max_turns, temperature=temperature, top_p=top_p,
-                         seed=seed)
+                         seed=seed, max_tokens=BUDGET["max_tokens"])
         user = (f"Write kernel.py for the op `{op}` in kernel_spec.json. "
                 "Start by reading kernel_spec.json and reference/eltwise_add.py, then the reference files the skill "
                 "names for this kind of op.")

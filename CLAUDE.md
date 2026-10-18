@@ -168,6 +168,21 @@ restart was probably not needed. The ledger and the operator were told.
 - Not done: the supervisor's watchdog does not use it (restarting the coder inside a bring-up needs the park and restore
   machinery); the baseline needs `--reset-baseline` after a change on purpose; one pass over `--tiers` takes a sample per tier.
 
+## 2026-10-17 (later): the check says how far off a wrong kernel is (branch `ka-numdiag`, version 0.6.3)
+L4e's `rmsnorm` attempts 3 and 4 (temperature 0.7, different seeds) wrote the same wrong kernel: the mean of the squares was
+divided by 8 tiles, not 256 elements. Their results match to three or four digits (max abs error 9094.3965 in both, slope
+964). Each was told only `pcc 0.9796, bar 0.999`; the slope of 964, which says the output is about 964 times too big, was in the
+result file and never reached them. The first-line summary stops at the first bar that fails, and PCC is checked first.
+- `kernel_harness.py` records the three worst positions of each input set (`worst`: index, expected, got; a value that is not
+  finite ranks first and is null). `kernel_check.py` `numeric_detail` turns the first failing set into one line, printed as
+  `numbers: ...` under the `FAIL` line the way `where:` and `hint:` are: how far off the scale is (about Nx expected, the opposite
+  sign, or about right), PCC, relative L2, the largest error beside the size of the expected values, the two worst places, and
+  how many input sets fail. It states measured facts, names no op and gives no fix. The first line and `check.json` are unchanged.
+- 14 mutations, 13 red; the survivor (`numbers:` for a non-numeric category) is equivalent in practice, because such a result
+  has no failing numeric set. Two assertions I first wrote could not fail (one ended in `or True`); I rewrote them before running.
+- Not run on the live coder yet: the probe batch (L4e) was still running on the other checkout. Whether the line helps the coder is
+  not known.
+
 ## Notable moments
 - The `shlex` runner was shown to be bypassable (comments, keywords, `eval`, shells on stdin,
   wrapper options). Two fix rounds replaced it with the lexer. Later reviews were limited to
