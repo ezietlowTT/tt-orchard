@@ -590,6 +590,24 @@ def raw_pair_map(mt: dict, bt: dict) -> dict:
     return {p["mraw"][m]: p["braw"][b] for m, b in p["pairs"]}
 
 
+def raw_rules(raw_pairs: dict) -> list[dict]:
+    """Prefix rewrites that turn the model's tensor names into the nearest model's, from {raw model name: raw base name}: {"from", "to",
+    "tensors"} where names starting with `from.` are called `to.` there (`to` is empty when the nearest model has no prefix). A name that
+    already matches makes no rule. The reference loader turns these into transformers' `key_mapping` when a load misses keys."""
+    tally: collections.Counter = collections.Counter()
+    for m, b in raw_pairs.items():
+        if m == b:
+            continue
+        ms, bs = m.split("."), b.split(".")
+        k = _suffix_len(ms, bs)
+        mp, bp = ms[:len(ms) - k], bs[:len(bs) - k]
+        if mp:
+            tally[(".".join(mp), ".".join(bp))] += 1
+        elif bp:
+            tally[(ms[0], ".".join(bp + [ms[0]]))] += 1
+    return [{"from": f, "to": t, "tensors": n} for (f, t), n in sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))]
+
+
 def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, merr: list, berr: list,
                         model_path: str, base_path: str) -> dict:
     """The tensor comparison on two already-read {name: {"dtype", "shape", "shard"}} maps. The research
@@ -619,7 +637,8 @@ def compare_tensor_maps(mt: dict, bt: dict, *, mshards: list, bshards: list, mer
             "common": len(p["pairs"]), "only_in_model": only_m, "only_in_base": only_b,
             "aligned": {"pairs": len(al["pairs"]), "rules": al["rules"],
                         "examples": [list(x) for x in sorted(al["pairs"].items())[:5]],
-                        "all_pairs": dict(sorted(al["pairs"].items()))},
+                        "all_pairs": dict(sorted(al["pairs"].items())),
+                        "raw_rules": raw_rules({p["mraw"][m]: p["braw"][b] for m, b in p["pairs"]})},
             "only_in_model_groups": group(only_m), "only_in_base_groups": group(only_b),
             "unexplained_only_in_model": [k for k in only_m if not EXPLAINED_EXTRA.search(k)],
             "unexplained_only_in_base": [k for k in only_b if not EXPLAINED_EXTRA.search(k)]},
@@ -1478,7 +1497,7 @@ def main() -> int:
         "model": model_id, "nearest_model": nearest_id, "path": path, "class": cls,
         "path_reasons": reasons, "sidecars": sc["sidecars"], "code_files": code,
         "alignment": {"pairs": ns["common"], "aligned_by_prefix": ns["aligned"]["pairs"], "rules": ns["aligned"]["rules"],
-                      "all_pairs": ns["aligned"]["all_pairs"], "only_in_model": ns["only_in_model"][:50],
+                      "raw_rules": ns["aligned"]["raw_rules"], "all_pairs": ns["aligned"]["all_pairs"], "only_in_model": ns["only_in_model"][:50],
                       "only_in_base": ns["only_in_base"][:50]},
         "values": {"summary": values["summary"], "samples": [{k: x[k] for k in ("model_tensor", "relation", "cosine")}
                                                               for x in values["samples"]]},

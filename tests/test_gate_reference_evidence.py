@@ -32,7 +32,8 @@ def stage(tmp_path, *, claimed="pass", claimed_checks=None, summary="pass", summ
     (s1 / "evidence" / "load-report.json").write_text(json.dumps(
         {"missing_keys": list(missing), "model_key_count": keys, "ignore_patterns": list(ignore)}))
     if template:
-        (s1 / "reference_gate.py").write_text("# the template copy\n")
+        from orchard.stages import SHIPPED_TEMPLATES
+        (s1 / "reference_gate.py").write_text(SHIPPED_TEMPLATES["reference_gate.py"].read_text())      # an unedited copy
     return s1
 
 

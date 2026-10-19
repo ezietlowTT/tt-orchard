@@ -184,6 +184,7 @@ def gate_delta(stage_dir, run_dir) -> GateResult:
     for i, item in enumerate(hazards):
         if not isinstance(item, dict) or item.get("area") not in HAZARD_AREAS or not _text(item.get("finding")):
             reasons.append(f"hazards[{i}] needs an area from {HAZARD_AREAS} and a finding")
+    reasons += _template_reasons(Path(stage_dir), "delta_triage.py")
     return _done(reasons, seen)
 
 
@@ -252,10 +253,38 @@ def gate_reference(stage_dir, run_dir) -> GateResult:
             reasons.append(f"check {c['name']!r} did not pass")
         _evidence(run_dir, c.get("evidence"), f"check {c['name']!r}", reasons, seen)
     reasons += _reference_evidence_reasons(Path(stage_dir), d)
+    reasons += _template_reasons(Path(stage_dir), "reference_gate.py")
     return _done(reasons, seen)
 
 
 EVIDENCE_MAX_BYTES = 2 * 1024 * 1024        # the reference template's evidence files are a few KB to a few hundred KB
+
+_SKILLS_ROOT = Path(__file__).with_name("skills")
+# The template scripts whose output a gate trusts, and the shipped file each stage's copy must equal.
+SHIPPED_TEMPLATES = {"delta_triage.py": _SKILLS_ROOT / "delta-triage-templates" / "delta_triage.py",
+                     "reference_gate.py": _SKILLS_ROOT / "reference-gate-templates" / "reference_gate.py"}
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _template_reasons(stage_dir: Path, name: str) -> list[str]:
+    """A stage whose evidence comes from a shipped template is only as trustworthy as the script. If the stage's copy differs from the
+    shipped file, the evidence is not the template's. On the pplx-decider run the stage 1 agent edited reference_gate.py (it put
+    AutoModelForCausalLM in place of the class lookup), the edited script loaded none of the weights, and the gate accepted the result.
+    A stage that holds no copy is not held to one."""
+    copy, shipped = stage_dir / name, SHIPPED_TEMPLATES[name]
+    try:
+        if not copy.is_file() or not shipped.is_file():
+            return []
+        mine, theirs = _sha256(copy), _sha256(shipped)
+    except OSError:
+        return []
+    if mine == theirs:
+        return []
+    return [f"{name} in this stage differs from the shipped template (sha256 {mine[:12]} against {theirs[:12]}), so the evidence it wrote "
+            f"is not the template's. Copy {name} from the skill's templates directory again and change only the config file."]
 
 
 def _evidence_json(stage_dir: Path, name: str, *, required: bool, reasons: list):

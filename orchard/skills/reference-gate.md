@@ -51,6 +51,10 @@ fact needs explaining. You do not write a script.
 
        cp {{ORCHARD_DIR}}/orchard/skills/reference-gate-templates/reference_gate.py stages/1/
 
+   Do not edit the script. The gate compares its sha256 with the shipped template and fails the stage if they differ,
+   because the evidence it writes is only the template's if the script is. Change only `reference_config.json`. If the
+   script fails, read its message and fix the config or the interpreter; do not change how it loads the model.
+
 4. Run it with the interpreter you chose: `<python> stages/1/reference_gate.py`. A 27B model on
    this CPU takes several minutes to load and decode; the script prints a line for each step and
    writes each evidence file as soon as it has it. Exit 4 means torch or transformers is missing;

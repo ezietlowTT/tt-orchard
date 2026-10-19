@@ -64,6 +64,9 @@ You do not write a comparison script.
 
        cp {{ORCHARD_DIR}}/orchard/skills/delta-triage-templates/delta_triage.py stages/0/
 
+   Do not edit the script. The gate compares its sha256 with the shipped template and fails the stage if they differ.
+   Change only `triage_config.json`.
+
 4. Run `python3 stages/0/delta_triage.py`. It reads only the safetensors headers and the small
    JSON files, so it never loads the weights. It prints a line for each evidence file it writes.
    Exit 2 means `triage_config.json` is incomplete or names a directory that does not exist; the

@@ -155,6 +155,23 @@ def test_a_layout_the_old_rule_already_handled_needs_no_alignment():
     assert t["normalized_name_sets"]["aligned"]["pairs"] == 0
 
 
+def test_the_raw_rules_say_how_to_rename_the_models_keys_into_the_nearest_models_names():
+    """Rules a loader can use: names that start with `from.` are called `to.` in the nearest model."""
+    t = compare(decider_tensors(), base_tensors())
+    rules = t["normalized_name_sets"]["aligned"]["raw_rules"]
+    assert rules == [{"from": "language_model", "to": "model.language_model", "tensors": 3 * 2 + 2},
+                     {"from": "visual", "to": "model.visual", "tensors": 2}]
+
+
+def test_names_that_already_match_make_no_raw_rule_and_a_dropped_prefix_gives_an_empty_target():
+    same = compare(layers("model.", 2), layers("model.", 2))["normalized_name_sets"]["aligned"]["raw_rules"]
+    assert same == []
+    dropped = compare({"text.layers.0.mlp.gate_proj.weight": info((8, 4)), "text.layers.1.mlp.gate_proj.weight": info((8, 4)),
+                       "text.layers.2.mlp.gate_proj.weight": info((8, 4))},
+                      {f"layers.{i}.mlp.gate_proj.weight": info((8, 4)) for i in range(3)})
+    assert dropped["normalized_name_sets"]["aligned"]["raw_rules"] == [{"from": "text", "to": "", "tensors": 3}]
+
+
 # ---- values ---------------------------------------------------------------------------------------------------------------------
 
 def two_models(tmp_path, new_vals, base_vals):
