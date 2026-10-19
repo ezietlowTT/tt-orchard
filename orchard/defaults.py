@@ -194,7 +194,7 @@ PACKAGE_VERIFY_DEADLINE_S = 4200.0  # choice: the boot check's hardware deadline
 
 # ---- tt-lang, for `tt-orchard kernel-env` and `kernel-probe` (spec 2026-10-15-kernel-attempt-design.md) ----
 TTLANG_URL = "https://github.com/tenstorrent/tt-lang.git"
-TTLANG_PIN = "5f56785f374e1131bfdf65c5f81616fff179f71b"   # choice: v1.1.10 plus 25 commits (a CI-only change over the last pin; diagnostics.py unchanged), read 2026-10-17
+TTLANG_PIN = "1cd7d410d3d69d9550b7afbd2761d0cc75b4dd41"   # choice: v1.1.10 plus 26 commits (one CI-only commit over the last pin: .github and test/packaging; diagnostics.py unchanged), read 2026-10-18
 TTLANG_VERSION_TAG = "1.1.10"                             # the tag TTLANG_PIN is counted from
 # sha256 of python/ttl/diagnostics.py at TTLANG_PIN. The tt-lang-sim wheel looks for this file at
 # site-packages/ttl/ttl/diagnostics.py and does not ship it, so a diagnosed kernel error ends as
