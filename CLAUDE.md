@@ -1432,3 +1432,26 @@ report back ... Don't make the changes yourself."
   was enough. Nothing started. Write-up and what would be needed: `docs/run-logs/2026-10-19-nemotron-bolt-74b.md`. I did not start ollama,
   because the base block decides the outcome and the instruction was to change nothing else.
 
+## 2026-10-19: operator mode for the web UI (branch `ui-operator-mode`, version 0.6.5)
+Prompt (operator): "add a very lightweight theme switcher to the tt-orchard UI. For now, call what we have now 'playful' mode. I want
+'operator' mode, less focused on fun and more on what's happening now and what happened before and what to do next." Brainstormed first.
+The operator's complaints about the page: what is running does not stand out enough, the font is hard to read, text is hard to copy, it is
+hard to tell decoration from information, and numbers come with no context ("if perf is good I want it to tell me"). The operator chose
+mockup B (two panes, "now" stays put) and said to build the switcher and layout first and the verdict line after.
+- `orchard/web/mode.js` (a plain script in `<head>`, so no flash) sets `<html data-mode>` from `?mode=`, else the stored choice, else
+  `playful`; only the two names are accepted and every storage call is in a `try`. Two buttons in the top bar switch it.
+- The run view has two wrappers, `.op-left` (state band, Now, Next, block and pause panels) and `.op-right` (stages, results, tabs and
+  panes). Outside operator mode they are `display: contents`, and a browser check showed every key element at the same position as on the
+  old page. In operator mode the left pane is sticky and the right scrolls; below 900 px they stack.
+- The state band takes its colour from `#run[data-state]` and `[data-tone]` (blue and pulsing for running; the pulse sits in a
+  `prefers-reduced-motion: no-preference` query). Operator mode drops the pixel face by redefining `--pixel` as the system face, hides
+  the scene (and `scene.js` stops drawing), and shows the real state name, stage name and feed role instead of the orchard words and icons.
+- Checked in headless Chrome against the live pplx-decider run (light and dark, widths 1440 to 400, no horizontal scroll, storage blocked,
+  an invalid `?mode=` ignored, Hardware and Settings views still open). 25 mutations in all; the first run left one survivor (the link
+  value was not validated where it is read), which now has a test.
+- A test of mine used an element id that did not exist (`run-head` is a class); it failed with a KeyError, not an assertion.
+- Not done: the Verdict line (a plain sentence with a yardstick for each number; it needs the pass bars from the code and the numbers from
+  earlier runs' ledgers), a "copy" button for long commands, and hiding the emoji inside the mode chip and the "Now" line. One 404 showed
+  once in a browser console and did not recur in eight more loads on either UI. The page's own JavaScript still has no automated test;
+  the browser checks were run by hand with Playwright in a scratch venv.
+

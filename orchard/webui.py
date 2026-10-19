@@ -89,6 +89,7 @@ JS, CSS, WOFF2 = "text/javascript; charset=utf-8", "text/css; charset=utf-8", "f
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/static/app.js": ("app.js", JS),
           "/static/scene.js": ("scene.js", JS),
+          "/static/mode.js": ("mode.js", JS),
           "/static/app.css": ("app.css", CSS),
           "/static/vendor/xterm/xterm.js": ("vendor/xterm/xterm.js", JS),
           "/static/vendor/xterm/xterm.css": ("vendor/xterm/xterm.css", CSS),

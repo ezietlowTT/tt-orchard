@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -487,6 +488,7 @@ def test_the_page_and_its_assets_are_served_with_a_strict_policy(root):
 
 @pytest.mark.parametrize("path,ctype", [
     ("/static/scene.js", "text/javascript"),
+    ("/static/mode.js", "text/javascript"),
     ("/static/vendor/xterm/xterm.js", "text/javascript"),
     ("/static/vendor/xterm/xterm.css", "text/css"),
     ("/static/vendor/xterm/addon-fit.js", "text/javascript"),
@@ -951,3 +953,115 @@ def test_no_asset_loads_anything_from_another_host():
 def test_the_page_never_uses_blocking_browser_dialogs():
     js = Path(webui.__file__).with_name("web").joinpath("app.js").read_text(encoding="utf-8")
     assert not re.search(r"\b(alert|confirm|prompt)\(", js)
+
+
+# ---- the page style switch: "playful" (the farm look) and "operator" (plain, state first) ----------------------
+WEB = Path(webui.__file__).with_name("web")
+_VOID = {"meta", "link", "input", "br", "img", "hr"}
+
+
+class _Ancestry(HTMLParser):
+    """For every element with an id: the classes of all its ancestors. Plain HTML5 only; the page is well formed."""
+
+    def __init__(self):
+        super().__init__()
+        self.stack, self.chain, self.scripts = [], {}, []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if a.get("id"):
+            self.chain[a["id"]] = [c for _, cl in self.stack for c in cl]
+        if tag == "script":
+            self.scripts.append(a)
+        if tag not in _VOID:
+            self.stack.append((tag, (a.get("class") or "").split()))
+
+    def handle_endtag(self, tag):
+        while self.stack and self.stack.pop()[0] != tag:
+            pass
+
+
+def _page():
+    p = _Ancestry()
+    p.feed((WEB / "index.html").read_text(encoding="utf-8"))
+    return p
+
+
+def test_operator_mode_puts_now_and_next_in_the_left_pane_and_history_in_the_right():
+    chain = _page().chain
+    for el in ("run-badge", "run-model", "run-actions", "run-now", "run-hint", "block-panel", "pause-panel"):
+        assert "op-left" in chain[el] and "op-right" not in chain[el], el
+    for el in ("stepper", "results", "tabs", "pane-feed", "pane-ledger", "pane-details"):
+        assert "op-right" in chain[el] and "op-left" not in chain[el], el
+
+
+def test_the_page_has_a_two_button_style_switch_in_the_top_bar():
+    chain = _page().chain
+    html = (WEB / "index.html").read_text(encoding="utf-8")
+    for mode in ("playful", "operator"):
+        assert f'id="mode-{mode}-btn"' in html and f'data-mode="{mode}"' in html
+        assert "topbar" in chain[f"mode-{mode}-btn"]
+
+
+def test_the_style_is_set_before_first_paint_by_a_plain_script():
+    tags = [a for a in _page().scripts if a.get("src") == "/static/mode.js"]
+    assert len(tags) == 1
+    assert "defer" not in tags[0] and "async" not in tags[0] and tags[0].get("type") != "module"
+
+
+def test_mode_js_accepts_only_the_two_styles_and_never_trusts_storage():
+    js = (WEB / "mode.js").read_text(encoding="utf-8")
+    assert re.search(r'MODES\s*=\s*\[\s*"playful"\s*,\s*"operator"\s*\]', js)
+    assert "MODES.includes(" in js                                  # a ?mode= value or a stored value is checked
+    assert "URLSearchParams" in js and "documentElement.dataset.mode" in js
+    # the value from a link is validated where it is read, not later
+    assert re.search(r'fromLink\s*=\s*valid\(\s*new URLSearchParams\([^)]*\)\.get\("mode"\)\s*\)', js)
+    # every storage touch sits in a try block: a private window can throw
+    for call in re.finditer(r"localStorage\.(getItem|setItem)", js):
+        before = js[:call.start()]
+        assert before.rfind("try {") > before.rfind("}"), call.group(0)
+    assert js.count("catch") >= js.count("localStorage.")
+
+
+def _operator_rules(css):
+    return [m.group(0) for m in re.finditer(r'html\[data-mode="operator"\][^{]*\{[^}]*\}', css)]
+
+
+def test_operator_css_drops_the_pixel_face_and_the_scene_and_keeps_the_panes_apart():
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    rules = "\n".join(_operator_rules(css))
+    assert re.search(r'html\[data-mode="operator"\]\s*\{[^}]*--pixel:\s*var\(--font\)', css)
+    assert re.search(r'\.scene-frame[^{]*\{[^}]*display:\s*none', rules)
+    assert re.search(r'\.op-left[^{]*\{[^}]*position:\s*sticky', rules)
+    # outside operator mode the two wrappers must not exist as boxes, or the playful page would change
+    assert re.search(r'(?m)^\.op-left,\s*\.op-right\s*\{\s*display:\s*contents', css)
+
+
+def test_operator_pulse_is_motion_that_respects_reduced_motion():
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    for m in re.finditer(r"animation\s*:", css.split('html[data-mode="operator"]', 1)[1]):
+        before = css.split('html[data-mode="operator"]', 1)[1][:m.start()]
+        assert "prefers-reduced-motion: no-preference" in before[before.rfind("@media"):], "pulse outside the media query"
+
+
+def test_the_run_carries_its_state_and_tone_for_the_band_and_the_scene_rests_in_operator_mode():
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert re.search(r'\$\("run"\)\.dataset\.state\s*=', js) and re.search(r'\$\("run"\)\.dataset\.tone\s*=', js)
+    scene = (WEB / "scene.js").read_text(encoding="utf-8")
+    assert re.search(r"isStill\(\)\s*\{[^}]*dataset\.mode\s*===\s*[\"']operator", scene)
+
+
+def test_operator_mode_leads_with_the_real_names_and_drops_the_orchard_ones():
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    # the page gives CSS something to hold on to: the real state name, the feed icon, the orchard part of the stage line
+    assert re.search(r'class:\s*"name"\s*\}\s*,\s*state\.replace\(', js)
+    assert re.search(r'class:\s*"icon"', js)
+    assert js.count('class: "orchard"') >= 2                       # the stepper's and the stage line's
+    # playful shows none of the new real-name span; operator shows it in place of the orchard word
+    assert re.search(r'(?m)^\.badge \.name\s*\{\s*display:\s*none', css)
+    ops = "\n".join(_operator_rules(css))
+    for hidden in (r"\.badge \.word", r"\.badge \.real", r"\.step \.orchard", r"\.who \.icon", r"\.run-sub \.orchard"):
+        assert re.search(hidden + r"[^{]*\{[^}]*display:\s*none", ops), hidden
+    assert re.search(r"\.badge \.name[^{]*\{[^}]*display:\s*inline", ops)
+    assert re.search(r"\.run-head \.mode-chip[^{]*\{[^}]*background:\s*transparent", ops)
