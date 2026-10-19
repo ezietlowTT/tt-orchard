@@ -84,8 +84,22 @@ You do not write a comparison script.
 7. The draft has the standing hazards: `tensor_cache`, `drafter`, `disk`, and `license` when the
    license changed. Add any further hazard you can justify from the evidence, with an area from
    the list below, a finding and the evidence path.
-8. Write the reviewed `delta.json` with write_file (the whole file). Then reply with a short
-   summary and no tool call.
+8. Write the reviewed `delta.json` with write_file (the whole file).
+9. The op inventory. Do this only when the run facts list an input `reference_python`. Without it, skip this step
+   and reply with a short summary and no tool call. Run it with that interpreter and the new model's snapshot
+   directory:
+
+       PYTHONPATH={{ORCHARD_DIR}} python3 -m orchard.opinventory --model-dir <new model snapshot> --out stages/0 --python <reference_python> --ttnn-python {{OPERATOR_HOME}}/.tenstorrent-venv/bin/python
+
+   Type the command on one line. The `--ttnn-python` interpreter is asked only for the installed ttnn's version;
+   ttnn is not imported. The command runs the template
+   `{{ORCHARD_DIR}}/orchard/skills/ops-inventory-templates/ops_inventory.py` on the meta device, writes
+   `ops-inventory.json` and `ops-inventory.md` in your stage directory, and adds an `inventory`
+   summary to the `delta.json` you just wrote. Read `ops-inventory.md` once. Add ONE difference with area `other`
+   to `delta.json` only when the inventory lists `unmapped` ops and the class is `weights-only`; cite
+   `stages/0/ops-inventory.json` and name the ops. Keep the `inventory` key when you rewrite the file. The
+   measured class still decides: do not change `path` or `class` because of the inventory. Exit 2 means the
+   trace did not run; note that in RESUME.md and go on. Then reply with a short summary and no tool call.
 
 ## The file
 

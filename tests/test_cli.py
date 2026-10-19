@@ -769,3 +769,125 @@ def test_caches_takes_its_own_flags(conf, tmp_path):
 def test_coder_status_with_nothing_kept(conf, tmp_path):
     code, out, rec = run(conf, ["coder", "status"])
     assert code == 0 and "no coder is kept up" in out and rec.argv is None
+
+
+def test_kernel_env_check_runs_the_check_and_returns_its_exit_code(tmp_path, monkeypatch):
+    from orchard import cli, ttlang_env
+    seen = {}
+
+    def fake_main(args, *, env=None, out=None, run=None):
+        seen["check"], seen["src"], seen["venv"] = args.check, args.src_dir, args.venv_dir
+        return 2
+
+    monkeypatch.setattr(ttlang_env, "main", fake_main)
+    out = io.StringIO()
+    code = cli.main(["kernel-env", "--check", "--src-dir", str(tmp_path / "s"), "--venv-dir", str(tmp_path / "v")],
+                    stdout=out)
+    assert code == 2 and seen == {"check": True, "src": str(tmp_path / "s"), "venv": str(tmp_path / "v")}
+
+
+def test_kernel_env_needs_no_bringup_config(tmp_path, monkeypatch):
+    """The command must work on a machine with no bringup.toml: it is how a machine gets ready."""
+    from orchard import cli, ttlang_env
+    monkeypatch.setattr(ttlang_env, "main", lambda args, **kw: 0)
+    monkeypatch.setenv("ORCHARD_BRINGUP_CONFIG", str(tmp_path / "does-not-exist.toml"))
+    assert cli.main(["kernel-env", "--check"], stdout=io.StringIO()) == 0
+
+
+# ---------------------------------------------------------------- inventory
+
+def _fake_inventory(monkeypatch):
+    """Replace both back ends with recorders, so no test traces a model or takes a lease."""
+    from orchard import opinventory, ttnn_dump
+    calls = {"dump": [], "inv": []}
+    monkeypatch.setattr(ttnn_dump, "main", lambda python, **kw: calls["dump"].append(python) or 0)
+    monkeypatch.setattr(opinventory, "run_inventory", lambda model_dir, **kw: calls["inv"].append((model_dir, kw)) or 0)
+    return calls
+
+
+def test_inventory_refresh_ttnn_calls_the_dump_with_the_ttnn_python_and_never_the_inventory(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", "refresh-ttnn", "--ttnn-python", "/t/py"], env={"HOME": str(tmp_path)},
+                    stdout=io.StringIO())
+    assert code == 0 and calls["dump"] == ["/t/py"] and calls["inv"] == []
+
+
+def test_inventory_of_a_model_directory_uses_the_python_given(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", str(tmp_path / "m"), "--python", "/r/py", "--layers", "3"],
+                    env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 0 and calls["dump"] == []
+    model, kw = calls["inv"][0]
+    assert model == str(tmp_path / "m") and kw["python"] == "/r/py" and kw["layers"] == 3
+    assert kw["ttnn_python"] == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
+
+
+def test_inventory_reads_the_interpreter_from_the_environment(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    cli.main(["inventory", "somedir"], env={"HOME": str(tmp_path), "ORCHARD_REFERENCE_PYTHON": "/e/py"},
+             stdout=io.StringIO())
+    assert calls["inv"][0][1]["python"] == "/e/py"
+
+
+def test_inventory_with_no_interpreter_anywhere_refuses_and_calls_neither(monkeypatch, tmp_path):
+    calls = _fake_inventory(monkeypatch)
+    code = cli.main(["inventory", "somedir", "--config", str(tmp_path / "missing.toml")],
+                    env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 2 and calls == {"dump": [], "inv": []}
+
+
+# ---------------------------------------------------------------- kernel-probe
+
+def _fake_probe_main(monkeypatch):
+    from orchard import kernelprobe
+    calls = []
+    monkeypatch.setattr(kernelprobe, "main", lambda args, **kw: calls.append((args, kw)) or 0)
+    return calls
+
+
+def test_kernel_probe_refuses_an_unknown_op_and_calls_nothing(monkeypatch, tmp_path, capsys):
+    calls = _fake_probe_main(monkeypatch)
+    with pytest.raises(SystemExit) as info:
+        cli.main(["kernel-probe", "--op", "softmax"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert info.value.code == 2 and calls == []
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_kernel_probe_passes_the_parsed_flags_to_kernelprobe_main(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    code = cli.main(["kernel-probe", "--op", "rmsnorm", "--attempts", "3", "--phase", "hw", "--out", str(tmp_path / "o"),
+                     "--endpoint", "http://127.0.0.1:8011/v1", "--model", "coder", "--src-dir", "/s", "--venv-dir", "/v",
+                     "--shared-python", "/sp"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    assert code == 0 and len(calls) == 1
+    args, kw = calls[0]
+    assert (args.op, args.attempts, args.phase, args.out) == ("rmsnorm", 3, "hw", str(tmp_path / "o"))
+    assert (args.endpoint, args.model, args.src_dir, args.venv_dir, args.shared_python) == \
+        ("http://127.0.0.1:8011/v1", "coder", "/s", "/v", "/sp")
+    assert kw["tier_config"] is None                       # both flags given: no config is read
+
+
+def test_kernel_probe_and_kernel_env_take_the_skill_flags(monkeypatch, tmp_path):
+    from orchard import ttlang_env
+    calls = _fake_probe_main(monkeypatch)
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m",
+              "--tt-lang-skill-dir", "/sk", "--allow-stale-skills"], env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    args, _ = calls[0]
+    assert args.tt_lang_skill_dir == "/sk" and args.allow_stale_skills is True
+    cli.main(["kernel-probe", "--op", "add", "--endpoint", "http://127.0.0.1:9/v1", "--model", "m"],
+             env={"HOME": str(tmp_path)}, stdout=io.StringIO())
+    args, _ = calls[1]
+    assert args.tt_lang_skill_dir is None and args.allow_stale_skills is False
+    seen = []
+    monkeypatch.setattr(ttlang_env, "main", lambda a, **kw: seen.append(a) or 0)
+    cli.main(["kernel-env", "--check", "--tt-lang-skill-dir", "/sk", "--allow-stale-skills"], stdout=io.StringIO())
+    assert seen[0].tt_lang_skill_dir == "/sk" and seen[0].allow_stale_skills is True
+
+
+def test_kernel_probe_defaults(monkeypatch, tmp_path):
+    calls = _fake_probe_main(monkeypatch)
+    cli.main(["kernel-probe", "--op", "add", "--config", str(tmp_path / "missing.toml")], env={"HOME": str(tmp_path)},
+             stdout=io.StringIO())
+    args, kw = calls[0]
+    assert (args.attempts, args.phase, args.out, args.endpoint, args.model) == (5, "sim", "kernel-probe", None, None)
+    assert args.shared_python == str(tmp_path / ".tenstorrent-venv" / "bin" / "python")
+    assert kw["tier_config"] is None                       # no config: kernelprobe.main refuses, naming the flags

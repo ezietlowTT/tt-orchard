@@ -37,6 +37,7 @@ HUB_TIMEOUT_S = 20
 GOZER_TIMEOUT_S = 10
 CPU_PROBE_TIMEOUT_S = 5
 REFERENCE_IMPORT_TIMEOUT_S = 180     # importing torch and transformers cold can take a minute
+SKILLS_REUSE_S = 600.0               # choice: the UI asks for a preflight on every form edit; one check in 10 min will do
 _LICENSE_FILE = re.compile(r"(licen[cs]e|copying)", re.IGNORECASE)
 _CHIP_LINE = re.compile(r"^\s*chip\s+(\d+)\s+\S+\s+(\S+)", re.MULTILINE)
 
@@ -223,6 +224,27 @@ def check_reference(python: Path | None, problem: str | None) -> Check:
     return Check("reference", OK, f"{python} imports torch, transformers, tokenizers and safetensors")
 
 
+def check_skills(results: list) -> Check:
+    """The tenstorrent/skills clone(s) that skills_dirs point into, compared with upstream main (orchard/skillsfresh).
+
+    The operator's rule is that runs use the latest tenstorrent/skills. Bringup runs unattended, so anything short of
+    current is a warning that says what was found and how to update; it never blocks. Orchard updates nothing."""
+    if not results:
+        return Check("skills", WARN, "bringup.toml names no skills_dirs, so the stage skills from tenstorrent/skills "
+                     "(model-bringup and the others) are not read and nothing was compared with upstream")
+    notes, worst = [], OK
+    for r in results:
+        text = f"{r.path}: {r.state}. {r.detail}"
+        if r.state != "current":
+            worst = WARN
+            text += " " + r.update_text()
+        if r.warnings:
+            worst = WARN
+            text += " " + " ".join(r.warnings)
+        notes.append(text)
+    return Check("skills", worst, " | ".join(notes))
+
+
 def _class_note(report, repo: str) -> str:
     for c in (report or {}).get("candidates", []):
         est = c.get("class_estimate")
@@ -387,6 +409,7 @@ class Signals:
     research: Callable | None = None            # (model_id, hub, base_override, installed) -> report dict
     cpu_standin: Callable | None = None         # (endpoint, model) -> why the CPU tier does not answer, or None
     sfpi: Callable | None = None                # (bundle name) -> (installed SFPI version, version the bundle pins)
+    skills_freshness: Callable | None = None    # () -> list[skillsfresh.Freshness] for the skills_dirs clones
 
 
 def check_lab(lab, status) -> Check:
@@ -509,6 +532,11 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     ref = cfg.reference_python
     guarded("reference", "config-invalid", lambda: check_reference(
         ref, s.reference_problem(ref) if ref is not None and s.reference_problem else None))
+    if s.skills_freshness is not None:
+        try:
+            out.append(check_skills(list(s.skills_freshness())))
+        except Exception as exc:                      # a warning, like the row itself: bringup is not blocked
+            out.append(Check("skills", WARN, f"could not check the skills clone: {type(exc).__name__}: {exc}"))
     return out
 
 
@@ -594,8 +622,18 @@ def default_signals(cfg, research_options=None) -> Signals:
         from orchard import sfpi as sfpi_check
         return sfpi_check.installed_version(), sfpi_check.pinned_version(models_root(), bundle)
 
+    def skills_freshness():
+        # The research rule for a dry run (and the UI's preflight, which runs like one) is "no cache and no file": both
+        # pass research options with no cache directory. The skills result cache then stays in memory. A caller with
+        # no options is treated the same way.
+        from orchard import skillsfresh
+        offline = bool(getattr(research_options, "offline", False)) if research_options is not None else False
+        write = research_options is not None and getattr(research_options, "cache_dir", None) is not None
+        return skillsfresh.check_skills_dirs(cfg.skills_dirs, reuse_s=SKILLS_REUSE_S, offline=offline,
+                                             cache=skillsfresh.Cache(write=write))
+
     return Signals(
-        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions,
+        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions, skills_freshness=skills_freshness,
         installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,
