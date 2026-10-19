@@ -1144,7 +1144,7 @@ Prompt (operator): "get the new screenshot". No browser tool was available in th
 - Pushed to GitHub (`2f8c3d5`) and re-uploaded to the Hugging Face companion repo. The page running under tt-disco on 7871 still has the old code, so it has the blank-steps
   bug until it is restarted from the catalog. The weights upload was at 7.6 GB; `finish_weights.sh` has not run yet.
 
-## 2026-10-18: making unattended bring-up need fewer people (branch `autonomy-pr`, version 0.6.0)
+## 2026-10-18: making unattended bring-up need fewer people (branch `autonomy-pr`, version 0.6.1)
 Prompt (operator): "proceed in making the harness 'good at' bringing up models without Claude supervision", after the RAG-Gate replay
 test. Method: list every stop in the past runs that a person cleared, keep the ones whose cause is known, and fix each test first with a
 mutation per guard. The causes come from the entries above (RAG-Gate-27B, Clef, the SFPI downgrade, the music run). Each change is a
@@ -1171,7 +1171,7 @@ precaution or a check with a stated evidence base; none was seen to change a rea
   first, which is the operator's decision. Candidates checked by dry run: `bytkim/Qwen3.8-27B-pi` (preflight passes apart from the coder
   port), `tsinghua-sigs-robot-lab/VeriLoop-E2` and `perplexity-ai/pplx-decider-v1.1-27b` (disk: 136 and 132 GB needed, 111 free).
 
-## 2026-10-18 (later): the first unattended bring-up with the new setup (`bytkim/Qwen3.8-27B-pi`, version 0.6.0)
+## 2026-10-18 (later): the first unattended bring-up with the new setup (`bytkim/Qwen3.8-27B-pi`, version 0.6.1)
 Prompt (operator): "go ahead" to stop the kernel-probe coder and run an unattended bring-up of a new model. Run directory
 `~/orchard-runs/bytkim--qwen3.8-27b-pi`. It ended `ready-for-operator-review` after six launches of the same command. Stage 2 (one chip):
 32 of 32 tokens, ready in 682 s. Stage 4: 2 chips 1.0, 4 chips 0.96875 (ready in 254 s). Stages 3, 5, 6, 7 skipped by design. Nothing was
@@ -1196,4 +1196,4 @@ Added from this: a multi-board test that fails within 180 s without timing out i
 (`FAST_FAIL_S`, 5 tests, 5 mutations red). That retry did not fire in the final attempt, so it has not run on real hardware.
 Also seen: a launcher that saves `$!` after `setsid nohup` saves the wrapper's pid, which exits at once; wait on the run's `supervisor.pid`.
 The stall rule is still deferred. A shared-venv, no-weights stage 0 verdict is still possible if a snapshot is replaced mid-run.
-Not done: the 4-chip warm-cache hang (not investigated here). The run's version numbers (0.7.0, 0.7.1) belong to the combined branch; split out, these changes are 0.6.0.
+Not done: the 4-chip warm-cache hang (not investigated here). The run's version numbers (0.7.0, 0.7.1) belong to the combined branch; split out, these changes are 0.6.1 (a self-review found that the set-aside also fired for a run that had passed stage 2 whose snapshot was later deleted; it now keeps such a run).

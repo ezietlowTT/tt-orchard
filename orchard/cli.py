@@ -404,6 +404,24 @@ def _ui(args, env, home, out) -> int:
     return EXIT_OK
 
 
+def _served_the_model(run_dir: Path) -> bool:
+    """True when the run's ledger records a passing stage 2. A run that served the model read real weights. The lines are
+    read one by one, because a torn or unreadable line must not stop a bring-up from starting."""
+    try:
+        lines = (run_dir / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(e, dict) and e.get("event") == "stage_end" and e.get("stage") == 2
+                and isinstance(e.get("data"), dict) and e["data"].get("result") == "pass"):
+            return True
+    return False
+
+
 def _block_code(run_dir: Path) -> str:
     """The reason code in the run's blocked.json, or "blocked" when it is missing or unreadable."""
     try:
@@ -538,8 +556,8 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _refuse("--no-fetch was given and the snapshot is not in " + str(hf_home))
     else:
         snapshot = fetch.snapshot_dir(hf_home, args.model, hub.sha)      # where the download will put it
-    if local is None and resuming and not args.dry_run:
-        # The weights are about to be downloaded, so an earlier run read a snapshot with none. Its stage 0 verdict (a full port,
+    if local is None and resuming and not args.dry_run and not _served_the_model(run_dir):
+        # The weights are about to be downloaded, so an earlier run read a snapshot with none (a run that passed stage 2 did not). Its stage 0 verdict (a full port,
         # for bytkim/Qwen3.8-27B-pi) and stage 1 reference describe that empty snapshot, and a retry would keep both.
         # The directory is moved, not deleted.
         aside = run_dir.with_name(f"{run_dir.name}.stale-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")

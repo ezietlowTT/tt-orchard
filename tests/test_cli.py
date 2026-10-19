@@ -173,6 +173,24 @@ def test_an_earlier_run_is_kept_when_its_snapshot_was_already_local(conf, tmp_pa
     assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
 
 
+def test_an_earlier_run_that_already_passed_stage_2_is_kept_when_its_snapshot_has_gone(conf, tmp_path):
+    # A run that served the model has read real weights. If the cache was cleaned since, the weights are fetched again and the
+    # run goes on; setting it aside would throw away stages 0 to 2 for a snapshot that was fine when they ran.
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl").write_text('{"event": "stage_end", "stage": 2, "data": {"result": "pass"}}\n')
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert rec.fetched, "the weights were fetched again"
+    assert (run_dir / "ledger.jsonl").exists()
+    assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
+
+
+def test_a_stage_2_that_failed_does_not_keep_an_earlier_run(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl").write_text('{"event": "stage_end", "stage": 2, "data": {"result": "fail"}}\n')
+    run(conf, ["bringup", "Cloudflare/clef"])
+    assert not (run_dir / "ledger.jsonl").exists()
+
+
 def test_a_dry_run_leaves_an_earlier_run_alone(conf, tmp_path):
     run_dir = _earlier_run(tmp_path)
     run(conf, ["bringup", "Cloudflare/clef", "--dry-run"])
