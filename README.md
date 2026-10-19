@@ -142,6 +142,18 @@ it, fixed the code, and restarted it many times. Each fix is described in
 The full-port path (a model that needs new model code) has never run. When stage 0 chooses it, the
 supervisor pauses before stage 2 for the operator.
 
+**Matching a model to its nearest one.** Stage 0 pairs the two models' tensors the way a person would. Names the
+`model.language_model.` rule leaves over are paired by what they share (`language_model.layers.5...` and
+`model.language_model.layers.5...`), and the pairs and prefix rewrites are recorded in `delta.json` under
+`alignment`. `evidence/value-compare.json` samples the paired tensors' values (identical, near, changed or unrelated;
+a fine-tune is near), and `evidence/head-compare.json` says whether a sidecar is the nearest model's `lm_head` cut down
+to some rows. When the backbone lines up and every row of a sidecar matrix is a copy of an `lm_head` row (the first such
+model was `perplexity-ai/pplx-decider-v1.2`: 255 answer-code rows), the class is `restricted-head`. The harness does not
+serve those models: the run stops after stage 0 with the block code `restricted-head` and says what it found, because
+how the rows are read (at marker tokens, under a different attention mask) is in the model's own code. The stage 1
+gate now compares the stage agent's `reference.json` with the reference template's own evidence, and fails a reference
+whose weights did not load.
+
 ### Parts
 
 | Part | Files | State |

@@ -1444,3 +1444,26 @@ would be needed: `docs/run-logs/2026-10-19-pplx-decider-v1.2.md`. I started olla
 - The pplx-decider's real difference (a readout head and non-causal attention across a request's questions) is in the card and the code, not in the
   config or the tensor names; no stage can see it today.
 
+## 2026-10-19 (night): stage 0 matches by what the tensors are, and stops on a restricted head (branch `model-alignment`, version 0.6.7)
+Prompt (operator): after the pplx-decider run, "we have proximal models right but the way we're matching isn't helping us yet"; asked what I
+would have found if I drove the bring-up, I ran the analysis by hand (names, shapes, values, the readout rows) and then the operator ruled
+"stop and report now" and "yes, build it in a worktree that has all our open PRs still merged together" (this branch is local `main`, which has
+PRs 9 and 10 merged; the UI branch `ui-operator-mode` is not a PR and is not in it). Design note: `docs/superpowers/specs/2026-10-19-model-alignment-design.md`.
+- Found by hand: all 1183 decider tensors have an analogue in Qwen3.8-27B (`language_model.X` and `visual.X` against `model.language_model.X` and
+  `model.visual.X`, shapes equal); the base has 16 more (`lm_head`, 15 `mtp.*`); sampled values are near (cosine 0.9999) so it is a fine-tune; the
+  255 readout rows are copies of `lm_head` rows for the tokens A, B, ... AA, AB (cosine at least 0.9999).
+- Built, tests first (new files `test_delta_triage_alignment.py`, `test_restricted_head.py`, `test_gate_reference_evidence.py`): `align_leftovers`
+  (suffix matching plus voted prefix rewrites), `sample_value_diffs` (standard library), `detect_restricted_head` (numpy, says when skipped), nested
+  `code_files`, the class `restricted-head` (path full-port; the supervisor pauses before stage 1; unattended it blocks with the code `restricted-head`),
+  and a stage 1 gate that compares `reference.json` with the template's `evidence/summary.json` and `load-report.json`.
+- Run on the real checkpoints (4 s): class `restricted-head`; 1183 of 1183 aligned (850 and 333 by two prefix rewrites); values 1 identical and 7 near;
+  head restricted, 255 rows, tokens A, B, C, ...; 5 code files found. The new gate fails the real pplx-decider stage 1 (three reasons) and still passes
+  the bytkim, RAG-Gate and Clef stage 1 directories.
+- Found while testing: `code_files` skipped symlinks, and a Hugging Face cache snapshot is all symlinks, so the decider's code was missed until a
+  test with links went red. 38 mutations: 31 red first time; the 7 survivors (the "must not match" name guards, one vote as a rule, any one row as a
+  head, a full-size matrix as a restriction, an unattended retry passing the stop) were tests that never reached their branch (the tie test's names
+  shared too little to tie); each is fixed and red now. Two of my own assertions had `or True` and could not fail; fixed before any run.
+- Not done: a reference loader that uses the name map (the gate now fails such a run instead of passing it); the decider's attention mask and marker
+  readout (its `model.py` has not been read); a middle path that checks a restricted head against the producer's code on the host. The suite was run in
+  full once at the end of this entry.
+

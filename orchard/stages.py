@@ -39,7 +39,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from orchard.classes import CLASSES, class_of_path, path_of
+from orchard.classes import CLASSES, SIDECAR_CLASSES, class_of_path, path_of
 from orchard.defaults import (COLD_START_S, LONG_STAGE_S, PACKAGE_FORMATS, RUN_COLD_BOOT_CAP,
                               RUN_ESCALATION_CAP, RUN_WALL_CLOCK_S, STAGE2_PCC_MIN,
                               STAGE4_SWAP_DISK_GB, STAGE_BUDGET_S, STAGE_DISK_GB, SWAP_MIN_TOKENS,
@@ -206,10 +206,15 @@ def _class_reasons(d: dict) -> list[str]:
             reasons.append(f"sidecars[{i}] needs a file")
         elif not re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256", ""))):
             reasons.append(f"sidecars[{i}] ({item['file']}) needs a sha256 of 64 hex digits")
-    if d.get("class") == "weights+sidecar" and not sidecars:
-        reasons.append("class weights+sidecar needs at least one entry in sidecars")
-    if "class" in d and d["class"] != "weights+sidecar" and sidecars:
-        reasons.append(f"class {d['class']!r} cannot have sidecars; only weights+sidecar does")
+    if d.get("class") in SIDECAR_CLASSES and not sidecars:
+        reasons.append(f"class {d['class']} needs at least one entry in sidecars")
+    if "class" in d and d["class"] not in SIDECAR_CLASSES and sidecars:
+        reasons.append(f"class {d['class']!r} cannot have sidecars; only {' and '.join(SIDECAR_CLASSES)} do")
+    if d.get("class") == "restricted-head":
+        head = d.get("head")
+        if not isinstance(head, dict) or head.get("restricted") is not True:
+            reasons.append("class restricted-head needs delta.json head.restricted to be true "
+                           "(the template's restricted-head check found the sidecar rows in the nearest model's lm_head)")
     if "mtp" in d:
         m = d["mtp"]
         counts = (m.get("nearest_tensors"), m.get("new_tensors")) if isinstance(m, dict) else ()
@@ -246,7 +251,71 @@ def gate_reference(stage_dir, run_dir) -> GateResult:
         if c.get("pass") is not True:
             reasons.append(f"check {c['name']!r} did not pass")
         _evidence(run_dir, c.get("evidence"), f"check {c['name']!r}", reasons, seen)
+    reasons += _reference_evidence_reasons(Path(stage_dir), d)
     return _done(reasons, seen)
+
+
+EVIDENCE_MAX_BYTES = 2 * 1024 * 1024        # the reference template's evidence files are a few KB to a few hundred KB
+
+
+def _evidence_json(stage_dir: Path, name: str, *, required: bool, reasons: list):
+    """evidence/<name> as a dict, or None. A missing file is a reason only when `required`; a file that is unreadable, too large
+    or a link that leaves the stage directory is always one, because an agent that cannot change the verdict can still hide
+    what the evidence says by swelling or redirecting the file."""
+    rel = f"evidence/{name}"
+    path = stage_dir / rel
+    if not path.exists() and not path.is_symlink():
+        if required:
+            reasons.append(f"{rel} is missing: reference_gate.py was copied into this stage, so it must have written it")
+        return None
+    try:
+        if not path.resolve().is_relative_to(stage_dir.resolve()):
+            reasons.append(f"{rel} is a link to a file outside the stage directory, so it was not read")
+            return None
+        if path.stat().st_size > EVIDENCE_MAX_BYTES:
+            reasons.append(f"{rel} is too large to read ({path.stat().st_size} bytes; the cap is {EVIDENCE_MAX_BYTES})")
+            return None
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        reasons.append(f"{rel} is not readable JSON: {exc}")
+        return None
+    if not isinstance(data, dict):
+        reasons.append(f"{rel} is not a JSON object")
+        return None
+    return data
+
+
+def _reference_evidence_reasons(stage_dir: Path, agent: dict) -> list[str]:
+    """The reference template (orchard/skills/reference-gate-templates) writes evidence/summary.json (its own verdict and one
+    boolean per check) and evidence/load-report.json (the keys the CPU model did not find in the checkpoint). The stage agent
+    writes reference.json. The evidence decides: on the pplx-decider run the template said fail with all 851 model keys missing and
+    the agent wrote pass, and this gate used to accept it."""
+    reasons: list[str] = []
+    used_template = (stage_dir / "reference_gate.py").is_file()
+    summary = _evidence_json(stage_dir, "summary.json", required=used_template, reasons=reasons)
+    report = _evidence_json(stage_dir, "load-report.json", required=False, reasons=reasons)
+    if isinstance(summary, dict):
+        if summary.get("verdict") != "pass":
+            reasons.append(f"evidence/summary.json (written by the reference template) says verdict {summary.get('verdict')!r}, "
+                           f"but reference.json says {agent.get('verdict')!r}; the evidence decides")
+        measured = summary.get("checks") if isinstance(summary.get("checks"), dict) else {}
+        for c in agent.get("checks") or []:
+            if isinstance(c, dict) and c.get("pass") is True and measured.get(c.get("name")) is False:
+                reasons.append(f"check {c['name']!r}: evidence/summary.json says it failed, reference.json says it passed")
+    if isinstance(report, dict) and isinstance(report.get("missing_keys"), list):
+        ignore = []
+        for pattern in report.get("ignore_patterns") or []:
+            try:
+                ignore.append(re.compile(pattern))
+            except (re.error, TypeError):
+                continue
+        missing = [k for k in report["missing_keys"] if isinstance(k, str) and not any(p.search(k) for p in ignore)]
+        if missing:
+            total = report.get("model_key_count")
+            of = f" of {total}" if isinstance(total, int) and not isinstance(total, bool) else ""
+            reasons.append(f"evidence/load-report.json: {len(missing)}{of} model keys were not found in the checkpoint, so those "
+                           "weights did not load and the CPU model ran on uninitialised values")
+    return reasons
 
 
 def gate_decoder(stage_dir, run_dir) -> GateResult:
