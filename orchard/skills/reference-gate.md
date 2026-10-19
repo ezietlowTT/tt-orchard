@@ -69,7 +69,11 @@ fact needs explaining. You do not write a script.
      sentence. If the card publishes an exact sample, compare it with the generated text and say
      what you found.
    Do not change a check's `pass` from false to true. If a check failed, leave it failed and say
-   in its note what the evidence shows.
+   in its note what the evidence shows. The gate compares your `reference.json` with
+   `evidence/summary.json` and `evidence/load-report.json`, and those files decide: if the load report lists
+   model keys missing outside its ignore patterns, the weights did not load and the CPU model ran on
+   uninitialised values, whatever a note says about the mismatch being expected. The check fails and so does the
+   stage. Say so in the note, write the file and stop.
 7. Write the reviewed `reference.json` with write_file (the whole file). Then reply with a short
    summary and no tool call.
 

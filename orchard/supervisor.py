@@ -160,6 +160,8 @@ EXIT_READY, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED = 0, 2, 3, 4
 EXIT_BLOCKED = 5     # an unattended run could not go on and named why (orchard/blocked.py)
 FULL_PORT = ("stage 0 found a full port (new model code is needed); plan 4 runs weights-only "
              "bring-ups, so the operator decides whether to go on")
+RESTRICTED_HEAD = ("stage 0 found the nearest model's backbone with a restricted head (its lm_head is replaced by sidecar "
+                   "rows); the harness does not serve that, so a person decides whether to go on")
 SKILLS_DIR = Path(__file__).with_name("skills")
 
 
@@ -730,6 +732,9 @@ class Supervisor:
             if cap:
                 self.ledger.append("decision", p.next_stage, decision="pause", reason=cap)
                 continue
+            if p.next_stage == 1 and self._restricted_head_unacknowledged():
+                self.ledger.append("decision", 1, decision="pause", reason=RESTRICTED_HEAD)
+                continue
             if p.next_stage == 2 and self._full_port_unacknowledged():
                 self.ledger.append("decision", 2, decision="pause", reason=FULL_PORT)
                 continue
@@ -763,9 +768,20 @@ class Supervisor:
         if run_path(entries, self.run_dir) != "full-port":
             return False
         # Unattended, a full port always blocks: an operator's resume is what lets an attended run go on
-        # into the full-port stages, and no unattended retry may do that.
+        # into the full-port stages, and no unattended retry may do that. A pause for a restricted head
+        # counts as the same acknowledgement, so one resume is enough.
         return self.unattended or not any(
-            e["event"] == "decision" and e["data"].get("reason") == FULL_PORT for e in entries)
+            e["event"] == "decision" and e["data"].get("reason") in (FULL_PORT, RESTRICTED_HEAD) for e in entries)
+
+    def _restricted_head_unacknowledged(self) -> bool:
+        """Stage 0 filed the model as a restricted head, and the run has not yet paused for it. The harness does not serve
+        such a model (the operator's ruling, 2026-10-19), so the run stops before stage 1 instead of spending a coder boot and
+        a CPU reference on it. Unattended, it always blocks."""
+        entries = self.ledger.read()
+        if run_class(entries, self.run_dir) != "restricted-head":
+            return False
+        return self.unattended or not any(
+            e["event"] == "decision" and e["data"].get("reason") == RESTRICTED_HEAD for e in entries)
 
     def _wait_for_operator(self) -> str:
         while True:
