@@ -1443,4 +1443,45 @@ would be needed: `docs/run-logs/2026-10-19-pplx-decider-v1.2.md`. I started olla
   `visual.*`; the draft contradicts its own evidence on the prefix; `code_files` misses nested directories.
 - The pplx-decider's real difference (a readout head and non-causal attention across a request's questions) is in the card and the code, not in the
   config or the tensor names; no stage can see it today.
+## 2026-10-19: operator mode for the web UI (branch `ui-operator-mode`, version 0.6.5)
+Prompt (operator): "add a very lightweight theme switcher to the tt-orchard UI. For now, call what we have now 'playful' mode. I want
+'operator' mode, less focused on fun and more on what's happening now and what happened before and what to do next." Brainstormed first.
+The operator's complaints about the page: what is running does not stand out enough, the font is hard to read, text is hard to copy, it is
+hard to tell decoration from information, and numbers come with no context ("if perf is good I want it to tell me"). The operator chose
+mockup B (two panes, "now" stays put) and said to build the switcher and layout first and the verdict line after.
+- `orchard/web/mode.js` (a plain script in `<head>`, so no flash) sets `<html data-mode>` from `?mode=`, else the stored choice, else
+  `playful`; only the two names are accepted and every storage call is in a `try`. Two buttons in the top bar switch it.
+- The run view has two wrappers, `.op-left` (state band, Now, Next, block and pause panels) and `.op-right` (stages, results, tabs and
+  panes). Outside operator mode they are `display: contents`, and a browser check showed every key element at the same position as on the
+  old page. In operator mode the left pane is sticky and the right scrolls; below 900 px they stack.
+- The state band takes its colour from `#run[data-state]` and `[data-tone]` (blue and pulsing for running; the pulse sits in a
+  `prefers-reduced-motion: no-preference` query). Operator mode drops the pixel face by redefining `--pixel` as the system face, hides
+  the scene (and `scene.js` stops drawing), and shows the real state name, stage name and feed role instead of the orchard words and icons.
+- Checked in headless Chrome against the live pplx-decider run (light and dark, widths 1440 to 400, no horizontal scroll, storage blocked,
+  an invalid `?mode=` ignored, Hardware and Settings views still open). 25 mutations in all; the first run left one survivor (the link
+  value was not validated where it is read), which now has a test.
+- A test of mine used an element id that did not exist (`run-head` is a class); it failed with a KeyError, not an assertion.
+- Not done: the Verdict line (a plain sentence with a yardstick for each number; it needs the pass bars from the code and the numbers from
+  earlier runs' ledgers), a "copy" button for long commands, and hiding the emoji inside the mode chip and the "Now" line. One 404 showed
+  once in a browser console and did not recur in eight more loads on either UI. The page's own JavaScript still has no automated test;
+  the browser checks were run by hand with Playwright in a scratch venv.
+
+## 2026-10-19 (later): the Verdict line (branch `ui-operator-mode`, version 0.6.6)
+Prompt (operator): "go ahead with the verdict line" (the second half of the operator-mode request: "if perf is good I want it to tell me instead of
+just giving me numbers I don't have context for"). Tests first (`tests/test_verdict.py`, five more in `tests/test_webui.py`), 26 mutations.
+- `orchard/verdict.py` turns `run_view.results` into {id, tone, headline, detail} lines, worst first. A swap or configuration result is set
+  against `SWAP_TOP1_MIN` and the earlier runs' scores (named by model). A configuration's boot time is ranked (quicker than, about the same as,
+  somewhat slower than, slower than) against the median of earlier runs of the same package and chip count that passed, and only when at least
+  two exist; stage 2's boot time is stated and never ranked, because its caches are sometimes warm and the result does not say. A run with
+  hardware results and no timing says "Not measured: generation speed". The cut-offs (a 15% band, 1.5 times for slow, a margin of 0.05) are choices.
+- The reference line reads `stages/1/evidence/summary.json` and `load-report.json` (inside the run, under 2 MiB, no link out) and sets them
+  beside `reference.json`. On the real pplx-decider run it shows, first and in red, that the template said fail with 851 of 851 keys missing while the
+  agent's file said pass. The gate itself is unchanged: this is a display, and the gate fix is in the pplx-decider run log.
+- `WebApp._peers` reads the other runs' results once per ledger change (mtime and size) because the page asks for the detail every few seconds;
+  verdict strings pass through `redact`. The page shows the section in operator mode only; it is built with text nodes, never markup.
+- Mutation lessons: three survived the first pass (a failed run counted as a yardstick, the minimum used instead of the median, a size cap
+  tested with a file that was invalid JSON anyway); each now has a test that goes red.
+- Checked in headless Chrome on the real runs: pplx-decider (bad, warn), bytkim (four good, three info, with 0.97 from RAG-Gate and clef and the
+  118 s and 218 s boots for 2 chips). Not done: a hardware-free way to say whether tokens per second is good (nothing times generation yet, so the line
+  says so), the same verdict in the playful view, and a copy button.
 
