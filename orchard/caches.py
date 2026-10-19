@@ -45,8 +45,13 @@ def cache_root_of(cfg) -> Path:
     return Path(cfg.cache_root) if cfg.cache_root else Path(cfg.runs_root) / "cache"
 
 
+# Every stage config that names a tensor cache in `tt_cache`: the swap check, the sidecar parity check and the restricted-head check
+# each keep their own cache beside the swap check's.
+CACHE_CONFIGS = ("swap_config.json", "parity_config.json", "restricted_head_config.json")
+
+
 def used_caches(runs_root) -> dict[str, list[str]]:
-    """realpath of a tensor cache -> the runs (not finished, not aborted) whose swap configs name it."""
+    """realpath of a tensor cache -> the runs (not finished, not aborted) whose stage configs name it (CACHE_CONFIGS)."""
     out: dict[str, list[str]] = {}
     for ledger in sorted(Path(runs_root).glob("*/ledger.jsonl")):
         try:
@@ -56,7 +61,7 @@ def used_caches(runs_root) -> dict[str, list[str]]:
         if p.finished or p.aborted:
             continue
         run = ledger.parent
-        for sc in run.glob("stages/**/swap_config.json"):
+        for sc in sorted(p for name in CACHE_CONFIGS for p in run.glob(f"stages/**/{name}")):
             try:
                 cache = json.loads(sc.read_text(encoding="utf-8")).get("tt_cache")
             except (OSError, ValueError, AttributeError):
