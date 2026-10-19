@@ -1455,3 +1455,22 @@ mockup B (two panes, "now" stays put) and said to build the switcher and layout 
   once in a browser console and did not recur in eight more loads on either UI. The page's own JavaScript still has no automated test;
   the browser checks were run by hand with Playwright in a scratch venv.
 
+## 2026-10-19 (later): the Verdict line (branch `ui-operator-mode`, version 0.6.6)
+Prompt (operator): "go ahead with the verdict line" (the second half of the operator-mode request: "if perf is good I want it to tell me instead of
+just giving me numbers I don't have context for"). Tests first (`tests/test_verdict.py`, five more in `tests/test_webui.py`), 26 mutations.
+- `orchard/verdict.py` turns `run_view.results` into {id, tone, headline, detail} lines, worst first. A swap or configuration result is set
+  against `SWAP_TOP1_MIN` and the earlier runs' scores (named by model). A configuration's boot time is ranked (quicker than, about the same as,
+  somewhat slower than, slower than) against the median of earlier runs of the same package and chip count that passed, and only when at least
+  two exist; stage 2's boot time is stated and never ranked, because its caches are sometimes warm and the result does not say. A run with
+  hardware results and no timing says "Not measured: generation speed". The cut-offs (a 15% band, 1.5 times for slow, a margin of 0.05) are choices.
+- The reference line reads `stages/1/evidence/summary.json` and `load-report.json` (inside the run, under 2 MiB, no link out) and sets them
+  beside `reference.json`. On the real pplx-decider run it shows, first and in red, that the template said fail with 851 of 851 keys missing while the
+  agent's file said pass. The gate itself is unchanged: this is a display, and the gate fix is in the pplx-decider run log.
+- `WebApp._peers` reads the other runs' results once per ledger change (mtime and size) because the page asks for the detail every few seconds;
+  verdict strings pass through `redact`. The page shows the section in operator mode only; it is built with text nodes, never markup.
+- Mutation lessons: three survived the first pass (a failed run counted as a yardstick, the minimum used instead of the median, a size cap
+  tested with a file that was invalid JSON anyway); each now has a test that goes red.
+- Checked in headless Chrome on the real runs: pplx-decider (bad, warn), bytkim (four good, three info, with 0.97 from RAG-Gate and clef and the
+  118 s and 218 s boots for 2 chips). Not done: a hardware-free way to say whether tokens per second is good (nothing times generation yet, so the line
+  says so), the same verdict in the playful view, and a copy button.
+

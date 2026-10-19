@@ -556,3 +556,16 @@ html[data-mode="operator"] .run-head .mode-chip { color: #fff; background: trans
   html[data-mode="operator"] .run { grid-template-columns: minmax(0, 1fr); gap: 22px; }
   html[data-mode="operator"] .op-left { position: static; max-height: none; overflow: visible; }
 }
+
+/* ---- the verdict: a sentence per finding with its yardstick (operator mode only) ---- */
+#verdict { display: none; }
+.verdict-list { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 8px; }
+.verdict-item { display: grid; gap: 2px; padding: 8px 12px; border-left: 5px solid var(--dim); background: var(--paper-2); border-radius: 3px; }
+.verdict-headline { font-weight: 700; }
+.verdict-detail { color: var(--muted); font-size: .88rem; }
+html[data-mode="operator"] #verdict { display: grid; gap: 4px; }
+html[data-mode="operator"] #verdict h2 { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+#verdict .verdict-item[data-tone="bad"] { border-left-color: var(--bad); background: var(--bad-bg); }
+#verdict .verdict-item[data-tone="warn"] { border-left-color: var(--warn); background: var(--warn-bg); }
+#verdict .verdict-item[data-tone="good"] { border-left-color: var(--good); background: var(--good-bg); }
+#verdict .verdict-item[data-tone="info"] { border-left-color: var(--dim); background: var(--paper-2); }

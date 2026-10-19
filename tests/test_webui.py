@@ -989,7 +989,7 @@ def _page():
 
 def test_operator_mode_puts_now_and_next_in_the_left_pane_and_history_in_the_right():
     chain = _page().chain
-    for el in ("run-badge", "run-model", "run-actions", "run-now", "run-hint", "block-panel", "pause-panel"):
+    for el in ("run-badge", "run-model", "run-actions", "run-now", "run-hint", "verdict", "block-panel", "pause-panel"):
         assert "op-left" in chain[el] and "op-right" not in chain[el], el
     for el in ("stepper", "results", "tabs", "pane-feed", "pane-ledger", "pane-details"):
         assert "op-right" in chain[el] and "op-left" not in chain[el], el
@@ -1065,3 +1065,85 @@ def test_operator_mode_leads_with_the_real_names_and_drops_the_orchard_ones():
         assert re.search(hidden + r"[^{]*\{[^}]*display:\s*none", ops), hidden
     assert re.search(r"\.badge \.name[^{]*\{[^}]*display:\s*inline", ops)
     assert re.search(r"\.run-head \.mode-chip[^{]*\{[^}]*background:\s*transparent", ops)
+
+
+# ---- the verdict line: sentences with yardsticks (orchard/verdict.py) -------------------------------------------------------------
+
+def write_results(run: Path, *, swap=None, configs=None):
+    """The files run_view.results reads: stage 2's swap-check evidence and stage 4's result."""
+    if swap is not None:
+        p = run / "stages" / "2" / "evidence" / "swap-check.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"result_draft": swap}))
+    if configs is not None:
+        p = run / "stages" / "4" / "result.json"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"configs": configs}))
+
+
+def verdict_items(app, name):
+    return {i["id"]: i for i in app.run_detail(name)["verdict"]}
+
+
+def test_run_detail_sets_the_reference_evidence_against_the_agents_file(root):
+    run = write_ledger(root / "org--a")
+    s1 = run / "stages" / "1"
+    (s1 / "evidence").mkdir(parents=True)
+    (s1 / "reference.json").write_text(json.dumps({"verdict": "pass"}))
+    (s1 / "evidence" / "summary.json").write_text(json.dumps({"verdict": "fail"}))
+    (s1 / "evidence" / "load-report.json").write_text(json.dumps({"missing_keys": ["model.layers.0.w"], "model_key_count": 1, "ignore_patterns": []}))
+    item = verdict_items(make_app(root), "org--a")["reference"]
+    assert item["tone"] == "bad" and "reference.json says pass" in item["headline"]
+
+
+def test_the_other_runs_are_the_yardsticks_and_a_run_is_never_its_own(root):
+    old = write_ledger(root / "org--old", model="org/old-model")
+    write_results(old, swap={"top1_agreement": 0.9375, "n_tokens": 32, "server_ready_s": 900.0, "coherent": True})
+    this = write_ledger(root / "org--this", model="org/this-one")
+    write_results(this, swap={"top1_agreement": 1.0, "n_tokens": 32, "server_ready_s": 700.0, "coherent": True})
+    detail = verdict_items(make_app(root), "org--this")["swap"]["detail"]
+    assert "0.94" in detail and "old-model" in detail and "this-one" not in detail
+
+
+def test_a_boot_time_is_ranked_only_against_the_same_package_and_chips_across_runs(root):
+    cfg = lambda ready, pkg="p/a", chips=2: {"chips": chips, "pass": True, "top1_agreement": 1.0, "server_ready_s": ready, "package": pkg}   # noqa: E731
+    for name, ready in (("org--p1", 100.0), ("org--p2", 110.0)):
+        write_results(write_ledger(root / name, model=f"org/{name}"), configs=[cfg(ready)])
+    write_results(write_ledger(root / "org--other", model="org/other"), configs=[cfg(1.0, pkg="p/other")])
+    write_results(write_ledger(root / "org--this", model="org/this"), configs=[cfg(105.0)])
+    detail = verdict_items(make_app(root), "org--this")["config-2"]["detail"]
+    assert "100 s" in detail and "110 s" in detail and "about the same as" in detail and " 1 s" not in detail
+
+
+def test_the_verdict_text_is_redacted_like_every_other_string_the_page_gets(root):
+    run = write_ledger(root / "org--a")
+    write_results(run, configs=[{"chips": 4, "pass": False, "reason": f"died in {HOME}/secret/dir"}])
+    detail = verdict_items(make_app(root), "org--a")["config-4"]["detail"]
+    assert HOME not in detail and "~/secret/dir" in detail
+
+
+def test_the_other_runs_ledgers_are_read_again_only_when_they_change(root, monkeypatch):
+    old = write_ledger(root / "org--old", model="org/old")
+    write_results(old, swap={"top1_agreement": 0.97, "n_tokens": 32, "server_ready_s": 900.0, "coherent": True})
+    write_ledger(root / "org--this", model="org/this")
+    real, seen = webui.run_view.results, []
+    monkeypatch.setattr(webui.run_view, "results", lambda run, entries: (seen.append(Path(run).name), real(run, entries))[1])
+    app = make_app(root)
+    app.run_detail("org--this")
+    app.run_detail("org--this")
+    assert seen.count("org--old") == 1
+    write_ledger(old, ("stage_start", 0, {}))                      # the ledger grew: its numbers are read again
+    app.run_detail("org--this")
+    assert seen.count("org--old") == 2
+
+
+def test_the_verdict_panel_is_for_operator_mode_and_is_built_without_innerhtml():
+    css = (WEB / "app.css").read_text(encoding="utf-8")
+    js = (WEB / "app.js").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^#verdict\s*\{[^}]*display:\s*none", css)
+    assert re.search(r'html\[data-mode="operator"\] #verdict[^{]*\{[^}]*display:\s*grid', css)
+    for tone in ("bad", "warn", "good", "info"):
+        assert re.search(rf'#verdict[^{{]*\[data-tone="{tone}"\][^{{]*\{{[^}}]*border-left-color', css), tone
+    body = js[js.index("function renderVerdict"):]
+    body = body[:body.index("\nfunction ", 10)]
+    assert "innerHTML" not in body and "renderVerdict(d.verdict)" in js

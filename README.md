@@ -469,7 +469,11 @@ is the same page, plain: system type, no orchard scene, and the run in two panes
 states the run's state in its real name (the only large block of colour on the page, pulsing while the run
 works), then what it is doing now and what to do next. On the right, the stages and the live feed, ledger, files
 and details. Orchard names and icons give way to the real stage and state names, and a command or path selects
-with one click. The browser remembers the choice; a link ending in `?mode=operator` or `?mode=playful` sets it.
+with one click. Between "Next" and the rest sits a **Verdict**: one sentence for each finding with its yardstick, worst
+news first. A swap or configuration result is set against the bar from the code and the other runs on the machine; a
+boot time is ranked only against earlier runs of the same package on the same chip count. The reference line reads the
+evidence the reference template wrote and says so when the agent's `reference.json` disagrees with it. A run with no
+timing says "not measured" instead of leaving the gap. The browser remembers the choice; a link ending in `?mode=operator` or `?mode=playful` sets it.
 
 ```bash
 tt-orchard ui                                  # http://127.0.0.1:8780/ on this machine

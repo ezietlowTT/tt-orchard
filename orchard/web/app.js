@@ -344,6 +344,20 @@ async function refreshRun() {
   }
 }
 
+// The verdict: one sentence per finding with its yardstick, worst first. Operator mode shows it (the CSS hides it otherwise).
+// Strings come from the server and are set as text, never as markup.
+function renderVerdict(items) {
+  const box = $("verdict");
+  const list = Array.isArray(items) ? items : [];
+  box.hidden = list.length === 0;
+  if (!changed($("verdict-list"), list)) return;
+  const ul = clear($("verdict-list"));
+  for (const i of list) {
+    ul.append(h("li", { class: "verdict-item", dataset: { tone: i.tone, id: i.id } },
+      h("strong", { class: "verdict-headline" }, i.headline), i.detail ? h("span", { class: "verdict-detail" }, i.detail) : null));
+  }
+}
+
 function renderRun() {
   const d = S.detail;
   if (!d) return;
@@ -367,6 +381,7 @@ function renderRun() {
     : "Local mode: everything runs on this machine";
   S.activity = d.activity ? { ...d.activity, seenAt: Date.now() } : null;
   renderNow();
+  renderVerdict(d.verdict);
   renderResults(d);
   if (S.tab === "timeline") renderTimeline(d);
   renderActions(d);
