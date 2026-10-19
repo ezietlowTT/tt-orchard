@@ -1536,3 +1536,18 @@ tt-smi -r sorry" and "might need to re-run it before retrying and continuing".
 - Not done: a `tt-orchard head-check` command; images, long states and 255-option questions; a 4-chip run; the bars are copied from the sidecar check, not
   measured for this head; serving.
 
+
+## 2026-10-19 (night, last): a classification bench for stage 0 (version 0.8.2)
+Prompt (operator): "is there a way to try just this new area of classification logic against like a group of 40 models (without downloading
+their weights fully) and comparing the decisions it makes for those 40 against the decisions you, Claude, would make yourself?"
+- `orchard/classify_bench.py` (`collect`, `compare`) reads each model's headers and configs through the research fetcher, runs the real stage 0 functions,
+  and writes one evidence packet per model with no verdict. Three fresh labelers (opus, sonnet, fable) labeled the packets blind. Corpus and how-to: `docs/classify-bench/`.
+- Result on 42 models (2 skipped: the Hub would not serve them): the tool matched the labelers' majority on 39 of 40. Against 6 models with a known outcome the tool and
+  each labeler were right on 6 of 6. The 3 differences: Timestral-209M (labelers split unknown vs full-port), Sieve-27B-v2 (labelers split; no config.json, `head.pt` unreadable),
+  and sabi-noema (all three labelers say weights-only; the tool says full-port because 96 small `A_log` and norm tensors are F32 where the base has BF16).
+- Bugs the bench found in the tool, each fixed test first: a repo with its own `lm_head` could be called a restricted head; a sidecar problem hid a backbone mismatch
+  (`decide_class` now checks the backbone first); subdirectory weights were listed as sidecars; the shard, body and request caps made large repos unreadable (the bench has
+  its own limits and `headers.read_model` takes `max_shards`); `evidence_complete` counted GGUF and `.pt` sidecars as gaps.
+- Quantized copies of the base (GPTQ, FP8) are full-port in the tool and in all three labelers' second round, but all three called it medium confidence: the guide has no class for a copy
+  that differs only by quantization. First-round labels for those four packets said unknown or full-port; the second round used packets with the added evidence.
+- Open: sabi-noema's dtype rule needs a hardware swap test before it is relaxed (TT casts `A_log` to float32 itself). The labelers saw packets the tool wrote, so a gap in a packet is a gap for both.

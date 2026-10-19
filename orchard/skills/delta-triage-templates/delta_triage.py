@@ -767,6 +767,9 @@ def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
     if np is None:
         out.update(restricted=None, note="numpy is not installed, so the restricted-head check was skipped")
         return out
+    if any(HEAD_NAME.search(n) for n in tensor_index(model_dir)):
+        out["note"] = "the new model has its own lm_head, so no sidecar stands in for it"
+        return out
     head = tensor_index(base_dir).get("lm_head.weight")
     if head is None or len(head["shape"]) != 2 or head["dtype"] not in ITEMSIZE:
         out["note"] = "the nearest model has no readable lm_head.weight to compare with"
@@ -1428,15 +1431,18 @@ def decide_path(c: dict, t: dict) -> list[str]:
 
 def decide_class(c: dict, t: dict, reasons: list[str], sc: dict) -> str:
     """weights-only, weights+sidecar, restricted-head, full-port or unknown. `reasons` already holds the backbone's
-    reasons for full-port and the sidecar problems. restricted-head: the backbone matches and the only thing missing is an
+    reasons for full-port and the sidecar problems (sc["problems"], told apart by value). restricted-head: the backbone matches and the only thing missing is an
     lm_head that a sidecar's rows stand in for (t["head"]["restricted"], set by detect_restricted_head)."""
     ns = t["normalized_name_sets"]
-    could_not_compare = ((c.get("errors") and "text_key_values" not in c) or bool(t["errors"])
-                         or ns["common"] == 0 or bool(sc["problems"]))
+    could_not_compare = (c.get("errors") and "text_key_values" not in c) or bool(t["errors"]) or ns["common"] == 0
     if could_not_compare:
         return "unknown"
-    if reasons:
+    # A definite difference in the backbone is full-port whatever a sidecar's problems are (summerMC/Diffusion-Qwen3.8-27B: 48 extra text tensors
+    # and a dllm_extras.pt that cannot be read). The sidecar problems alone, on a backbone that lines up, are what make the class unknown.
+    if [r for r in reasons if r not in sc["problems"]]:
         return "full-port"
+    if sc["problems"]:
+        return "unknown"
     if (t.get("head") or {}).get("restricted"):
         return "restricted-head"
     return "weights+sidecar" if sc["sidecars"] else "weights-only"

@@ -270,6 +270,16 @@ def test_a_sidecar_as_tall_as_the_head_is_a_copy_not_a_restriction(tmp_path):
     assert out["restricted"] is False and "fewer rows" in out["note"]
 
 
+def test_a_model_with_its_own_lm_head_is_not_a_restricted_head_even_if_a_sidecar_copies_head_rows(tmp_path):
+    """Restricted means the sidecar STANDS IN for the lm_head. A model that kept a full lm_head and ships a file of copied rows has not cut anything."""
+    new, base, ids = head_case(tmp_path)
+    rng = np.random.default_rng(1)
+    head = rng.normal(size=(64, 16)).astype("float32")
+    write_st(new / "model.safetensors", {"model.norm.weight": np.ones(16, dtype="float32"), "lm_head.weight": head})
+    out = template().detect_restricted_head(new, base, sidecars_of(new))
+    assert out["restricted"] is False and "its own lm_head" in out["note"]
+
+
 def test_without_numpy_the_head_check_says_it_was_skipped(tmp_path, monkeypatch):
     new, base, _ = head_case(tmp_path)
     t = template()
@@ -283,6 +293,28 @@ def test_no_sidecar_or_no_base_head_means_no_restricted_head(tmp_path):
     assert template().detect_restricted_head(new, base, {"sidecars": [], "problems": []})["restricted"] is False
     write_st(base / "model.safetensors", {"model.norm.weight": np.ones(16, dtype="float32")})      # a base without lm_head
     assert template().detect_restricted_head(new, base, sidecars_of(new))["restricted"] is False
+
+
+def test_a_definite_backbone_difference_stands_whatever_a_sidecars_problems_are():
+    """summerMC/Diffusion-Qwen3.8-27B adds 48 text tensors the nearest model lacks, and ships dllm_extras.pt. The sidecar cannot be read, but the backbone
+    already needs new model code: that is full-port, and `unknown` is for what could not be decided."""
+    t = template()
+    tens = compare({**decider_tensors(), "language_model.layers.0.linear_attn.rev_gate": info((4,))}, base_tensors())
+    cfg = {"decisive_keys_differing": [], "text_key_values": {}, "errors": []}
+    sc = {"sidecars": [{"file": "dllm_extras.pt"}], "problems": ["sidecar dllm_extras.pt is not a safetensors file, so its tensors cannot be read without loading it"]}
+    reasons = t.decide_path(cfg, tens) + sc["problems"]
+    assert any("only in the new model" in r for r in reasons)
+    assert t.decide_class(cfg, tens, reasons, sc) == "full-port"
+
+
+def test_a_sidecar_problem_alone_still_makes_the_class_unknown_and_unreadable_backbone_headers_too():
+    t = template()
+    clean = compare(layers("model.", 2), layers("model.", 2))
+    cfg = {"decisive_keys_differing": [], "text_key_values": {}, "errors": []}
+    sc = {"sidecars": [{"file": "x.pt"}], "problems": ["sidecar x.pt is not a safetensors file"]}
+    assert t.decide_class(cfg, clean, t.decide_path(cfg, clean) + sc["problems"], sc) == "unknown"
+    broken = {**clean, "errors": ["model-00001.safetensors: header is cut short"]}
+    assert t.decide_class(cfg, broken, ["something"], {"sidecars": [], "problems": []}) == "unknown"
 
 
 def test_the_class_is_restricted_head_and_the_missing_lm_head_is_explained(tmp_path):
