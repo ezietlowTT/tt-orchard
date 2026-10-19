@@ -1432,3 +1432,15 @@ report back ... Don't make the changes yourself."
   was enough. Nothing started. Write-up and what would be needed: `docs/run-logs/2026-10-19-nemotron-bolt-74b.md`. I did not start ollama,
   because the base block decides the outcome and the instruction was to change nothing else.
 
+## 2026-10-19 (later): pplx-decider-v1.2 stopped at stage 2, and stage 1's pass was false
+Prompt (operator): "OK let's do pplx-decider" (unattended, log the failure and report what we would need, change nothing). Ended `blocked`
+(`needs-new-model-code`) after stage 0 (class `unknown`, path `full-port`, 20 m 31 s) and stage 1 (11 m 18 s). Write-up and the list of what
+would be needed: `docs/run-logs/2026-10-19-pplx-decider-v1.2.md`. I started ollama (the CPU stand-in check blocks without it); nothing else was done by hand.
+- Found by reading the evidence: stage 1's `summary.json` says `verdict: fail` (all 851 model keys missing, so the CPU reference ran on
+  uninitialised weights and produced noise), the agent wrote `reference.json` with `verdict: pass`, and the gate accepted it. The gate trusts the
+  agent's file instead of the evidence the template wrote.
+- Stage 0's prefix normalization (`model.language_model.` to `model.`) matches 0 of 1183 names for a checkpoint that uses `language_model.*` and
+  `visual.*`; the draft contradicts its own evidence on the prefix; `code_files` misses nested directories.
+- The pplx-decider's real difference (a readout head and non-causal attention across a request's questions) is in the card and the code, not in the
+  config or the tensor names; no stage can see it today.
+
