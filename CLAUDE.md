@@ -1353,3 +1353,17 @@ preflight whether we have the latest even." The live probe had given the coder o
   a `def OPERATION` skeleton in its prompt, no check run between writes). The harness stopped requiring the name: the
   one `@ttl.operation` function is the operation, and the harness calls the function the gate names. Step 4 now says
   to run the check after each write. The 14b rename message is gone.
+
+## 2026-10-18 (night): the first hardware runs of the kernel probe (L5, version 0.6.4)
+Prompt (operator): "go ahead and use the full machine. when you're done, shut down the LLMs and then the machine itself." The tensixinet session
+had finished its read-only demo and said the chips were free. Coder-Next ran on board 1 (chips 2 and 3, port 8011); the hardware phase ran on
+chip 1 under `gozer run`, as the probe does.
+- First launch refused: the latest-skills preflight found tt-lang upstream main one commit ahead of the pin (a CI-only commit; `diagnostics.py`
+  unchanged, sha256 the same). Pin moved to `1cd7d41`, `kernel-env` rebuilt, version 0.6.4 (local commit, not pushed).
+- `add`, 1 attempt: smoke test passed; simulator pass (7 turns, 45 s); hardware pass (PCC 0.999998, max abs error 0.0156). The kernel is upstream's
+  `eltwise_add.py` renamed, so this checks the loop, not the coder.
+- `silu_mul`, 3 attempts at T=0.7: 3 of 3 passed the simulator (10, 15 and 13 turns; 250 to 372 s) and 3 of 3 passed on hardware (PCC min 0.999996 each).
+  Three distinct kernels. Prediction written before the run (at least 2 of 3 in the simulator, most of those on hardware) held.
+- Correction of an earlier statement of mine: "no coder-written kernel has passed the simulator" was wrong. `silu_mul` passed 5 of 5 in L4.
+  `rmsnorm` (0 of 16 over L4, L4e, L4f) and `linear_scan` (0 of 8) have not passed.
+- Not done: a hardware run of `rmsnorm` or `linear_scan` (neither passes the simulator), repeated hardware runs for variance, any op beyond these four.
