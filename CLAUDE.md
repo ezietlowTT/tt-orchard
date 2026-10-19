@@ -1420,3 +1420,15 @@ chip 1 under `gozer run`, as the probe does.
 - Correction of an earlier statement of mine: "no coder-written kernel has passed the simulator" was wrong. `silu_mul` passed 5 of 5 in L4.
   `rmsnorm` (0 of 16 over L4, L4e, L4f) and `linear_scan` (0 of 8) have not passed.
 - Not done: a hardware run of `rmsnorm` or `linear_scan` (neither passes the simulator), repeated hardware runs for variance, any op beyond these four.
+
+## 2026-10-19: PRs 9 and 10 merged locally; the Nemotron-3.5-Bolt-74B bring-up stopped at preflight
+Prompt (operator): "Have this directory represent the combo of PRs 9 and 10, as if they were merged to main already", then "Perform an
+unattended bring up of nvidia/NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB. The only thing to 'help with' is HDD space. If it fails, we log the fail and
+report back ... Don't make the changes yourself."
+- Merged `pr-10` then `pr-9` into local `main` (not pushed). Conflicts were additive: `CLAUDE.md` keeps both sections, `preflight.py` keeps
+  the CPU stand-in and SFPI signals beside the skills-freshness signal (my first resolution interleaved two `return Signals(` calls; fixed before
+  the commit), the version is 0.6.4. The suite passes: 4422 passed, 2 skipped.
+- Bring-up: blocked at preflight by `nearest-model-missing` (no bundle serves the BF16 base) and `coder-unusable` (ollama not running). Disk
+  was enough. Nothing started. Write-up and what would be needed: `docs/run-logs/2026-10-19-nemotron-bolt-74b.md`. I did not start ollama,
+  because the base block decides the outcome and the instruction was to change nothing else.
+
