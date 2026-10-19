@@ -325,8 +325,27 @@ def test_a_local_snapshot_is_found_under_hf_home(tmp_path):
     snap = tmp_path / "hf" / "hub" / "models--Cloudflare--clef" / "snapshots" / "abc123"
     snap.mkdir(parents=True)
     (snap / "config.json").write_text("{}")
+    (snap / "model.safetensors").write_text("w")
     assert real(tmp_path).local_snapshot("Cloudflare/clef") == snap
     assert real(tmp_path).local_snapshot("Other/model") is None
+
+
+def test_a_snapshot_with_only_a_config_and_readme_is_not_local(tmp_path):
+    # bytkim/Qwen3.8-27B-pi sat in the cache as config.json and README.md from an old manifest-only fetch. It counted as local,
+    # so the weights were never downloaded, the disk check left out their 59 GB, and stage 1 found nothing to load.
+    snap = tmp_path / "hf" / "hub" / "models--Cloudflare--clef" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    (snap / "README.md").write_text("card")
+    assert real(tmp_path).local_snapshot("Cloudflare/clef") is None
+
+
+def test_a_snapshot_whose_weight_links_point_nowhere_is_not_local(tmp_path):
+    snap = tmp_path / "hf" / "hub" / "models--Cloudflare--clef" / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text("{}")
+    (snap / "model-00001-of-00002.safetensors").symlink_to("../../blobs/gone")
+    assert real(tmp_path).local_snapshot("Cloudflare/clef") is None
 
 
 def test_a_snapshot_directory_without_a_config_is_not_a_snapshot(tmp_path):

@@ -522,8 +522,10 @@ its reason; a `warn` is information.
 | credentials | credential files are visible to agent shells and `--refuse-credentials-visible` was given. By default they are accepted, shown as a warning, and recorded in the ledger | `credentials-needed` |
 | tiers | the tier config is invalid, or not exactly one chips tier uses `coder.port` | `config-invalid` |
 | port | something already listens on `coder.port` (a warning when resuming) | `coder-unusable` |
+| cpu | the CPU tier's server (ollama) does not answer, or does not list the tier's model. Stage 4's 4-chip test parks the coder behind it, so a run without it would stop hours in | `coder-unusable` |
 | gozer | gozer gives no usable status. Stale leases and chips in use are warnings, and nothing is cleared | `hardware-unhealthy` |
 | base | no installed tt-model bundle serves the model this one is based on (the card's `base_model`, or the model named with `--base`). It then runs `tt model search` for the model's family and lists what it finds. At a terminal it asks which bundle to base the run on and installs the pick with `tt-model pull`. In a script it stops and prints the `--base` commands. A base snapshot that is not on disk is downloaded. A card with no `base_model` is a warning. If an installed v6 bundle has the model's architecture, it becomes an inferred base. An inferred base blocks until the operator confirms it: the bundle picked at a terminal or in the new-run dialog, `--base <bundle>`, or `--accept-inferred-base` (then it is a warning and its snapshot is downloaded). See "How the base model is found" | `nearest-model-missing`, `inferred-base-unconfirmed` |
+| sfpi | the box's SFPI compiler (`dpkg-query -W sfpi`) is older than the version the chosen bundle pins in its ttnn wheel (`ttnn/tt_metal/sfpi-version`). Kernel compiles then fail with `'vLut8si' is not a member of 'sfpi'` (7.67.0 against a pin of 7.73.0, 2026-10-13). tt-orchard does not install system packages; the row names the release to install. A version it cannot read is a warning | `hardware-unhealthy` |
 | reference | `reference_python` is set and cannot import torch, transformers, tokenizers and safetensors. Not set is a warning: the stage 1 agent then looks for an interpreter itself | `config-invalid` |
 
 The model is downloaded with `hf download`, pinned to the revision the preflight saw. The harness never
@@ -893,6 +895,29 @@ releases the leases first. Fix the cause and run the same command to resume. A b
 `notice`) pauses the run and keeps the hardware. Read the reason, fix the cause, then `resume`.
 If the supervisor says releasing the hardware failed, read the last `notice` and `gozer status`
 before doing anything. Never run `tt-smi -r` by hand and never pass `--force` to gozer.
+
+### 5.5a Automatic retries
+
+`tt-orchard bringup` retries a run that ends blocked for a reason a retry can clear: `coder-unusable`,
+`hardware-unhealthy` and `agent-stuck`. It waits 60 seconds first (a released board shows as busy for about a
+minute), then runs the same command again, which resumes from the ledger with a fresh coder context. It makes at most
+`--auto-retries` retries (default 2, and 0 turns it off) and says each one on the screen. A block that names a missing
+model, a full disk, a credential or a rule, a failed stage after escalation, or a spent retry budget is never retried
+automatically. After the last retry the run ends blocked as before.
+
+Before a multi-board hardware test (stage 4's 4-chip test) the supervisor also resets the chips it leased, in place and
+through gozer. The 4-chip test failed twice with fabric router timeouts on chips that earlier tests had used and passed
+after all four were reset. The cause was not isolated, so this is a precaution that costs about 42 seconds per board.
+
+### 5.5b Freeing disk with `--prune-caches`
+
+A full disk is the stop that most often needed a person. `tt-orchard bringup MODEL --prune-caches` clears it when the
+disk check is the only block and removing tensor caches can cover the shortfall: it removes the oldest caches that no
+unfinished run uses (the same ones `tt-orchard caches --prune` would offer), just enough to fit, says each one, and
+checks again. It never removes the shared kernel cache, a cache an unfinished run names, or anything outside the cache
+root. When the unused caches together cannot cover the shortfall it removes nothing. A shortfall on a hub disk that the
+caches do not share is not touched. With `--dry-run` it only says what it would remove. Deleting is opt-in: without the
+flag the run is refused as before. A removed cache is rebuilt by the next test that needs it (about 20 minutes).
 
 ### 5.6 The credentials preflight
 

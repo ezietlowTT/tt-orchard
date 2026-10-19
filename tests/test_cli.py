@@ -145,6 +145,58 @@ def test_a_snapshot_that_is_already_local_is_used_and_nothing_is_downloaded(conf
     assert rec.fetched == [] and rec.argv[rec.argv.index("--input") + 1] == f"model={local}"
 
 
+def _earlier_run(tmp_path):
+    run_dir = tmp_path / "runs" / "cloudflare--clef"
+    (run_dir / "stages" / "0").mkdir(parents=True)
+    (run_dir / "ledger.jsonl").write_text("{}\n")
+    (run_dir / "stages" / "0" / "delta.json").write_text('{"path": "full-port"}')
+    return run_dir
+
+
+def test_an_earlier_run_that_read_a_snapshot_with_no_weights_is_set_aside_when_the_weights_are_fetched(conf, tmp_path):
+    # bytkim/Qwen3.8-27B-pi: stage 0 compared an empty snapshot, called it a full port, and every retry kept that verdict even
+    # after the weights were downloaded. Stages 0 and 1 are only valid for the snapshot they read, so the run starts again.
+    run_dir = _earlier_run(tmp_path)
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert rec.fetched, "the weights were fetched"
+    assert not (run_dir / "ledger.jsonl").exists()
+    aside = [p for p in (tmp_path / "runs").iterdir() if p.name.startswith("cloudflare--clef.stale-")]
+    assert len(aside) == 1 and (aside[0] / "stages" / "0" / "delta.json").exists()
+    assert "set aside" in out
+
+
+def test_an_earlier_run_is_kept_when_its_snapshot_was_already_local(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    local = tmp_path / "hf" / "hub" / "models--Cloudflare--clef" / "snapshots" / "oldrev"
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"], sig=signals(local_snapshot=lambda m: local))
+    assert (run_dir / "ledger.jsonl").exists() and rec.fetched == []
+    assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
+
+
+def test_an_earlier_run_that_already_passed_stage_2_is_kept_when_its_snapshot_has_gone(conf, tmp_path):
+    # A run that served the model has read real weights. If the cache was cleaned since, the weights are fetched again and the
+    # run goes on; setting it aside would throw away stages 0 to 2 for a snapshot that was fine when they ran.
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl").write_text('{"event": "stage_end", "stage": 2, "data": {"result": "pass"}}\n')
+    code, out, rec = run(conf, ["bringup", "Cloudflare/clef"])
+    assert rec.fetched, "the weights were fetched again"
+    assert (run_dir / "ledger.jsonl").exists()
+    assert not [p for p in (tmp_path / "runs").iterdir() if ".stale-" in p.name]
+
+
+def test_a_stage_2_that_failed_does_not_keep_an_earlier_run(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    (run_dir / "ledger.jsonl").write_text('{"event": "stage_end", "stage": 2, "data": {"result": "fail"}}\n')
+    run(conf, ["bringup", "Cloudflare/clef"])
+    assert not (run_dir / "ledger.jsonl").exists()
+
+
+def test_a_dry_run_leaves_an_earlier_run_alone(conf, tmp_path):
+    run_dir = _earlier_run(tmp_path)
+    run(conf, ["bringup", "Cloudflare/clef", "--dry-run"])
+    assert (run_dir / "ledger.jsonl").exists()
+
+
 def test_a_local_snapshot_works_when_the_hub_cannot_be_reached(conf, tmp_path):
     local = tmp_path / "snap"
     code, out, rec = run(conf, ["bringup", "Cloudflare/clef"],
@@ -453,7 +505,9 @@ def test_the_narrator_stops_and_flushes_even_when_the_supervisor_raises(conf):
 def test_a_resumed_run_starts_by_showing_where_it_left_off(conf):
     first = Writer(0, SCRIPT)
     run(conf, ["bringup", "Cloudflare/clef", "--quiet"], rec=first)
-    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(0, []))
+    # By the second launch the first one has downloaded the weights, so the snapshot is local and the run is kept.
+    code, out, _ = run(conf, ["bringup", "Cloudflare/clef"], rec=Writer(0, []),
+                       sig=signals(local_snapshot=lambda m: Path("/hf/snap")))
     assert "stage 0 (survey): pass" in out
 
 

@@ -527,7 +527,9 @@ UNBLOCK = {
         "Run `df -h` on the run directory and on the Hugging Face cache. Stage 4 needs about 110 GB free on the run "
         "directory's filesystem.",
         "Failed attempts leave tensor caches (about 31 GB each) in stages/<N>.partial-*. Delete those from "
-        "abandoned attempts, then run `tt-orchard bringup <MODEL>` again."],
+        "abandoned attempts, then run `tt-orchard bringup <MODEL>` again.",
+        "`tt-orchard bringup <MODEL> --prune-caches` removes the oldest tensor caches that no unfinished run uses, just "
+        "enough to fit, when a full disk is the only block (`tt-orchard caches` lists what exists)."],
     "hardware-unhealthy": [
         "Run `gozer status`. tt-orchard never clears a lease or resets a chip that it does not hold.",
         "A STALE lease whose owner is gone is cleared with `gozer reconcile`. A chip held by another agent "

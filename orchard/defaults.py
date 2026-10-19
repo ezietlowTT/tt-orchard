@@ -167,6 +167,8 @@ STAGE4_SWAP_DISK_GB = 110.0     # choice: three caches of about 34 GB (1, 2 and 
 TEST_DISK_GB = 40.0             # choice: one cache plus margin, checked again before each
                                 # configuration's test, so a resumed stage stops before a test that
                                 # cannot finish its conversion
+FAST_FAIL_S = 180.0             # choice: a multi-board test that fails sooner than this failed to start (the 4-chip
+                                # fabric timeouts took 13 to 57 s), so it is reset and run once more; a cold boot is 300+ s
 
 # ---- plan 5: stage 7, the package ---------------------------------------------------------------
 PACKAGE_FORMATS = ("v6", "v5.1")    # the values --package-format accepts

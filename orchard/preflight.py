@@ -35,6 +35,7 @@ from orchard.defaults import TEST_DISK_GB
 OK, WARN, BLOCK = "ok", "warn", "block"
 HUB_TIMEOUT_S = 20
 GOZER_TIMEOUT_S = 10
+CPU_PROBE_TIMEOUT_S = 5
 REFERENCE_IMPORT_TIMEOUT_S = 180     # importing torch and transformers cold can take a minute
 _LICENSE_FILE = re.compile(r"(licen[cs]e|copying)", re.IGNORECASE)
 _CHIP_LINE = re.compile(r"^\s*chip\s+(\d+)\s+\S+\s+(\S+)", re.MULTILINE)
@@ -120,9 +121,26 @@ def check_disk(*, free_gb: dict[str, float], model_gb: float, local: bool, min_f
     short = [f"{label}: needs {need[label]:.0f} GB, {free_gb[label]:.0f} GB free" for label in need
              if free_gb[label] < need[label]]
     if short:
-        return Check("disk", BLOCK, "; ".join(short), "disk-full")
+        # How far short each disk is, so `--prune-caches` knows how much to free and whether it can.
+        data = {"short_gb": {label: round(need[label] - free_gb[label], 3) for label in need
+                             if free_gb[label] < need[label]}, "same_device": same_device}
+        return Check("disk", BLOCK, "; ".join(short), "disk-full", data)
     return Check("disk", OK, ", ".join(f"{label} {free_gb[label]:.0f} GB free (needs {need[label]:.0f})"
                                        for label in need))
+
+
+def prunable_shortfall(check: Check) -> float | None:
+    """GB that removing tensor caches would have to free to clear this disk block, or None when it cannot help.
+
+    The caches live under cache_root. Removing them frees the cache_root disk, and the hf_home disk only when the two
+    share one (check_disk then reports the sum under hf_home). A shortfall on a separate hub disk is not theirs to fix."""
+    data = check.data if check.status == BLOCK and isinstance(check.data, dict) else None
+    if not data or "short_gb" not in data:
+        return None
+    short = data["short_gb"]
+    if "hf_home" in short and not data.get("same_device"):
+        return None
+    return max(short.values()) if short else None
 
 
 def check_credentials(found: list[Path], accepted: bool) -> Check:
@@ -169,6 +187,28 @@ def _kept_on_port(cfg) -> bool:
     from orchard.caches import cache_root_of
     rec = kept_coder.read(cache_root_of(cfg)) or {}
     return (rec.get("identity") or {}).get("port") == cfg.coder.port
+
+
+def check_cpu_standin(problem: str | None, endpoint: str, model: str) -> Check:
+    """The CPU tier takes the coder's place while stage 4's 4-chip test parks it. A park whose stand-in is down
+    fails its canary hours into a run (RAG-Gate-27B, 2026-10-13), so the run does not start without it."""
+    if problem is None:
+        return Check("cpu", OK, f"the CPU stand-in answers: {model} at {endpoint}")
+    return Check("cpu", BLOCK, f"the CPU stand-in {model} at {endpoint} is not usable: {problem}. Start it with "
+                 "`OLLAMA_MODELS=<your models directory> ollama serve` (and `ollama pull` the model if it is "
+                 "missing); the coder is parked behind it during stage 4's 4-chip test", "coder-unusable")
+
+
+def cpu_standin_problem(endpoint: str, model: str, timeout: float = CPU_PROBE_TIMEOUT_S) -> str | None:
+    """Ask the CPU tier's server for its model list. None means it answers and lists `model`."""
+    try:
+        with urllib.request.urlopen(endpoint.rstrip("/") + "/models", timeout=timeout) as resp:
+            ids = [str(m.get("id")) for m in json.load(resp).get("data", [])]
+    except (OSError, ValueError) as exc:
+        return f"{type(exc).__name__}: {exc}"
+    if model not in ids:
+        return f"the server does not list {model} (it lists {', '.join(ids) or 'nothing'}); run `ollama pull {model}`"
+    return None
 
 
 def check_reference(python: Path | None, problem: str | None) -> Check:
@@ -345,6 +385,8 @@ class Signals:
     search_bundles: Callable | None = None      # (query) -> [{"name", "installed"}] or None
     lab_status: Callable | None = None          # () -> (answered, text of the lab's `gozer status`, error)
     research: Callable | None = None            # (model_id, hub, base_override, installed) -> report dict
+    cpu_standin: Callable | None = None         # (endpoint, model) -> why the CPU tier does not answer, or None
+    sfpi: Callable | None = None                # (bundle name) -> (installed SFPI version, version the bundle pins)
 
 
 def check_lab(lab, status) -> Check:
@@ -441,10 +483,29 @@ def run_preflight(cfg, model_id: str, *, accept_credentials: bool, signals: Sign
     guarded("tiers", "config-invalid", lambda: check_tiers(s.load_tiers, Path(cfg.tiers), cfg.coder.port))
     guarded("port", "coder-unusable", lambda: check_port(cfg.coder.port, bool(s.port_in_use(cfg.coder.port)), resuming,
                                                           kept=_kept_on_port(cfg)))
+    if s.cpu_standin is not None:
+        def cpu() -> Check:
+            tier = next(t for t in s.load_tiers(Path(cfg.tiers)).tiers.values() if t.get("placement") == "cpu")
+            return check_cpu_standin(s.cpu_standin(tier["endpoint"], tier["model"]), tier["endpoint"], tier["model"])
+        # The tiers row already reports a config that cannot be read; this row is only about the stand-in.
+        try:
+            s.load_tiers(Path(cfg.tiers))
+            guarded("cpu", "coder-unusable", cpu)
+        except Exception:
+            pass
     guarded("gozer", "hardware-unhealthy", lambda: check_gozer(s.gozer_status(), kept=_kept_on_port(cfg)))
     if getattr(cfg, "mode", "local") == "lab" and getattr(cfg, "lab", None) is not None and s.lab_status is not None:
         guarded("lab", "hardware-unhealthy", lambda: check_lab(cfg.lab, s.lab_status()))
     out.append(base_check)
+    bundle = (base_check.data or {}).get("bundle") if isinstance(base_check.data, dict) else None
+    if bundle and s.sfpi is not None:
+        from orchard import sfpi as sfpi_check
+        try:
+            row = sfpi_check.check_sfpi(*s.sfpi(bundle), bundle)
+            if row is not None:
+                out.append(row)
+        except Exception as exc:                      # a warning: the row guards against a drift it cannot always see
+            out.append(Check("sfpi", WARN, f"could not check the SFPI compiler: {type(exc).__name__}: {exc}"))
     ref = cfg.reference_python
     guarded("reference", "config-invalid", lambda: check_reference(
         ref, s.reference_problem(ref) if ref is not None and s.reference_problem else None))
@@ -483,6 +544,9 @@ def default_signals(cfg, research_options=None) -> Signals:
         org, name = model_id.split("/", 1)
         snaps = hf_home_for(cfg) / "hub" / f"models--{org}--{name}" / "snapshots"
         found = sorted(snaps.glob("*/config.json")) if snaps.is_dir() else []
+        # A config alone is not a model. An old manifest-only fetch leaves config.json and README.md, and counting that as
+        # local skipped the download. `exists()` follows the link, so a weight file whose blob is gone does not count.
+        found = [c for c in found if any(w.exists() for w in c.parent.glob("*.safetensors"))]
         return found[-1].parent if found else None
 
     def gozer_status() -> str:
@@ -526,7 +590,12 @@ def default_signals(cfg, research_options=None) -> Signals:
         research = lambda model_id, hub, override, inst: research_report.build(     # noqa: E731
             model_id=model_id, hub=hub, base_override=override, installed=inst, search=nearest.search,
             hub_info=hub_info, fetch=fetcher, no_github=research_options.no_github)
+    def sfpi_versions(bundle: str):
+        from orchard import sfpi as sfpi_check
+        return sfpi_check.installed_version(), sfpi_check.pinned_version(models_root(), bundle)
+
     return Signals(
+        cpu_standin=cpu_standin_problem, sfpi=sfpi_versions,
         installed_bundles=lambda: nearest.read_installed(models_root()), search_bundles=nearest.search,
         hub_info=hub_info, local_snapshot=local_snapshot,
         free_gb=lambda p: shutil.disk_usage(_nearest_existing(p)).free / 1e9,

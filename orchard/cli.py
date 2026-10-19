@@ -37,9 +37,12 @@ import threading
 import time
 from pathlib import Path
 
-from orchard import __version__, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import __version__, blocked, bringup_config, fetch, lexicon, narrate, nearest, orchard_view, preflight, ui
+from orchard import caches as tensor_caches
 
 EXIT_OK, EXIT_REFUSED, EXIT_ERROR, EXIT_ABORTED, EXIT_BLOCKED = 0, 2, 3, 4, 5   # the supervisor's own codes
+AUTO_RETRIES = 2            # a choice: a transient block gets two more tries, then a person decides
+AUTO_RETRY_WAIT_S = 60.0    # `gozer status` shows a released board BUSY-UNTRACKED for about a minute
 CONFIG_ENV = "ORCHARD_BRINGUP_CONFIG"
 CHECKOUT = Path(__file__).resolve().parent.parent
 
@@ -88,6 +91,14 @@ def _parser() -> argparse.ArgumentParser:
     b.add_argument("--base", help="the model to base the run on: a tt-model bundle (as `tt model search` lists "
                                   "it) or a Hugging Face model id. Default: the model card's base_model")
     b.add_argument("--quiet", action="store_true", help="do not print what the run is doing as it goes")
+    b.add_argument("--prune-caches", action="store_true",
+                   help="when the only block is a full disk, remove the oldest tensor caches that no unfinished run "
+                        "uses, just enough to fit (never the kernel cache), then check again. With --dry-run it "
+                        "only says what it would remove")
+    b.add_argument("--auto-retries", type=int, default=AUTO_RETRIES, metavar="N",
+                   help=f"retry a run that ends blocked for a transient reason (coder-unusable, hardware-unhealthy, "
+                        f"agent-stuck) up to N times, waiting {AUTO_RETRY_WAIT_S:.0f} s before each. 0 turns it off. "
+                        f"Default {AUTO_RETRIES}")
     b.add_argument("--offline", action="store_true",
                    help="skip the base-model research and make no request for it. The preflight's hub lookup, "
                         "`tt model search` and any download still happen")
@@ -393,8 +404,34 @@ def _ui(args, env, home, out) -> int:
     return EXIT_OK
 
 
+def _served_the_model(run_dir: Path) -> bool:
+    """True when the run's ledger records a passing stage 2. A run that served the model read real weights. The lines are
+    read one by one, because a torn or unreadable line must not stop a bring-up from starting."""
+    try:
+        lines = (run_dir / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if (isinstance(e, dict) and e.get("event") == "stage_end" and e.get("stage") == 2
+                and isinstance(e.get("data"), dict) and e["data"].get("result") == "pass"):
+            return True
+    return False
+
+
+def _block_code(run_dir: Path) -> str:
+    """The reason code in the run's blocked.json, or "blocked" when it is missing or unreadable."""
+    try:
+        return str(json.loads((run_dir / "blocked.json").read_text(encoding="utf-8"))["code"])
+    except (OSError, ValueError, KeyError):
+        return "blocked"
+
+
 def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None, fetcher=None,
-         chooser=None, puller=None) -> int:
+         chooser=None, puller=None, sleep=None) -> int:
     env = os.environ if env is None else env
     out = sys.stdout if stdout is None else stdout
     if supervisor_main is None:
@@ -495,6 +532,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
                 return _refuse(why)
             checks = preflight_page()
     stops = preflight.blocked(checks)
+    if stops and args.prune_caches and all(c.reason == "disk-full" for c in stops):
+        short = preflight.prunable_shortfall(next(c for c in stops if c.name == "disk"))
+        if short:
+            ok, _gone = tensor_caches.prune_to_fit(cfg, short, say=lambda m: print(f"{style.icon('🧹')}{m}", file=out),
+                                            dry_run=args.dry_run)
+            if ok and not args.dry_run:
+                checks = preflight_page()
+                stops = preflight.blocked(checks)
     if stops:
         print(lexicon.refused_line([c.reason for c in stops], style), file=out)
         for c in stops:
@@ -511,6 +556,14 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         return _refuse("--no-fetch was given and the snapshot is not in " + str(hf_home))
     else:
         snapshot = fetch.snapshot_dir(hf_home, args.model, hub.sha)      # where the download will put it
+    if local is None and resuming and not args.dry_run and not _served_the_model(run_dir):
+        # The weights are about to be downloaded, so an earlier run read a snapshot with none (a run that passed stage 2 did not). Its stage 0 verdict (a full port,
+        # for bytkim/Qwen3.8-27B-pi) and stage 1 reference describe that empty snapshot, and a retry would keep both.
+        # The directory is moved, not deleted.
+        aside = run_dir.with_name(f"{run_dir.name}.stale-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
+        run_dir.rename(aside)
+        resuming = False
+        print(f"{style.icon('🍂')}the earlier run read a snapshot with no weights; set aside as {aside}", file=out)
     base_data = next(c for c in checks if c.name == "base").data or {}
     base_hub, base_snapshot = None, base_data.get("snapshot")
     if base_data.get("needs_fetch"):
@@ -556,21 +609,30 @@ def main(argv=None, *, env=None, stdout=None, signals=None, supervisor_main=None
         # An existing run shows its last few entries first, so a resume says where it left off.
         narrator = narrate.Narrator(run_dir, style, out, replay=6 if resuming else False)
         narrator.start()
+    retried = 0
     try:
         code = supervisor_main(argv_run)
+        while code == EXIT_BLOCKED and retried < args.auto_retries:
+            reason = _block_code(run_dir)
+            if reason not in blocked.AUTO_RETRY:
+                break
+            retried += 1
+            print(f"{style.icon('🔁')}blocked: {reason}. Retrying automatically ({retried} of {args.auto_retries}) "
+                  f"after {AUTO_RETRY_WAIT_S:.0f} s.", file=out)
+            (sleep or time.sleep)(AUTO_RETRY_WAIT_S)
+            code = supervisor_main(argv_run)
     finally:
         if narrator is not None:
             narrator.stop()
+    if retried and code == EXIT_BLOCKED:
+        print(f"Still blocked after {retried} automatic retries.", file=out)
     where = run_dir / "stages" / "8" / "bundle"
     if code == EXIT_OK:
         print(lexicon.closing_line("ready-for-operator-review", style, where=str(where)), file=out)
     elif code == EXIT_ABORTED:
         print(lexicon.closing_line("aborted", style, where=str(run_dir)), file=out)
     elif code == EXIT_BLOCKED:
-        try:
-            reason = json.loads((run_dir / "blocked.json").read_text(encoding="utf-8"))["code"]
-        except (OSError, ValueError, KeyError):
-            reason = "blocked"
+        reason = _block_code(run_dir)
         print(lexicon.frost_line(reason, style) + f" See {run_dir / 'BLOCKED.md'}. Run the same command "
               "again to retry.", file=out)
         _print_block_digest(run_dir, reason, args.model, out)
