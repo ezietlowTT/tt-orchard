@@ -134,6 +134,14 @@ MAX_CODE_FILES = 60           # choice: code files listed
 MAX_CODE_DEPTH = 4            # choice: directories searched for code below the model directory
 SKIP_CODE_DIRS = {".git", ".cache", "__pycache__", "node_modules", "venv", ".venv", "site-packages"}
 ITEMSIZE = {"BF16": 2, "F16": 2, "F32": 4}
+READOUT_JSON_MAX = 256 * 1024     # choice: a small JSON file that declares an attention mode is read up to this size
+CODE_SCAN_MAX = 400 * 1024        # choice: a code file larger than this is not scanned for hints
+MAX_HINT_LINES = 8               # line numbers listed per hint
+CODE_HINTS = (("noncausal", re.compile(r"non[-_ ]?causal", re.IGNORECASE)),
+              ("causal flag", re.compile(r"is_causal\s*[=:]\s*(True|False)")),
+              ("forward hook", re.compile(r"register_forward(_pre)?_hook")),
+              ("attention mask", re.compile(r"create_\w*attention_mask|attention_mask")),
+              ("readout", re.compile(r"readout", re.IGNORECASE)))
 
 # ---- the encode test strings ----------------------------------------------------------------------
 # Each base string is used as written and with a leading space (a byte-level tokenizer encodes a
@@ -596,8 +604,6 @@ def raw_rules(raw_pairs: dict) -> list[dict]:
     already matches makes no rule. The reference loader turns these into transformers' `key_mapping` when a load misses keys."""
     tally: collections.Counter = collections.Counter()
     for m, b in raw_pairs.items():
-        if m == b:
-            continue
         ms, bs = m.split("."), b.split(".")
         k = _suffix_len(ms, bs)
         mp, bp = ms[:len(ms) - k], bs[:len(bs) - k]
@@ -808,6 +814,41 @@ def detect_restricted_head(model_dir: Path, base_dir: Path, sc: dict) -> dict:
         return best_try
     out["note"] = "no sidecar matrix has the head's width and fewer rows"
     return out
+
+
+def readout_facts(model_dir: Path, code: list[dict]) -> dict:
+    """How a head is read, from the model's own files, without running anything: small top-level JSON files that declare an
+    `attention_mode` (with their pooling, temperature and code count), and the lines of the listed code files that mention masks, hooks
+    and the readout. A line number is a place to read, not a finding: the code decides what the mask is."""
+    declared, hints, skipped = [], [], []
+    for p in sorted(model_dir.glob("*.json")):
+        try:
+            if not p.is_file() or p.stat().st_size > READOUT_JSON_MAX:
+                continue
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict) and isinstance(d.get("attention_mode"), str):
+            codes = d.get("codes")
+            declared.append({"file": p.name, "attention_mode": d["attention_mode"], "pooling": d.get("pooling"),
+                             "temperature": d.get("temperature"), "num_codes": len(codes) if isinstance(codes, list) else None})
+    for entry in code:
+        p = model_dir / entry["file"]
+        try:
+            if p.stat().st_size > CODE_SCAN_MAX:
+                skipped.append(f"{entry['file']}: over {CODE_SCAN_MAX} bytes, not scanned")
+                continue
+            lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            skipped.append(f"{entry['file']}: unreadable")
+            continue
+        for name, pattern in CODE_HINTS:
+            hit = [i + 1 for i, line in enumerate(lines) if pattern.search(line)]
+            if hit:
+                hints.append({"file": entry["file"], "hint": name, "lines": hit[:MAX_HINT_LINES], "count": len(hit)})
+    return {"declared": declared, "code_hints": hints, "skipped": skipped,
+            "note": "declared: small JSON files that state an attention_mode; code_hints: lines in the listed code files that mention it. "
+                    "Nothing was run."}
 
 
 def token_names(base_dir: Path, ids: list[int], limit: int = 400) -> list[str]:
@@ -1484,6 +1525,8 @@ def main() -> int:
     head = detect_restricted_head(model_dir, base_dir, sc)
     if head.get("restricted"):
         head["tokens"] = token_names(base_dir, head["token_ids"])
+        head["readout"] = readout_facts(model_dir, code)
+        write_json("readout-facts.json", head["readout"])
     write_json("head-compare.json", head)
     say(f"wrote evidence/head-compare.json (restricted head: {head['restricted']}; {head['note']})")
     reasons = decide_path({**c}, {**t, "head": head}) + sc["problems"]
@@ -1535,13 +1578,19 @@ def main() -> int:
                                      "evidence": [ev("value-compare.json")]})
     if head.get("restricted"):
         delta["differences"].append({"area": "other", "finding": head_finding(head), "evidence": [ev("head-compare.json")]})
-        delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json")],
+        declared = head["readout"]["declared"]
+        stated = ("; ".join(f"{d['file']} says attention_mode {d['attention_mode']!r}"
+                            + (f" and pooling {d['pooling']!r}" if d.get("pooling") else "") for d in declared)
+                  if declared else "")
+        delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json"), ev("readout-facts.json")],
                                  "finding": ("A restricted head is read in a way the nearest model's runtime may not support: the "
                                              "answers come from a few token rows, and the model's own code decides at which positions "
-                                             "they are read and under which attention mask (a runtime that keeps only the last "
-                                             "position's hidden state, or applies a causal mask, would give plausible but wrong "
-                                             "probabilities). Neither is in the weights or the config. The harness stops after "
-                                             "stage 0 on this class; read code_files before deciding.")})
+                                             "they are read and under which attention mask. "
+                                             + (f"The model's own files state it: {stated}. " if stated else "")
+                                             + "A runtime that keeps only the last position's hidden state, or applies a causal mask, "
+                                             "would give plausible but wrong probabilities. Neither is in the weights or the config. "
+                                             "The harness stops after stage 0 on this class; read code_files (code_hints in "
+                                             "evidence/readout-facts.json says where) before deciding.")})
     elif head.get("restricted") is None and sc["sidecars"]:
         delta["hazards"].append({"area": "other", "evidence": [ev("head-compare.json")],
                                  "finding": f"The restricted-head check did not run: {head['note']}. A sidecar may be a head cut down "

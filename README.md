@@ -152,7 +152,11 @@ model was `perplexity-ai/pplx-decider-v1.2`: 255 answer-code rows), the class is
 serve those models: the run stops after stage 0 with the block code `restricted-head` and says what it found, because
 how the rows are read (at marker tokens, under a different attention mask) is in the model's own code. The stage 1
 gate now compares the stage agent's `reference.json` with the reference template's own evidence, and fails a reference
-whose weights did not load.
+whose weights did not load. It also compares a stage's copy of `delta_triage.py` and `reference_gate.py` with the shipped file and fails the stage if
+they differ: on the pplx-decider run the stage agent edited its copy of the reference script, and that, not the template, is why no weights loaded.
+After a restricted-head stop an operator can ask for a measured report of whether the chips give the model's own readout the CPU's answers
+([docs/restricted-head-parity.md](docs/restricted-head-parity.md); first result: 14 of 14 answers agree, largest probability difference 0.048,
+against 0.47 for a runtime that applied a causal mask).
 
 ### Parts
 

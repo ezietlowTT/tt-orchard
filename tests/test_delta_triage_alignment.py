@@ -419,3 +419,51 @@ def test_without_a_sidecar_a_missing_lm_head_is_a_full_port(decider_case):
     tmp_path, base, new, head, ids, with_rows = decider_case
     stage, d = run(tmp_path, new, base)
     assert d["class"] == "full-port" and d["head"]["restricted"] is False
+
+
+# ---- how a restricted head is read: facts from the model's own files and code ----------------------------------------------------
+
+def test_a_json_file_that_states_an_attention_mode_is_reported(tmp_path):
+    (tmp_path / "decision_config.json").write_text(json.dumps(
+        {"attention_mode": "noncausal_full_attention", "pooling": "last", "temperature": 1.38, "codes": ["A", "B", "C"], "token_ids": [1, 2, 3]}))
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": "qwen3_5"}))              # no attention_mode: not reported
+    big = {"attention_mode": "x", "pad": "y" * (300 * 1024)}
+    (tmp_path / "huge.json").write_text(json.dumps(big))                                         # over the size cap: not read
+    out = template().readout_facts(tmp_path, [])
+    assert out["declared"] == [{"file": "decision_config.json", "attention_mode": "noncausal_full_attention", "pooling": "last",
+                                "temperature": 1.38, "num_codes": 3}]
+
+
+def test_code_hints_name_the_lines_that_say_how_attention_is_masked_and_where_the_head_is_read(tmp_path):
+    (tmp_path / "source").mkdir()
+    (tmp_path / "source" / "model.py").write_text(
+        "import torch\n"
+        "def enable_noncausal_full_attention(m):\n"
+        "    m.register_forward_pre_hook(hook, with_kwargs=True)\n"
+        "    kwargs['attention_mask'] = create_recurrent_attention_mask(config=c)\n"
+        "readout = Linear(4, 255)\n")
+    code = template().code_files(tmp_path)
+    out = template().readout_facts(tmp_path, code)
+    hints = {(h["file"], h["hint"]): h["lines"] for h in out["code_hints"]}
+    assert hints[("source/model.py", "noncausal")] == [2]
+    assert hints[("source/model.py", "forward hook")] == [3]
+    assert hints[("source/model.py", "attention mask")] == [4]
+    assert hints[("source/model.py", "readout")] == [5]
+
+
+def test_code_that_is_too_large_or_unreadable_is_not_scanned(tmp_path):
+    (tmp_path / "big.py").write_text("noncausal\n" + "x = 1\n" * 100_000)
+    code = template().code_files(tmp_path)
+    out = template().readout_facts(tmp_path, code)
+    assert out["code_hints"] == [] and any("big.py" in s for s in out["skipped"])
+
+
+def test_the_script_records_the_decision_configs_attention_mode_for_a_restricted_head(decider_case):
+    tmp_path, base, new, head, ids, with_rows = decider_case
+    (new / "decision_config.json").write_text(json.dumps({"attention_mode": "noncausal_full_attention", "pooling": "last", "temperature": 1.4,
+                                                          "codes": ["A", "B", "C"]}))
+    stage, d = run(tmp_path, with_rows(head[ids]), base)
+    assert d["class"] == "restricted-head"
+    assert d["head"]["readout"]["declared"][0]["attention_mode"] == "noncausal_full_attention"
+    hazard = next(h["finding"] for h in d["hazards"] if "restricted head" in h["finding"])
+    assert "decision_config.json" in hazard and "noncausal_full_attention" in hazard

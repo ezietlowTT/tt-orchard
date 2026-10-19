@@ -161,6 +161,15 @@ def test_a_load_that_misses_keys_is_retried_once_with_the_remap_and_both_attempt
     assert rep["pass"] is False                                                                # still not a pass: there is no lm_head
 
 
+def test_a_retry_that_does_not_help_is_not_kept(tmp_path):
+    """A remap that points the keys nowhere makes things no better: the first load stays the chosen one."""
+    snap = tiny_qwen35(tmp_path / "wrongclass3", architectures=["Qwen3_5ForCausalLM"])
+    model, rep = load(snap, remap={r"^language_model\.": "nowhere.", r"^visual\.": "nowhere."})
+    first, second = rep["attempts"]
+    assert first["chosen"] is True and second["chosen"] is False
+    assert set(first["missing_keys"]) <= set(rep["missing_keys"]) and rep["unexpected_keys"]       # the report is the first load's
+
+
 def test_a_load_that_passes_is_never_retried(headless):
     model, rep = load(headless, remap={r"^language_model\.": "model.language_model."})
     assert len(rep["attempts"]) == 1 and rep["pass"] is True

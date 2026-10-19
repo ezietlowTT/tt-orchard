@@ -1508,3 +1508,31 @@ PRs 9 and 10 merged; the UI branch `ui-operator-mode` is not a PR and is not in 
   readout (its `model.py` has not been read); a middle path that checks a restricted head against the producer's code on the host. The suite was run in
   full once at the end of this entry.
 
+## 2026-10-19 (night, later): one branch, the loader's real cause, the mask answer and the parity run (branch `make-it-work-make-it-useful`, version 0.8.1)
+Prompts (operator): "do the reference-loader and the attention mask. may as well follow that middle path. then, let's take all these PRs and branches
+and decide: we're going to go one true branch for all these changes together. 'Make it work and make it useful' branch." Later: "i accidentally ran
+tt-smi -r sorry" and "might need to re-run it before retrying and continuing".
+- The branch: local `main` (PRs 9 and 10 merged) plus `ui-operator-mode` plus `model-alignment`, merged in that order; conflicts were CLAUDE.md (log
+  entries) and the version, now 0.8.x. Nothing else carried commits `main` lacked: `autonomy` and `autonomy-keep` are the same commit, the old combined branch
+  from before the split into #9 and #10, and `main` is ahead of it (a later self-review fix, a newer tt-lang pin). The full suite on the merge passed (4514).
+  Not pushed; PRs 9 and 10 are not closed.
+- The loader, corrected: I first said the template fell back to AutoModelForCausalLM because `transformers.Qwen3_5Model` is not exported. That was wrong
+  (it is exported on both interpreters). The stage 1 agent had edited its copy of `reference_gate.py`. Fixes: both gates compare the stage's copy of
+  `delta_triage.py` / `reference_gate.py` with the shipped file; the template resolves the class from the architecture (module, then by name), retries a
+  load that misses keys once with a key_mapping from stage 0's `alignment.raw_rules`, and fails a model with no lm_head with evidence; every failure path
+  writes `evidence/summary.json`. The skills say not to edit the scripts.
+- The mask, read and measured (`docs/run-logs/2026-10-19-pplx-decider-parity.md`): only the 16 full-attention layers are bidirectional; a causal runtime
+  changes probabilities by up to 0.47 on the CPU reference, about eight times the producer's own noise. Stage 0 now records the model's declared
+  `attention_mode` and the code lines that mention masks, hooks and the readout (`evidence/readout-facts.json`).
+- The middle path, built and run: `orchard/skills/restricted-head-templates/` (`restricted_head_parity.py`, `prepare_restricted_head.py`) and
+  `docs/restricted-head-parity.md`. Host reference written from the protocol text, pinned to the producer's code by sha256, never imported. Two shims
+  during the run only: a key_mapping into the TT loader's `Qwen3_5ForCausalLM.from_pretrained` (otherwise this checkpoint loads as random weights with
+  a warning) and a wrapper that makes the prefill attention's one causal SDPA call non-causal with a mask hiding the padding. On one board: 14 of 14
+  top-1 agree, largest probability difference 0.048, marker hidden-state correlation 0.9975 or better, wiring cosine 0.987, all 16 causal calls turned. A
+  repeat after the operator's `tt-smi -r` gave identical numbers.
+- Slips: my wrong first explanation of the loader (above); `AutoProcessor` needs torchvision; the readout was first read from the directory that holds
+  only the backbone (a 3-minute boot lost); two assertions of mine ended in `or True`-style tails that could not fail and were tightened. 45 mutations over
+  the new code: 40 red first time, the five survivors got tests (the sixth anchor was a redundant guard, removed).
+- Not done: a `tt-orchard head-check` command; images, long states and 255-option questions; a 4-chip run; the bars are copied from the sidecar check, not
+  measured for this head; serving.
+
