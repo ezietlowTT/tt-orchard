@@ -8,7 +8,7 @@
 The caller holds the hardware lease (`gozer run --chips 2 ... -- timeout N python3 -m orchard.bench_session ...`). With `--url` the session
 uses a server that is already running and starts nothing; the tests use that.
 
-Phases: `gsm8k`, `humaneval` (lm-eval `humaneval_instruct`), `mbpp` (`mbpp_instruct`), `ifeval` run lm-evaluation-harness in its own venv as a
+Phases: `gsm8k`, `humaneval` (`humaneval_chat`, from orchard/lm_eval_tasks), `mbpp` (`mbpp_chat`), `ifeval` run lm-evaluation-harness in its own venv as a
 child process with a scrubbed environment (no tokens, a home inside the output directory) under the stall watcher. `bfcl` runs the
 tool-call scorer in this process. Every phase goes through a recording proxy, which adds `chat_template_kwargs` when thinking is set and
 records tokens, finish reasons and latency per request.
@@ -34,9 +34,10 @@ from .stallwatch import StallWatcher, run_watched
 HERE = Path(__file__).resolve().parent
 SWAP_TEMPLATE = HERE / "skills" / "weights-swap-templates" / "serve_and_compare.py"
 DEFAULT_LM_EVAL = Path.home() / "orchard-venvs" / "bench" / "bin" / "lm_eval"
-LM_EVAL_TASKS = {"gsm8k": "gsm8k", "humaneval": "humaneval_instruct", "mbpp": "mbpp_instruct", "ifeval": "ifeval"}
+TASKS_DIR = HERE / "lm_eval_tasks"          # humaneval_chat and mbpp_chat: the harness's own *_instruct tasks cannot score a chat reply (see the task files)
+LM_EVAL_TASKS = {"gsm8k": "gsm8k", "humaneval": "humaneval_chat", "mbpp": "mbpp_chat", "ifeval": "ifeval"}
 PHASES = tuple(LM_EVAL_TASKS) + ("bfcl",)
-CODE_TASKS = {"humaneval_instruct", "mbpp_instruct"}
+CODE_TASKS = {"humaneval_chat", "mbpp_chat"}
 BFCL_SETS = ("simple", "multiple")
 BFCL_REPO = "gorilla-llm/Berkeley-Function-Calling-Leaderboard"
 ENV_KEEP = ("PATH", "LANG", "LC_ALL", "LC_CTYPE")
@@ -46,10 +47,11 @@ TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_HUB_TOKEN")
 
 # ---- the lm-evaluation-harness child ------------------------------------------------------------------------------------------------
 
-def lm_eval_command(*, lm_eval, model: str, base_url: str, task: str, limit, concurrency: int, max_gen_toks: int, output_path) -> list[str]:
+def lm_eval_command(*, lm_eval, model: str, base_url: str, task: str, limit, concurrency: int, max_gen_toks: int, output_path, include_path) -> list[str]:
     margs = f"model={model},base_url={base_url},num_concurrent={concurrency},max_retries=1,tokenized_requests=False,timeout=3600"
     argv = [str(lm_eval), "--model", "local-chat-completions", "--model_args", margs, "--tasks", task, "--apply_chat_template",
-            "--gen_kwargs", f"max_gen_toks={max_gen_toks},temperature=0", "--output_path", str(output_path), "--log_samples"]
+            "--gen_kwargs", f"max_gen_toks={max_gen_toks},temperature=0", "--output_path", str(output_path), "--log_samples",
+            "--include_path", str(include_path)]
     if limit is not None:
         argv += ["--limit", str(limit)]
     if task == "gsm8k":
@@ -153,7 +155,7 @@ def _phase(name: str, a, *, upstream: str, served: str, out_dir: Path) -> dict:
         else:
             task = LM_EVAL_TASKS[name]
             argv = lm_eval_command(lm_eval=a.lm_eval, model=served, base_url=chat_url, task=task, limit=a.limit, concurrency=a.concurrency,
-                                   max_gen_toks=a.max_gen_toks, output_path=phase_dir / "results")
+                                   max_gen_toks=a.max_gen_toks, output_path=phase_dir / "results", include_path=TASKS_DIR)
             rec["command"] = argv
             (phase_dir / "work").mkdir(exist_ok=True)
             watched = run_watched(argv, cwd=phase_dir / "work", env=lm_eval_env(task, out_dir), log_path=phase_dir / "lm_eval.log",

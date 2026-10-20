@@ -28,7 +28,7 @@ FIX = Path(__file__).parent / "fixtures"
 
 def cmd(task="gsm8k", **kw):
     args = dict(lm_eval="/venv/bin/lm_eval", model="served", base_url="http://127.0.0.1:9/v1/chat/completions", task=task, limit=20,
-                concurrency=4, max_gen_toks=8192, output_path=Path("/out/gsm8k"))
+                concurrency=4, max_gen_toks=8192, output_path=Path("/out/gsm8k"), include_path=Path("/repo/orchard/lm_eval_tasks"))
     args.update(kw)
     return bs.lm_eval_command(**args)
 
@@ -53,6 +53,21 @@ def test_the_command_applies_the_chat_template_logs_samples_and_sets_greedy_gene
     assert flag(argv, "--output_path") == "/out/gsm8k" and flag(argv, "--limit") == "20"
 
 
+def test_the_command_points_the_harness_at_the_chat_code_tasks_in_this_repository():
+    assert flag(cmd(), "--include_path") == "/repo/orchard/lm_eval_tasks"
+
+
+def test_the_code_phases_use_the_chat_tasks_and_not_the_harnesss_prefill_tasks():
+    assert bs.LM_EVAL_TASKS["humaneval"] == "humaneval_chat" and bs.LM_EVAL_TASKS["mbpp"] == "mbpp_chat"
+    assert bs.CODE_TASKS == {"humaneval_chat", "mbpp_chat"}
+
+
+def test_the_tasks_directory_holds_the_task_definitions_the_phases_name():
+    for name in ("humaneval_chat", "mbpp_chat"):
+        assert (bs.TASKS_DIR / f"{name}.yaml").is_file()
+    assert (bs.TASKS_DIR / "code_chat_utils.py").is_file()
+
+
 def test_no_limit_means_the_whole_task():
     assert "--limit" not in cmd(limit=None)
 
@@ -60,13 +75,13 @@ def test_no_limit_means_the_whole_task():
 def test_gsm8k_uses_five_shot_examples_as_turns_and_other_tasks_do_not():
     argv = cmd("gsm8k")
     assert flag(argv, "--num_fewshot") == "5" and "--fewshot_as_multiturn" in argv
-    for task in ("humaneval_instruct", "ifeval", "mbpp_instruct"):
+    for task in ("humaneval_chat", "ifeval", "mbpp_chat"):
         argv = cmd(task)
         assert "--num_fewshot" not in argv and "--fewshot_as_multiturn" not in argv
 
 
 def test_code_tasks_confirm_the_unsafe_code_gate_and_other_tasks_do_not():
-    assert "--confirm_run_unsafe_code" in cmd("humaneval_instruct") and "--confirm_run_unsafe_code" in cmd("mbpp_instruct")
+    assert "--confirm_run_unsafe_code" in cmd("humaneval_chat") and "--confirm_run_unsafe_code" in cmd("mbpp_chat")
     assert "--confirm_run_unsafe_code" not in cmd("gsm8k") and "--confirm_run_unsafe_code" not in cmd("ifeval")
 
 
@@ -74,7 +89,7 @@ def test_the_environment_has_no_token_and_a_home_inside_the_output_directory(tmp
     for k, v in {"HF_TOKEN": "x", "HUGGING_FACE_HUB_TOKEN": "x", "GITHUB_TOKEN": "x", "ANTHROPIC_API_KEY": "x", "AWS_SECRET_ACCESS_KEY": "x",
                  "HF_HUB_OFFLINE": "1", "PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": "/home/someone"}.items():
         monkeypatch.setenv(k, v)
-    env = bs.lm_eval_env("humaneval_instruct", tmp_path)
+    env = bs.lm_eval_env("humaneval_chat", tmp_path)
     assert not {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY"} & set(env)
     assert "HF_HUB_OFFLINE" not in env                                         # the datasets must be downloadable
     assert env["HOME"].startswith(str(tmp_path)) and env["HF_HOME"].startswith(str(tmp_path))
@@ -85,7 +100,7 @@ def test_the_environment_has_no_token_and_a_home_inside_the_output_directory(tmp
 def test_the_code_eval_gate_is_set_only_for_code_tasks(tmp_path):
     assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env("gsm8k", tmp_path)
     assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env("ifeval", tmp_path)
-    assert bs.lm_eval_env("mbpp_instruct", tmp_path)["HF_ALLOW_CODE_EVAL"] == "1"
+    assert bs.lm_eval_env("mbpp_chat", tmp_path)["HF_ALLOW_CODE_EVAL"] == "1"
 
 
 # ---- reading the harness's results --------------------------------------------------------------------------------------------------
