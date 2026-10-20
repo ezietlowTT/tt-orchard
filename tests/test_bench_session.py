@@ -475,3 +475,10 @@ def test_the_tool_call_phase_without_a_data_directory_is_refused_before_anything
     with pytest.raises(SystemExit):
         bs.main(["--label", "t", "--url", f"http://127.0.0.1:{harness['server'].port}", "--out-dir", str(out), "--phases", "bfcl"])
     assert harness["server"].seen == [] and not (out / "summary.json").exists()
+
+
+def test_a_session_gives_the_harness_the_task_directory_of_this_repository(harness):
+    run_session(harness, "gsm8k")
+    logged = json.loads((harness["tmp"] / "argv.jsonl").read_text().splitlines()[0])
+    argv = logged["argv"]
+    assert argv[argv.index("--include_path") + 1] == str(bs.TASKS_DIR) and bs.TASKS_DIR.is_dir()
