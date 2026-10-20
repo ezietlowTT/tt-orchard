@@ -1,0 +1,462 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Tenstorrent USA, Inc.
+"""The benchmark session driver (orchard/bench_session.py): one model, one server, several phases, one summary.
+
+Nothing here touches a chip or the network. The server is a stdlib fake, `lm_eval` is a small script that posts one request through the
+proxy and writes a results file in the layout the real harness wrote (tests/fixtures/lm_eval/results_sample.json is a trimmed real one).
+"""
+from __future__ import annotations
+
+import json
+import os
+import stat
+import subprocess
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+from orchard import bench_session as bs
+
+FIX = Path(__file__).parent / "fixtures"
+
+
+# ---- the lm_eval command and its environment ---------------------------------------------------------------------------------------
+
+def cmd(task="gsm8k", **kw):
+    args = dict(lm_eval="/venv/bin/lm_eval", model="served", base_url="http://127.0.0.1:9/v1/chat/completions", task=task, limit=20,
+                concurrency=4, max_gen_toks=8192, output_path=Path("/out/gsm8k"))
+    args.update(kw)
+    return bs.lm_eval_command(**args)
+
+
+def flag(argv, name):
+    return argv[argv.index(name) + 1]
+
+
+def test_the_command_names_the_chat_api_model_the_proxy_url_and_the_task():
+    argv = cmd()
+    assert argv[0] == "/venv/bin/lm_eval" and flag(argv, "--model") == "local-chat-completions" and flag(argv, "--tasks") == "gsm8k"
+    margs = dict(kv.split("=", 1) for kv in flag(argv, "--model_args").split(","))
+    assert margs["model"] == "served" and margs["base_url"] == "http://127.0.0.1:9/v1/chat/completions"
+    assert margs["num_concurrent"] == "4" and margs["tokenized_requests"] == "False"
+    assert int(margs["timeout"]) >= 1800 and margs["max_retries"] == "1"
+
+
+def test_the_command_applies_the_chat_template_logs_samples_and_sets_greedy_generation():
+    argv = cmd()
+    assert "--apply_chat_template" in argv and "--log_samples" in argv
+    assert flag(argv, "--gen_kwargs") == "max_gen_toks=8192,temperature=0"
+    assert flag(argv, "--output_path") == "/out/gsm8k" and flag(argv, "--limit") == "20"
+
+
+def test_no_limit_means_the_whole_task():
+    assert "--limit" not in cmd(limit=None)
+
+
+def test_gsm8k_uses_five_shot_examples_as_turns_and_other_tasks_do_not():
+    argv = cmd("gsm8k")
+    assert flag(argv, "--num_fewshot") == "5" and "--fewshot_as_multiturn" in argv
+    for task in ("humaneval_instruct", "ifeval", "mbpp_instruct"):
+        argv = cmd(task)
+        assert "--num_fewshot" not in argv and "--fewshot_as_multiturn" not in argv
+
+
+def test_code_tasks_confirm_the_unsafe_code_gate_and_other_tasks_do_not():
+    assert "--confirm_run_unsafe_code" in cmd("humaneval_instruct") and "--confirm_run_unsafe_code" in cmd("mbpp_instruct")
+    assert "--confirm_run_unsafe_code" not in cmd("gsm8k") and "--confirm_run_unsafe_code" not in cmd("ifeval")
+
+
+def test_the_environment_has_no_token_and_a_home_inside_the_output_directory(tmp_path, monkeypatch):
+    for k, v in {"HF_TOKEN": "x", "HUGGING_FACE_HUB_TOKEN": "x", "GITHUB_TOKEN": "x", "ANTHROPIC_API_KEY": "x", "AWS_SECRET_ACCESS_KEY": "x",
+                 "HF_HUB_OFFLINE": "1", "PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": "/home/someone"}.items():
+        monkeypatch.setenv(k, v)
+    env = bs.lm_eval_env("humaneval_instruct", tmp_path)
+    assert not {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "GITHUB_TOKEN", "ANTHROPIC_API_KEY", "AWS_SECRET_ACCESS_KEY"} & set(env)
+    assert "HF_HUB_OFFLINE" not in env                                         # the datasets must be downloadable
+    assert env["HOME"].startswith(str(tmp_path)) and env["HF_HOME"].startswith(str(tmp_path))
+    assert env["PATH"] == "/usr/bin" and env["LANG"] == "C.UTF-8"
+    assert env["HF_ALLOW_CODE_EVAL"] == "1"
+
+
+def test_the_code_eval_gate_is_set_only_for_code_tasks(tmp_path):
+    assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env("gsm8k", tmp_path)
+    assert "HF_ALLOW_CODE_EVAL" not in bs.lm_eval_env("ifeval", tmp_path)
+    assert bs.lm_eval_env("mbpp_instruct", tmp_path)["HF_ALLOW_CODE_EVAL"] == "1"
+
+
+# ---- reading the harness's results --------------------------------------------------------------------------------------------------
+
+def sample_dir(tmp_path):
+    d = tmp_path / "res" / "served"
+    d.mkdir(parents=True)
+    (d / "results_2026-10-19T16-19-54.808021.json").write_text((FIX / "lm_eval" / "results_sample.json").read_text())
+    return tmp_path / "res"
+
+
+def test_results_give_each_metric_with_its_filter_value_stderr_and_the_sample_counts(tmp_path):
+    got = bs.parse_lm_eval_results(sample_dir(tmp_path))
+    gsm = got["tasks"]["gsm8k"]
+    assert gsm["version"] == 3.0 and gsm["n_samples"] == {"original": 1319, "effective": 5}
+    assert {"metric": "exact_match", "filter": "flexible-extract", "value": 0.0, "stderr": 0.0} in gsm["metrics"]
+    ife = got["tasks"]["ifeval"]
+    strict = next(m for m in ife["metrics"] if m["metric"] == "prompt_level_strict_acc")
+    assert strict["filter"] == "none" and strict["value"] == 0.2 and strict["stderr"] == 0.2
+    assert got["lm_eval_version"] == "0.4.13" and got["total_evaluation_time_seconds"] is not None
+
+
+def test_a_stderr_of_n_a_is_none(tmp_path):
+    ife = bs.parse_lm_eval_results(sample_dir(tmp_path))["tasks"]["ifeval"]
+    inst = next(m for m in ife["metrics"] if m["metric"] == "inst_level_strict_acc")
+    assert inst["stderr"] is None and inst["value"] == 0.25
+
+
+def test_name_and_alias_and_sample_len_are_not_metrics(tmp_path):
+    for task in bs.parse_lm_eval_results(sample_dir(tmp_path))["tasks"].values():
+        assert not {"name", "alias", "sample_len"} & {m["metric"] for m in task["metrics"]}
+
+
+def test_no_metric_is_a_standard_error_entry_and_text_values_are_not_metrics(tmp_path):
+    root = sample_dir(tmp_path)
+    path = next((root / "served").glob("results_*.json"))
+    data = json.loads(path.read_text())
+    data["results"]["gsm8k"]["note,none"] = "a text value"
+    path.write_text(json.dumps(data))
+    for task in bs.parse_lm_eval_results(root)["tasks"].values():
+        assert not [m for m in task["metrics"] if m["metric"].endswith("_stderr")]
+        assert all(isinstance(m["value"], (int, float)) for m in task["metrics"])
+    assert "note" not in {m["metric"] for m in bs.parse_lm_eval_results(root)["tasks"]["gsm8k"]["metrics"]}
+
+
+def test_the_newest_results_file_is_read_when_there_are_several(tmp_path):
+    root = sample_dir(tmp_path)
+    old = root / "served" / "results_2026-10-19T10-00-00.000000.json"
+    data = json.loads((FIX / "lm_eval" / "results_sample.json").read_text())
+    data["lm_eval_version"] = "old"
+    old.write_text(json.dumps(data))
+    assert bs.parse_lm_eval_results(root)["lm_eval_version"] == "0.4.13"
+
+
+def test_no_results_file_is_an_error_that_names_the_directory(tmp_path):
+    with pytest.raises(FileNotFoundError, match=str(tmp_path)):
+        bs.parse_lm_eval_results(tmp_path)
+
+
+# ---- a whole session against a fake server and a fake harness ------------------------------------------------------------------------
+
+class FakeServer:
+    def __init__(self):
+        self.seen = []
+        self.fail = False
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, payload):
+                raw = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
+            def do_GET(self):
+                self._send({"data": [{"id": "fake-served"}]})
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                outer.seen.append(body)
+                if outer.fail:
+                    raw = b'{"error": {"message": "down"}}'
+                    self.send_response(500)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                if body.get("tools"):
+                    fn = body["tools"][0]["function"]
+                    args = {"base": 10, "height": 5} if "triangle" in fn["name"] else {"x": 4, "y": 5} if "hypot" in fn["name"] else {"number": 5}
+                    msg = {"role": "assistant", "content": None, "tool_calls": [{"id": "1", "type": "function", "function": {"name": fn["name"], "arguments": json.dumps(args)}}]}
+                else:
+                    msg = {"role": "assistant", "content": "ok"}
+                self._send({"choices": [{"finish_reason": "stop", "message": msg}], "usage": {"prompt_tokens": 5, "completion_tokens": 4}})
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.port = self.srv.server_address[1]
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.srv.shutdown()
+        self.srv.server_close()
+
+
+FAKE_LM_EVAL = r'''#!%(python)s
+import json, sys, os, http.client, urllib.parse
+a = sys.argv[1:]
+def flag(n): return a[a.index(n) + 1]
+margs = dict(kv.split("=", 1) for kv in flag("--model_args").split(","))
+u = urllib.parse.urlsplit(margs["base_url"])
+c = http.client.HTTPConnection(u.hostname, u.port, timeout=10)
+c.request("POST", u.path, json.dumps({"model": margs["model"], "messages": [{"role": "user", "content": "q"}]}), {"Content-Type": "application/json"})
+c.getresponse().read()
+here = os.path.dirname(os.path.abspath(__file__))
+open(here + "/argv.jsonl", "a").write(json.dumps({"argv": a, "home": os.environ.get("HOME"), "token": os.environ.get("HF_TOKEN")}) + "\n")
+out = flag("--output_path")
+task = flag("--tasks")
+if os.path.exists(here + "/fail"):
+    print("boom"); sys.exit(1)
+os.makedirs(out + "/" + margs["model"], exist_ok=True)
+json.dump({"results": {task: {"alias": task, "acc,none": 0.5, "acc_stderr,none": 0.1}}, "versions": {task: 1.0}, "n-samples": {task: {"original": 100, "effective": 2}},
+           "n-shot": {task: 0}, "config": {"model": "local-chat-completions", "limit": 2, "gen_kwargs": {}}, "lm_eval_version": "9.9.9",
+           "model_name_sanitized": margs["model"], "total_evaluation_time_seconds": "1.5"}, open(out + "/" + margs["model"] + "/results_2026-01-01T00-00-00.000000.json", "w"))
+'''
+
+
+@pytest.fixture
+def harness(tmp_path, monkeypatch):
+    fake = tmp_path / "lm_eval"
+    fake.write_text(FAKE_LM_EVAL % {"python": sys.executable})
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("HF_TOKEN", "hf_should_not_reach_the_child")
+    server = FakeServer()
+    yield {"lm_eval": fake, "server": server, "tmp": tmp_path}
+    server.close()
+
+
+def run_session(h, phases, **kw):
+    out = h["tmp"] / "out"
+    argv = ["--label", "t", "--url", f"http://127.0.0.1:{h['server'].port}", "--out-dir", str(out), "--lm-eval", str(h["lm_eval"]), "--phases", phases,
+            "--bfcl-dir", str(FIX / "bfcl"), "--limit", "2", "--concurrency", "2", "--quiet-s", "30"]
+    for k, v in kw.items():
+        argv += [f"--{k.replace('_', '-')}", str(v)]
+    code = bs.main(argv)
+    return code, out
+
+
+def test_a_session_runs_each_phase_and_writes_one_summary(harness):
+    code, out = run_session(harness, "gsm8k,bfcl")
+    assert code == 0
+    s = json.loads((out / "summary.json").read_text())
+    assert [p["name"] for p in s["phases"]] == ["gsm8k", "bfcl"]
+    g, b = s["phases"]
+    assert g["ok"] is True and g["scores"]["tasks"]["gsm8k"]["metrics"][0]["value"] == 0.5
+    assert g["proxy"]["requests"] == 1 and g["proxy"]["completion_tokens_total"] == 4
+    assert b["ok"] is True and b["scores"]["simple"]["n"] == 2 and b["scores"]["multiple"]["n"] == 2 and b["scores"]["simple"]["score"] == 1.0
+    assert s["served_name"] == "fake-served" and s["label"] == "t"
+
+
+def test_the_summary_records_what_makes_two_runs_comparable(harness):
+    code, out = run_session(harness, "gsm8k", thinking="off", max_gen_toks=1234)
+    s = json.loads((out / "summary.json").read_text())
+    assert s["settings"]["thinking"] == "off" and s["settings"]["limit"] == 2 and s["settings"]["concurrency"] == 2
+    assert s["settings"]["max_gen_toks"] == 1234 and s["settings"]["seed"] == 0
+    assert s["lm_eval_version"] == "9.9.9"
+
+
+def test_thinking_off_reaches_the_server_for_the_harness_and_for_the_tool_call_phase(harness):
+    run_session(harness, "gsm8k,bfcl", thinking="off")
+    assert harness["server"].seen and all(b["chat_template_kwargs"] == {"enable_thinking": False} for b in harness["server"].seen)
+
+
+def test_the_default_thinking_setting_adds_nothing_to_requests(harness):
+    run_session(harness, "gsm8k,bfcl")
+    assert all("chat_template_kwargs" not in b for b in harness["server"].seen)
+
+
+def test_the_harness_child_gets_the_server_through_the_proxy_not_directly(harness):
+    run_session(harness, "gsm8k")
+    logged = json.loads((harness["tmp"] / "argv.jsonl").read_text().splitlines()[0])
+    margs = dict(kv.split("=", 1) for kv in logged["argv"][logged["argv"].index("--model_args") + 1].split(","))
+    assert f":{harness['server'].port}/" not in margs["base_url"] and margs["model"] == "fake-served"
+    assert logged["token"] is None and logged["home"].startswith(str(harness["tmp"] / "out"))
+
+
+def test_a_failing_harness_marks_the_phase_failed_and_the_session_goes_on(harness):
+    (harness["tmp"] / "fail").write_text("")
+    code, out = run_session(harness, "gsm8k,bfcl")
+    s = json.loads((out / "summary.json").read_text())
+    g, b = s["phases"]
+    assert g["ok"] is False and "exit" in g["problem"] and b["ok"] is True
+    assert code == 1
+
+
+def test_a_tool_call_phase_whose_server_keeps_failing_is_marked_failed_with_the_reason(harness):
+    harness["server"].fail = True
+    code, out = run_session(harness, "bfcl", limit=3)
+    b = json.loads((out / "summary.json").read_text())["phases"][0]
+    assert b["ok"] is False and "errors in a row" in b["problem"] and code == 1
+
+
+def test_an_unknown_phase_is_refused_before_anything_runs(harness):
+    with pytest.raises(SystemExit):
+        run_session(harness, "gsm8k,nonsense")
+    assert harness["server"].seen == []
+
+
+def test_the_tool_call_phase_writes_its_own_result_files(harness):
+    code, out = run_session(harness, "bfcl")
+    for name in ("bfcl-simple.json", "bfcl-multiple.json"):
+        data = json.loads((out / "bfcl" / name).read_text())
+        assert data["n"] == 2 and data["settings"]["dataset"]
+
+
+def test_a_stalled_harness_is_stopped_and_reported(harness, tmp_path):
+    slow = tmp_path / "slow_lm_eval"
+    slow.write_text("#!/bin/sh\nsleep 600\n")
+    slow.chmod(slow.stat().st_mode | stat.S_IEXEC)
+    harness["lm_eval"] = slow
+    t0 = time.monotonic()
+    code, out = run_session(harness, "gsm8k", quiet_s=3, phase_backstop_s=60)
+    s = json.loads((out / "summary.json").read_text())
+    assert time.monotonic() - t0 < 40 and s["phases"][0]["ok"] is False and "stalled" in s["phases"][0]["problem"]
+
+
+# ---- starting and stopping the server --------------------------------------------------------------------------------------------------
+
+FAKE_RUN_SH = r'''#!/bin/bash
+# a stand-in for a bundle's run.sh: serves the fake API on --port and records its pid
+port="$2"
+echo $$ > "$PIDFILE"
+exec %(python)s - "$port" <<'PY'
+import json, sys
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def _send(self, p, status=200):
+        raw = json.dumps(p).encode(); self.send_response(status); self.send_header("Content-Length", str(len(raw))); self.end_headers(); self.wfile.write(raw)
+    def do_GET(self):
+        self._send({"data": [{"id": "from-run-sh"}]} if self.path.startswith("/v1/models") else {"ok": True})
+    def do_POST(self):
+        self.rfile.read(int(self.headers["Content-Length"])); self._send({"choices": [{"finish_reason": "stop", "message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+ThreadingHTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
+PY
+'''
+
+
+def free_port():
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
+@pytest.fixture
+def bundle(tmp_path, monkeypatch):
+    run_sh = tmp_path / "run.sh"
+    run_sh.write_text(FAKE_RUN_SH % {"python": sys.executable})
+    monkeypatch.setenv("PIDFILE", str(tmp_path / "server.pid"))
+    cache = tmp_path / "cache"
+    fake = tmp_path / "lm_eval"
+    fake.write_text(FAKE_LM_EVAL % {"python": sys.executable})
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    return {"run_sh": run_sh, "cache": cache, "tmp": tmp_path, "lm_eval": fake}
+
+
+def session_argv(b, **extra):
+    argv = ["--label", "t", "--model-id", "org/model@abc", "--run-sh", str(b["run_sh"]), "--model-dir", str(b["tmp"] / "model"), "--tt-cache", str(b["cache"]),
+            "--hf-home", str(b["tmp"] / "hf"), "--port", str(free_port()), "--out-dir", str(b["tmp"] / "out"), "--lm-eval", str(b["lm_eval"]),
+            "--phases", "bfcl", "--bfcl-dir", str(FIX / "bfcl"), "--limit", "1", "--health-timeout", "30"]
+    for k, v in extra.items():
+        argv += [f"--{k.replace('_', '-')}", str(v)]
+    return argv
+
+
+def pid_gone(pid):
+    try:
+        os.killpg(pid, 0)
+        return False
+    except ProcessLookupError:
+        return True
+
+
+def test_the_server_is_started_used_and_stopped_with_its_whole_process_group(bundle):
+    code = bs.main(session_argv(bundle))
+    pid = int((bundle["tmp"] / "server.pid").read_text())
+    assert code == 0 and pid_gone(pid)
+    s = json.loads((bundle["tmp"] / "out" / "summary.json").read_text())
+    assert s["served_name"] == "from-run-sh" and s["server_ready_s"] is not None and s["model_id"] == "org/model@abc"
+    assert s["run_sh_sha256"] and (bundle["tmp"] / "out" / "server.log").exists()
+
+
+def test_the_server_is_stopped_even_when_a_phase_raises(bundle, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("phase blew up")
+    monkeypatch.setattr(bs, "run_bfcl_phase", boom)
+    with pytest.raises(RuntimeError, match="blew up"):
+        bs.main(session_argv(bundle))
+    assert pid_gone(int((bundle["tmp"] / "server.pid").read_text()))
+
+
+def test_a_tensor_cache_with_no_marker_is_refused_before_the_server_starts(bundle):
+    bundle["cache"].mkdir()
+    (bundle["cache"] / "something").write_text("x")
+    with pytest.raises(SystemExit):
+        bs.main(session_argv(bundle))
+    assert not (bundle["tmp"] / "server.pid").exists()
+
+
+def test_an_empty_cache_gets_a_marker_naming_the_model(bundle):
+    bs.main(session_argv(bundle))
+    assert (bundle["cache"] / ".orchard-model").read_text() == "org/model@abc"
+
+
+def test_the_server_gets_the_cache_hf_home_and_the_weights_directory_in_its_environment(bundle, monkeypatch):
+    envlog = bundle["tmp"] / "env.txt"
+    bundle["run_sh"].write_text(bundle["run_sh"].read_text().replace('echo $$ > "$PIDFILE"', f'echo $$ > "$PIDFILE"; env > {envlog}'))
+    bs.main(session_argv(bundle))
+    env = dict(line.split("=", 1) for line in envlog.read_text().splitlines() if "=" in line)
+    assert env["TT_CACHE_PATH"] == str(bundle["cache"]) and env["TT_CACHE_HOME"] == str(bundle["cache"])
+    assert env["HF_HOME"] == str(bundle["tmp"] / "hf") and env["MODEL_WEIGHTS_DIR"] == str(bundle["tmp"] / "model") and env["HF_MODEL"] == str(bundle["tmp"] / "model")
+    assert env["HF_HUB_OFFLINE"] == "1"
+
+
+def test_the_operators_hugging_face_token_does_not_reach_the_server(bundle, monkeypatch):
+    envlog = bundle["tmp"] / "env2.txt"
+    bundle["run_sh"].write_text(bundle["run_sh"].read_text().replace('echo $$ > "$PIDFILE"', f'echo $$ > "$PIDFILE"; env > {envlog}'))
+    monkeypatch.setenv("HF_TOKEN", "hf_secret_value")
+    monkeypatch.setenv("HUGGING_FACE_HUB_TOKEN", "hf_secret_value")
+    bs.main(session_argv(bundle))
+    text = envlog.read_text()
+    assert "hf_secret_value" not in text and "HF_TOKEN" not in text
+
+
+def test_a_server_that_exits_before_it_is_healthy_is_reported_and_stops_the_session(bundle):
+    bundle["run_sh"].write_text("#!/bin/bash\necho 'engine failed to start' >&2\nexit 3\n")
+    with pytest.raises(SystemExit):
+        bs.main(session_argv(bundle, health_timeout=10))
+
+
+def test_the_seed_is_recorded_and_picks_which_tool_call_items_are_used(harness):
+    from orchard import toolcall_bench as tb
+    pool = tb.load_items(FIX / "bfcl" / "simple_questions.jsonl", FIX / "bfcl" / "simple_answers.jsonl")
+    base = tb.choose(pool, limit=1, seed=0)[0]["id"]
+    seed = next(sd for sd in range(1, 200) if tb.choose(pool, limit=1, seed=sd)[0]["id"] != base)       # a seed that picks a different item
+    code, out = run_session(harness, "bfcl", seed=seed, limit=1)
+    assert json.loads((out / "summary.json").read_text())["settings"]["seed"] == seed
+    got = [r["id"] for r in json.loads((out / "bfcl" / "bfcl-simple.json").read_text())["items"]]
+    assert got == [tb.choose(pool, limit=1, seed=seed)[0]["id"]] and got != [base]
+
+
+def test_a_phase_that_outlives_its_backstop_is_stopped_and_reported(harness, tmp_path):
+    slow = tmp_path / "slow_lm_eval"
+    slow.write_text("#!/bin/sh\nsleep 600\n")
+    slow.chmod(slow.stat().st_mode | stat.S_IEXEC)
+    harness["lm_eval"] = slow
+    t0 = time.monotonic()
+    code, out = run_session(harness, "gsm8k", quiet_s=600, phase_backstop_s=3)
+    s = json.loads((out / "summary.json").read_text())
+    assert time.monotonic() - t0 < 40 and s["phases"][0]["ok"] is False and "backstop" in s["phases"][0]["problem"]
+
+
+def test_the_tool_call_phase_without_a_data_directory_is_refused_before_anything_runs(harness):
+    out = harness["tmp"] / "out"
+    with pytest.raises(SystemExit):
+        bs.main(["--label", "t", "--url", f"http://127.0.0.1:{harness['server'].port}", "--out-dir", str(out), "--phases", "bfcl"])
+    assert harness["server"].seen == [] and not (out / "summary.json").exists()

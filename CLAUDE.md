@@ -1551,3 +1551,22 @@ their weights fully) and comparing the decisions it makes for those 40 against t
 - Quantized copies of the base (GPTQ, FP8) are full-port in the tool and in all three labelers' second round, but all three called it medium confidence: the guide has no class for a copy
   that differs only by quantization. First-round labels for those four packets said unknown or full-port; the second round used packets with the added evidence.
 - Open: sabi-noema's dtype rule needs a hardware swap test before it is relaxed (TT casts `A_log` to float32 itself). The labelers saw packets the tool wrote, so a gap in a packet is a gap for both.
+
+## 2026-10-19 (night, later): model card benchmark plan and tooling, and a Copilot finding (version 0.8.3)
+Prompt (operator): "for these model cards, don't we want a full benchmark?" Then: "yes, write the benchmark plan and pilot on bytkim", and "don't use the HW yet".
+The plan is `docs/superpowers/plans/2026-10-19-model-card-benchmark.md`. The pilot has not run: the operator said not to use the hardware yet, so
+everything built so far needs no chip.
+- Why: the bytkim card has 32 of 32 tokens against the CPU and decode speed on four prompts whose text differed between base and fine-tune. That is no
+  evidence about the fine-tune. The plan compares base and fine-tune on the same bundle and server: GSM8K, HumanEval, IFEval, MBPP (lm-eval) and BFCL
+  `simple` and `multiple` (a scorer in this repo), plus a speed sweep over input length and concurrency.
+- Built, test first, a mutation table per module: `orchard/toolcall_bench.py` (BFCL scorer, 47 mutations), `orchard/bench_proxy.py` (adds thinking off, records
+  tokens, cut-offs and latency per request, 20 mutations), `orchard/bench_session.py` (starts a bundle's run.sh, runs the phases under the stall watcher with a
+  scrubbed environment, writes `summary.json`, 41 mutations). `tests/fixtures/bfcl` holds the first lines of the real data; `tests/fixtures/lm_eval` a trimmed real
+  results file.
+- Found while testing: the scrubbed harness environment hid the fake harness's log path, so the first session test failed for a reason that was the design working. A
+  mutation run first crashed on a mutation that hung the tests; the harness now counts a hang as detected. `lm_eval`'s plain `humaneval` cuts chat replies at stop strings
+  such as `\ndef`; the plan uses `humaneval_instruct` and `mbpp_instruct`.
+- Copilot's review of PR 11 found that `used_caches()` ignored the tensor caches that sidecar-parity and restricted-head checks keep, so `--prune-caches` could delete one
+  mid-run. Fixed in `79ddf24`: `caches.CACHE_CONFIGS` lists all three config names. Four tests were red without the change; a mutation table of 5 left no survivors. My first
+  prune test could not fail (cache sizes round to 0.0 GB for small files, so nothing was covered); it now uses sparse 2 GB files and older protected caches.
+- Not done: the pilot, a speed sweep script, the BFCL download helper, and any card change.

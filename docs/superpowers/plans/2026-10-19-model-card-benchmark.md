@@ -50,11 +50,11 @@ A comparison is reported only when all of these hold, and the result file record
 
 | Area | Task | Harness | Why |
 |---|---|---|---|
-| Coding | HumanEval (164) | lm-eval `humaneval` | Standard, small, pass@1 with execution. |
-| Coding | MBPP (500, sanitized subset if the full set is too long) | lm-eval `mbpp` | A second coding set with different problems. |
+| Coding | HumanEval (164) | lm-eval `humaneval_instruct` | The chat variant: the plain `humaneval` task cuts a chat reply at stop strings such as `\ndef`. |
+| Coding | MBPP (500, sanitized subset if the full set is too long) | lm-eval `mbpp_instruct` | A second coding set with different problems. |
 | Instruction following | IFEval (541) | lm-eval `ifeval` | Rule-checked, no judge model. |
-| Math / general reasoning | GSM8K (1,319) | lm-eval `gsm8k` | Cheap check that the fine-tune did not lose general ability. |
-| Tool calling | BFCL "simple" and "multiple" (Berkeley Function Calling Leaderboard data) | small scorer in this repo | The model is sold for agents. lm-eval has no tool-call task. |
+| Math / general reasoning | GSM8K (1,319) | lm-eval `gsm8k`, 5-shot as chat turns | Cheap check that the fine-tune did not lose general ability. |
+| Tool calling | BFCL v3 `simple` (400) and `multiple` (200), Apache-2.0, dataset revision `61fc0608cfd8` | `orchard/toolcall_bench.py` | The model is sold for agents. lm-eval has no tool-call task. |
 | General knowledge | MMLU-Pro subset | lm-eval `mmlu_pro` | Only if the pilot shows time for it. |
 
 Code execution tasks (HumanEval, MBPP) run model-written code, so they run in the bench venv inside a disposable directory with a
@@ -96,6 +96,23 @@ for a different question. Each stop writes its reason.
 - Raw per-item outputs saved beside it (redacted the way package evidence is), so a number can be recomputed.
 - Card rows cite `results.json` through the same card-numbers file the packaging used, so the package gate sees measured values.
 - The card's "not measured" list is regenerated from what was skipped.
+
+## Tooling built before the pilot (no hardware used)
+
+Status 2026-10-19. All of it is tested without a chip, and each module's guards were checked by mutation.
+
+- `orchard/toolcall_bench.py`: the BFCL scorer (50 tests, 47 mutations, none survived).
+- `orchard/bench_proxy.py`: a loopback proxy between the harness and the server. It adds `chat_template_kwargs` (thinking off), and records tokens,
+  finish reason, reasoning length and latency for each request (18 tests, 20 mutations, one equivalent survivor).
+- `orchard/bench_session.py`: starts a bundle's `run.sh` with the model's tensor cache, runs the phases `gsm8k`, `humaneval`, `mbpp`, `ifeval`
+  (lm-evaluation-harness 0.4.13 in `~/orchard-venvs/bench`, a scrubbed environment with no token and a home inside the output directory) and
+  `bfcl`, each through its own proxy under the stall watcher, stops the server's whole process group, and writes `summary.json`
+  (33 tests, 41 mutations, none survived).
+- A plumbing run of lm-eval against a fake server showed that the datasets download without a token and that the harness's results parse.
+  The 2026-10-19 run used lm-eval defaults, which are not the settings the pilot will use (chat template, 5-shot turns for GSM8K).
+
+Chosen but untested on a real server: `max_gen_toks` 8192 with thinking on. A reply that spends all of it reasoning comes back with empty
+content and `finish_reason` length. The proxy counts those (`cut_off`), and the pilot reports the count per task.
 
 ## Not decided yet
 
