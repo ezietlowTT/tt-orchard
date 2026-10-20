@@ -1570,3 +1570,17 @@ everything built so far needs no chip.
   mid-run. Fixed in `79ddf24`: `caches.CACHE_CONFIGS` lists all three config names. Four tests were red without the change; a mutation table of 5 left no survivors. My first
   prune test could not fail (cache sizes round to 0.0 GB for small files, so nothing was covered); it now uses sparse 2 GB files and older protected caches.
 - Not done: the pilot, a speed sweep script, the BFCL download helper, and any card change.
+
+## 2026-10-20 (UTC): the benchmark pilot on bytkim/Qwen3.8-27B-pi, and a broken instrument (version 0.8.4)
+Prompt (operator): "yes, write the benchmark plan and pilot on bytkim", then "don't use the HW yet", then "go". Results: `docs/run-logs/2026-10-19-bytkim-pi-benchmark-pilot.md`.
+- Eight sessions on one 2-chip board (pi and base, thinking on and off, first pass and code pass), 20 items per task, each under its own `gozer run` lease. At that size the
+  fine-tune and the base cannot be told apart on GSM8K, IFEval, BFCL, HumanEval or MBPP. Thinking off cut a session to a third of the time without a clear loss.
+- The first pass scored HumanEval 0.0 for both models. Cause (read from the stored samples, 12 of 20 replies empty): lm-eval's `humaneval_instruct` expects a prefilled
+  assistant turn and stops at `\ndef`; `mbpp_instruct` relies on the same prefill. My plan had named `humaneval_instruct` as the fix for exactly this problem, and it was not.
+  `orchard/lm_eval_tasks/` has `humaneval_chat` and `mbpp_chat`, with 41 tests and an 18-mutation table. A control server that answers with the datasets' own solutions
+  scores 1.0 and 1.0 (whole function and body-only replies) and a stub scores 0.0, on 40 items each.
+- The first control run scored 0 for every mode, because my control server left `"index": 0` out of each choice; lm-eval turns that into an empty reply with no error. A
+  score of 0 for every mode was the sign that the instrument, not the model, was wrong.
+- While the pilot ran I developed in a second worktree (`bench-code-tasks`), because the driver imports `orchard.bench_session` for each session and an edit mid-run would have
+  changed later sessions.
+- Not done: the speed sweep, drafter acceptance from `server.log` (the packaging log said none is printed; each request logs `accept x/7`), a full-size run, and the card.

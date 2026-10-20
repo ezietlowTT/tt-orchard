@@ -50,8 +50,8 @@ A comparison is reported only when all of these hold, and the result file record
 
 | Area | Task | Harness | Why |
 |---|---|---|---|
-| Coding | HumanEval (164) | lm-eval `humaneval_instruct` | The chat variant: the plain `humaneval` task cuts a chat reply at stop strings such as `\ndef`. |
-| Coding | MBPP (500, sanitized subset if the full set is too long) | lm-eval `mbpp_instruct` | A second coding set with different problems. |
+| Coding | HumanEval (164) | `humaneval_chat` (`orchard/lm_eval_tasks/`) | The harness's `humaneval_instruct` scored a chat reply as empty (prefill and stop strings); see the pilot log. |
+| Coding | MBPP (500) | `mbpp_chat` (`orchard/lm_eval_tasks/`) | A second coding set with different problems. |
 | Instruction following | IFEval (541) | lm-eval `ifeval` | Rule-checked, no judge model. |
 | Math / general reasoning | GSM8K (1,319) | lm-eval `gsm8k`, 5-shot as chat turns | Cheap check that the fine-tune did not lose general ability. |
 | Tool calling | BFCL v3 `simple` (400) and `multiple` (200), Apache-2.0, dataset revision `61fc0608cfd8` | `orchard/toolcall_bench.py` | The model is sold for agents. lm-eval has no tool-call task. |
@@ -113,6 +113,12 @@ Status 2026-10-19. All of it is tested without a chip, and each module's guards 
 
 Chosen but untested on a real server: `max_gen_toks` 8192 with thinking on. A reply that spends all of it reasoning comes back with empty
 content and `finish_reason` length. The proxy counts those (`cut_off`), and the pilot reports the count per task.
+
+## Pilot result (2026-10-20 UTC)
+
+Run on the hardware with the operator's go-ahead: `docs/run-logs/2026-10-19-bytkim-pi-benchmark-pilot.md`. At 20 items per task the fine-tune and the base cannot be told
+apart, thinking on or off. Sessions took 3 to 11 minutes. A full run is about 11 hours for both models with thinking on and about 3 hours with thinking off.
+The pilot also found that the harness's HumanEval and MBPP instruct tasks cannot score a chat reply; the chat versions in this repository replace them.
 
 ## Not decided yet
 
